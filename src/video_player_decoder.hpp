@@ -36,6 +36,30 @@ public:
 	virtual int width() const = 0;               // display size of the opened file; 0 before a successful open
 	virtual int height() const = 0;
 	virtual std::string lastError() const = 0;
+
+	// ---- Soundtrack. Optional: the defaults mean "this clip has no sound". Same thread rule as above. ----
+
+	// Opens the first audio track of the file that open() opened, converted to float samples at
+	// `sampleRate` Hz. Returns true when the clip has audio. A clip without an audio track, or one
+	// that cannot be decoded, returns false: that is silence, never an error.
+	virtual bool openAudio(double /*sampleRate*/) {
+		return false;
+	}
+	// Channels that readAudio() delivers per frame: 1 (mono) or 2 (stereo). Clips with more channels
+	// are mixed down to 2 by the decoder. 0 when there is no audio.
+	virtual int audioChannels() const {
+		return 0;
+	}
+	// Starts the audio at `seconds`, in the same time base as DecodedFrame::presentationSeconds.
+	// Returns false on failure; the audio is then silent until the next successful seek.
+	virtual bool seekAudio(double /*seconds*/) {
+		return false;
+	}
+	// Writes up to maxFrames interleaved frames (audioChannels() floats each) and returns how many
+	// it wrote. 0 at the end of the soundtrack or on error.
+	virtual int readAudio(float* /*interleaved*/, int /*maxFrames*/) {
+		return 0;
+	}
 };
 
 // true on macOS builds, false elsewhere.

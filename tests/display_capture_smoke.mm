@@ -862,6 +862,17 @@ int main() {
 
 		using namespace display_capture;
 		const std::string defaultFolder = root + "/home/Pictures/Video Research Unit";
+		CHECK(elapsedClock(0.0) == "0:00");
+		CHECK(elapsedClock(42.9) == "0:42");
+		CHECK(elapsedClock(60.0) == "1:00");
+		CHECK(elapsedClock(3599.0) == "59:59");
+		CHECK(elapsedClock(3600.0) == "1:00:00");
+		CHECK(elapsedClock(3723.0) == "1:02:03");
+		CHECK(elapsedClock(-5.0) == "0:00");
+		CHECK(recTooltipText(true, 42.0, "") == "Recording 0:42");
+		CHECK(recTooltipText(true, 42.0, "disk full") == "Recording 0:42");
+		CHECK(recTooltipText(false, 0.0, "") == "Not recording");
+		CHECK(recTooltipText(false, 0.0, "disk full") == "Recording failed: disk full");
 		CHECK(homeDirectory() == root + "/home");
 		CHECK(defaultCaptureFolder() == defaultFolder);
 		CHECK(resolveCaptureFolder("") == defaultFolder);

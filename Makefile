@@ -1,7 +1,7 @@
 RACK_DIR ?= ./Rack-SDK
 
 SLUG = VideoResearchUnit
-VERSION = 2.0.0
+VERSION = 2.1.0
 
 FLAGS += -std=c++17
 FLAGS += -Iinclude
@@ -57,7 +57,7 @@ endif
 
 DISTRIBUTABLES += $(wildcard res/*)
 DISTRIBUTABLES += docs/VIDEO-BUS.md include/vru_bus.h include/vru_bus_client.hpp include/LICENSE-MIT
-DISTRIBUTABLES += presets/VideoOsc presets/DeflectionYoke presets/LineField presets/OneVoltCvOut presets/ScopeTrace presets/ColorLab presets/Keyer presets/BusMixer presets/WaveShaper presets/FreezeFrame presets/DualLfoChaos presets/Rotator presets/Shapes presets/VideoMixer
+DISTRIBUTABLES += presets/VideoOsc presets/DeflectionYoke presets/LineField presets/OneVoltCvOut presets/ScopeTrace presets/ColorLab presets/Keyer presets/BusMixer presets/WaveShaper presets/FreezeFrame presets/DualLfoChaos presets/Rotator presets/Shapes presets/VideoMixer presets/Focus
 
 include $(RACK_DIR)/plugin.mk
 
@@ -101,6 +101,14 @@ SHAPES_TEST_SOURCES = tests/shapes_test.cpp src/video_bus.cpp src/video_graph_re
 build/shapes_test: $(SHAPES_TEST_SOURCES) $(wildcard src/*.hpp)
 	mkdir -p build
 	$(CXX) -std=c++17 -O2 -Wall -Wextra -Wno-unused-parameter -Isrc $(SHAPES_TEST_SOURCES) -pthread -o $@
+
+# Offline checks for Focus (VRU-24): each control against its tooltip, zero cost and zero change at rest, the
+# bus node, and the contact sheet. Needs no Rack SDK. Run `build/focus_test <dir> bench` for timings.
+FOCUS_TEST_SOURCES = tests/focus_test.cpp src/video_bus.cpp src/video_graph_renderer.cpp src/video_engine.cpp src/freeze_frame_store.cpp src/frame_ring.cpp src/video_external_frame.cpp src/signal_ring.cpp src/crt_beam.cpp
+
+build/focus_test: $(FOCUS_TEST_SOURCES) $(wildcard src/*.hpp)
+	mkdir -p build
+	$(CXX) -std=c++17 -O2 -Wall -Wextra -Wno-unused-parameter -Isrc $(FOCUS_TEST_SOURCES) -pthread -o $@
 
 # Offline checks for the Video Player core: source sorting, yt-dlp lookup and arguments,
 # transport state machine, status messages and saved settings. Needs no Rack SDK.
@@ -222,12 +230,13 @@ TEST_SCOPE_MODULE_DEP = build/scope_trace_module_test
 TEST_SCOPE_MODULE_RUN = DYLD_LIBRARY_PATH="$(abspath $(RACK_DIR))" ./build/scope_trace_module_test
 endif
 
-test: $(TEST_OCT_MODULE_DEP) $(TEST_SCOPE_MODULE_DEP) build/octoscillator_test build/bus_test build/shapes_test build/demo_patch_render_test build/video_player_test build/video_player_engine_test build/vru_bus_api_test build/vru_bus_dylib_test $(API_TEST_DYLIB) $(TEST_SYPHON_DEP) $(TEST_DISPLAY_DEP)
+test: $(TEST_OCT_MODULE_DEP) $(TEST_SCOPE_MODULE_DEP) build/octoscillator_test build/bus_test build/shapes_test build/focus_test build/demo_patch_render_test build/video_player_test build/video_player_engine_test build/vru_bus_api_test build/vru_bus_dylib_test $(API_TEST_DYLIB) $(TEST_SYPHON_DEP) $(TEST_DISPLAY_DEP)
 	./build/octoscillator_test
 	$(TEST_OCT_MODULE_RUN)
 	$(TEST_SCOPE_MODULE_RUN)
 	./build/bus_test $(TEST_PROOF_DIR)
 	./build/shapes_test $(TEST_PROOF_DIR)
+	./build/focus_test $(TEST_PROOF_DIR)
 	./build/demo_patch_render_test
 	./build/video_player_test
 	./build/video_player_engine_test

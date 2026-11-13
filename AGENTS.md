@@ -46,6 +46,7 @@ output ids and the `rasterlab_panel` namespace are as in the source.
 | VRU–21 | Shapes | `Shapes` |
 | VRU–22 | Video Mixer | `VideoMixer` |
 | VRU–23 | Octoscillator | `Octoscillator` |
+| VRU–24 | Focus | `Focus` |
 
 ## Current Modules
 
@@ -74,6 +75,7 @@ output ids and the `rasterlab_panel` namespace are as in the source.
 - `VRU–22 Video Mixer`: takes up to four pictures (A to D) plus optional PATTERN, KEY and MATTE buses and publishes one picture on its own allocated bus. Which input is live, which is next and how far the lever has come up is decided in `process()` (`video_mixer_math.hpp`, `VideoMixerState`); the tint, dissolve/add/wipe and key maths is in the renderer (`renderVideoMixerFrame`). Its 30 HP panel is laid out in docs/architecture.md, "Video Mixer".
 
 - `VRU–23 Octoscillator`: CV-only eight-channel Lorenz motion source with 24 mono XYZ outputs, shared/local relationship blend, local rate/depth/offset and global speed/spread/level/range. No video bus.
+- `VRU–24 Focus`: one bus in, one bus out. FOCUS (all-direction soften, up to 6% of the width), SMEAR (horizontal, mostly trailing, up to 15%), SHARP (unsharp mask), CONVERGE (red and blue slid apart, up to 3%) and MIX, each with a CV jack and a CV AMT trimmer. The knobs ride the bus as `FocusParams` (node type `Focus`); the pixel work is `renderFocusFrame` in the renderer using the running-sum filters in `src/focus_filter.hpp`. Zero effect swaps the source through. Tested by `tests/focus_test.cpp`.
 
 Each video module owns a bus id (1-64) allocated per instance; cables carry the id as voltage. Unpatched processor inputs read bus 1.
 
@@ -131,7 +133,7 @@ The local workspace may also keep `Rack-SDK/` in the project root. The SDK,
 
 ## Release State
 
-- Source version: `2.0.0`, the first public release (23 modules, VRU–01 to VRU–23). Rack 2 requires a plugin's major version to be 2.
+- Source version: `2.1.0` (24 modules, VRU–01 to VRU–24). It adds Focus, gives the Video Player L and R audio outputs, makes the Video Player and Display hold the last picture, and renames two internal module slugs (Wobbulator to DeflectionYoke, RuttEtra to ScanProcessor; `scripts/migrate-slug.py` migrates patches saved with 2.0.0). The first public release was `2.0.0` (23 modules). Rack 2 requires a plugin's major version to be 2.
 - Build with `DEVELOPER_DIR=/Library/Developer/CommandLineTools` if the selected Xcode toolchain fails.
 
 ## Next Good Moves

@@ -36,6 +36,7 @@ enum class VideoBusNodeType : int {
 	Rotator = 15,
 	Shapes = 16,
 	VideoMixer = 17,
+	Focus = 18,
 };
 
 // Plain-old-data node stored in a bus. Must stay trivially copyable: it is copied word by word
@@ -61,6 +62,7 @@ struct VideoBusNode {
 	RotatorParams rotator;
 	ShapesParams shapes;
 	VideoMixerParams videoMixer;
+	FocusParams focus;
 };
 
 // Publishing (audio thread, owner of busId only). Each call replaces the whole node.
@@ -80,7 +82,9 @@ void videoBusClear(int busId);
 
 // Reading (any thread). Returns a consistent snapshot. False when the bus is empty.
 bool videoBusRead(int busId, VideoParams& params);
-bool videoBusReadNode(int busId, VideoBusNode& node);
+// False when the bus is empty. With `contended`, a false that came only from the writer interrupting
+// every attempt (not from an empty bus) sets *contended, so a caller can keep its last picture.
+bool videoBusReadNode(int busId, VideoBusNode& node, bool* contended = nullptr);
 bool videoBusIsActive(int busId);
 
 // Bus id allocation (UI/construction thread only).
@@ -125,3 +129,4 @@ void videoBusPublishRotator(int busId, int sourceBusId, const RotatorParams& par
 void videoBusPublishShapes(int busId, const ShapesParams& params);
 // The Video Mixer reads its four pictures, pattern, key and matte buses from the params (0 = absent).
 void videoBusPublishVideoMixer(int busId, const VideoMixerParams& params);
+void videoBusPublishFocus(int busId, int sourceBusId, const FocusParams& params);

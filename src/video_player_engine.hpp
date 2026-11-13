@@ -1,5 +1,6 @@
 #pragma once
 
+#include "video_player_audio.hpp"
 #include "video_player_core.hpp"
 #include "video_player_decoder.hpp"
 
@@ -41,6 +42,10 @@ struct EngineOptions {
 	std::vector<std::string> ytDlpDirs;
 	// Empty: the AVFoundation decoder on macOS (and a decoder that always fails elsewhere).
 	FrameSourceFactory factory;
+	// The soundtrack follows the picture clock. When the sound drifts further than this from it
+	// (seconds), the worker realigns it. Tests that drive the audio faster than real time turn the
+	// check off with a large value.
+	double audioDriftSeconds = 0.08;
 	// Called on the worker thread after each frame goes out. Tests use it to watch the frame rhythm.
 	std::function<void(const DecodedFrame&)> onFramePublished;
 };
@@ -107,6 +112,23 @@ public:
 	// 0.25 to 2.0, where 1.0 is normal speed.
 	void setSpeed(float speed) {
 		speed_.store(speed < 0.25f ? 0.25f : (speed > 2.f ? 2.f : speed), std::memory_order_relaxed);
+	}
+	// The engine's sample rate in Hz. Call it from process() every sample or whenever it changes;
+	// the worker reopens the soundtrack at the new rate.
+	void setAudioSampleRate(float sampleRate) {
+		audioRate_.store(sampleRate, std::memory_order_relaxed);
+	}
+	// The soundtrack, one frame per call, in -1..1 (the module scales it to +-5 V). Silence while
+	// paused or stopped, with no soundtrack, with nothing decoded yet, and at speed 0. Follows SPEED
+	// by resampling, so 2x is faster and higher. Fades a few ms when starting, stopping and
+	// realigning, so there is no click. Never locks or allocates.
+	void audioFrame(float& left, float& right) {
+		audioReader_.tick(*audioRing_, audioActive_.load(std::memory_order_relaxed),
+			speed_.load(std::memory_order_relaxed), audioRate_.load(std::memory_order_relaxed), left, right);
+	}
+	// Times the soundtrack could not keep up (the ring ran dry while playing).
+	uint64_t audioUnderruns() const {
+		return audioRing_->underruns();
 	}
 	bool hasFrame() const {
 		return hasFrame_.load(std::memory_order_relaxed);
@@ -183,6 +205,16 @@ private:
 	void clearOutput();
 	void publishSnapshot(bool force);
 
+	// Soundtrack, worker thread.
+	void audioOpenForSource();
+	// Starts the sound again at `localAt` seconds into the clip, which sits at `timelineAt` on the
+	// playback timeline. What is queued is faded out and replaced.
+	void audioRealign(double timelineAt, double localAt);
+	void audioStartPlayback();
+	bool audioFill();
+	void audioKeepInSync();
+	void audioStop();
+
 	// ---- Shared between threads, guarded by mutex_ ----
 	mutable std::mutex mutex_;
 	std::condition_variable cv_;
@@ -205,6 +237,10 @@ private:
 	std::atomic<bool> hasFrame_{false};
 	std::atomic<bool> playing_{false};
 	std::atomic<uint32_t> endCount_{0};
+	std::atomic<float> audioRate_{48000.f};
+	std::atomic<bool> audioActive_{false};
+	std::unique_ptr<AudioRing> audioRing_;
+	AudioReader audioReader_;  // audio thread only
 
 	// ---- Worker thread only ----
 	const int frameId_;
@@ -254,6 +290,20 @@ private:
 	int passFrames_ = 0;
 	double frameDur_ = 1.0 / 30.0;
 	double presentedLocal_ = 0.0;
+
+	// Soundtrack state (worker thread).
+	bool audioOpen_ = false;
+	bool audioPrimed_ = false;
+	bool audioAtEnd_ = false;
+	int audioChannels_ = 0;
+	double audioOpenRate_ = 0.0;
+	double audioOffset_ = 0.0;     // timeline time minus clip-local time of the sound
+	double audioHeadLocal_ = 0.0;  // clip-local time of the next sample to decode
+	Clock::time_point audioLastRealign_;
+	std::vector<float> audioRaw_;
+	std::vector<float> audioStereo_;
+	// Timeline offset (pass start) of the frame on screen.
+	double presentOffset_ = 0.0;
 
 	// Declared last so the thread starts after every other member exists.
 	std::thread thread_;

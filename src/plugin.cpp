@@ -56,6 +56,7 @@ void init(Plugin* p) {
 	p->addModel(modelDualLfoChaos);
 	p->addModel(modelOneVoltCvOut);
 	p->addModel(modelRotator);
+	p->addModel(modelFocus);
 	p->addModel(modelShapes);
 	p->addModel(modelVideoMixer);
 	p->addModel(modelOctoscillator);

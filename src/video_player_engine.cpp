@@ -40,6 +40,12 @@ constexpr int kNoticeSeconds = 8;
 // A seek that finds no frame (the video track can end before the file's duration) is tried again
 // this many times in all, each time further back, before the engine goes back to the start.
 constexpr int kSeekAttempts = 5;
+constexpr std::size_t kAudioRingFrames = 1u << 17;
+constexpr int kAudioChunkFrames = 4096;
+// How much sound the worker keeps queued ahead of the audio thread, in seconds of ring frames.
+constexpr double kAudioAheadSeconds = 0.5;
+// Least time between two drift corrections.
+constexpr double kAudioResyncGapSeconds = 0.5;
 
 std::string trimText(const std::string& text) {
 	const char* space = " \t\r\n";
@@ -164,6 +170,11 @@ Engine::Engine(int externalFrameId, const EngineOptions& options)
 	}
 	lastSnapshot_ = Clock::now();
 	anchorWall_ = lastSnapshot_;
+	audioLastRealign_ = lastSnapshot_;
+	// 2^17 frames: 2.7 s at 48 kHz. The worker keeps about half a second of it filled.
+	audioRing_.reset(new AudioRing(kAudioRingFrames));
+	audioRaw_.assign(static_cast<std::size_t>(kAudioChunkFrames) * 2u, 0.f);
+	audioStereo_.assign(static_cast<std::size_t>(kAudioChunkFrames) * 2u, 0.f);
 	thread_ = std::thread([this] { run(); });
 }
 
@@ -381,8 +392,13 @@ std::chrono::microseconds Engine::step() {
 
 	if (state_ == TransportState::Playing) {
 		publishSnapshot(false);
+		audioKeepInSync();
+		if (audioFill()) {
+			worked = true;
+		}
 	}
 	playing_.store(state_ == TransportState::Playing, std::memory_order_relaxed);
+	audioActive_.store(state_ == TransportState::Playing && audioOpen_ && audioPrimed_, std::memory_order_relaxed);
 
 	if (worked) {
 		return std::chrono::microseconds(0);
@@ -483,11 +499,14 @@ void Engine::loadSource(bool youtube, const std::string& text) {
 		fail(msgDecodeFailed(path));
 		return;
 	}
+	// The soundtrack is opened after the first picture, so a clip that cannot be shown never opens it.
+	audioOpenForSource();
 	state_ = transportStep(state_, TransportEvent::Loaded, false).next;
 	pausedMedia_ = 0.0;
 	publishFrame(ring_.front().frame);
 	ring_.front().published = true;
 	presentedLocal_ = ring_.front().localPts;
+	presentOffset_ = ring_.front().pts - ring_.front().localPts;
 	message_.clear();
 	messageIsError_ = false;
 	publishSnapshot(true);
@@ -707,6 +726,9 @@ void Engine::enterError(const std::string& message) {
 }
 
 void Engine::unloadSource() {
+	audioStop();
+	audioOpen_ = false;
+	audioChannels_ = 0;
 	flushRing();
 	passEnds_.clear();
 	pool_.clear();
@@ -764,7 +786,11 @@ void Engine::applyEvent(TransportEvent event) {
 		return;  // restartFromBeginning left the engine in the Error state
 	}
 	if (state_ == TransportState::Playing) {
+		audioStartPlayback();  // before the clock starts, so the sound is ready when it does
 		startClock();
+	}
+	else {
+		audioStop();
 	}
 	playing_.store(state_ == TransportState::Playing, std::memory_order_relaxed);
 	publishSnapshot(true);
@@ -833,6 +859,7 @@ void Engine::handleSeek() {
 		publishFrame(first.frame);
 		first.published = true;
 		presentedLocal_ = first.localPts;
+		presentOffset_ = first.pts - first.localPts;
 		pausedMedia_ = first.pts;
 	} else if (!restartFromBeginning()) {
 		return;  // restartFromBeginning left the engine in the Error state
@@ -840,6 +867,7 @@ void Engine::handleSeek() {
 
 	state_ = wasPlaying ? TransportState::Playing : TransportState::Paused;
 	if (wasPlaying) {
+		audioStartPlayback();  // realigns the sound to the new spot
 		startClock();
 	}
 	playing_.store(wasPlaying, std::memory_order_relaxed);
@@ -866,6 +894,7 @@ bool Engine::restartFromBeginning() {
 	publishFrame(ring_.front().frame);
 	ring_.front().published = true;
 	presentedLocal_ = ring_.front().localPts;
+	presentOffset_ = ring_.front().pts - ring_.front().localPts;
 	return true;
 }
 
@@ -996,6 +1025,7 @@ void Engine::resetTimeline() {
 	prevLocalPts_ = 0.0;
 	passFrames_ = 0;
 	presentedLocal_ = 0.0;
+	presentOffset_ = 0.0;
 }
 
 // Shows the newest frame that is due and drops the older ones. Frames of the next trip through
@@ -1033,6 +1063,7 @@ void Engine::present() {
 		publishFrame(latest.frame);
 	}
 	presentedLocal_ = latest.localPts;
+	presentOffset_ = latest.pts - latest.localPts;
 	recycle(std::move(latest.frame));
 }
 
@@ -1060,6 +1091,7 @@ bool Engine::checkEnd() {
 		pausedMedia_ = end.endTimeline;
 		presentedLocal_ = end.endTimeline - end.startTimeline;
 		playing_.store(false, std::memory_order_relaxed);
+		audioStop();
 		publishSnapshot(true);
 		return false;
 	}
@@ -1067,7 +1099,138 @@ bool Engine::checkEnd() {
 		// Loop was switched on after the decoder had already stopped at the end. Rewind now.
 		wrapDecoder();
 	}
+	// The sound wraps with the picture: it starts again from the top of the clip, with a short fade.
+	audioRealign(end.endTimeline, 0.0);
+	presentOffset_ = end.endTimeline;
 	return true;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Worker thread: soundtrack
+
+// Opens the soundtrack of the file that is open, at the engine's sample rate. No audio track is not
+// an error: the module is silent.
+void Engine::audioOpenForSource() {
+	audioOpen_ = false;
+	audioPrimed_ = false;
+	audioAtEnd_ = true;
+	audioChannels_ = 0;
+	if (!source_) {
+		return;
+	}
+	const double rate = audioRate_.load(std::memory_order_relaxed);
+	audioOpenRate_ = rate;
+	if (!source_->openAudio(rate)) {
+		return;
+	}
+	const int channels = source_->audioChannels();
+	if (channels < 1 || channels > 2) {
+		return;
+	}
+	audioChannels_ = channels;
+	audioOpen_ = true;
+	audioAtEnd_ = false;
+}
+
+// Moves the sound to `localAt` seconds into the clip, which is `timelineAt` on the playback timeline,
+// and queues the first stretch of it. The audio thread fades out what it was playing and jumps.
+void Engine::audioRealign(double timelineAt, double localAt) {
+	if (!audioOpen_ || !source_ || state_ != TransportState::Playing) {
+		return;
+	}
+	const double rate = audioRate_.load(std::memory_order_relaxed);
+	if (rate != audioOpenRate_) {
+		audioOpenRate_ = rate;
+		if (!source_->openAudio(rate)) {
+			audioOpen_ = false;
+			audioPrimed_ = false;
+			audioRing_->flush();
+			return;
+		}
+	}
+	if (localAt < 0.0) {
+		localAt = 0.0;
+	}
+	audioLastRealign_ = Clock::now();
+	audioOffset_ = timelineAt - localAt;
+	audioHeadLocal_ = localAt;
+	audioAtEnd_ = !source_->seekAudio(clipFirstPts_ + localAt);
+	audioRing_->flush();
+	// Queue the first stretch now, so the sound starts with the clock rather than a moment after it.
+	audioFill();
+	audioPrimed_ = true;
+}
+
+// Called as playback starts or restarts from a new spot: from pausedMedia_ on the timeline.
+void Engine::audioStartPlayback() {
+	if (!audioOpen_) {
+		return;
+	}
+	audioPrimed_ = false;
+	// The state is Playing already when this runs from applyEvent and handleSeek.
+	audioRealign(pausedMedia_, pausedMedia_ - presentOffset_);
+}
+
+void Engine::audioStop() {
+	audioPrimed_ = false;
+	audioActive_.store(false, std::memory_order_relaxed);
+}
+
+// Decodes more sound while the ring holds less than half a second. True when it queued some.
+bool Engine::audioFill() {
+	if (!audioOpen_ || audioAtEnd_ || !source_) {
+		return false;
+	}
+	const double rate = audioOpenRate_ > 0.0 ? audioOpenRate_ : 48000.0;
+	const uint64_t target = std::min<uint64_t>(static_cast<uint64_t>(kAudioAheadSeconds * rate), audioRing_->capacity() / 4);
+	const uint64_t have = audioRing_->pendingNewFrames();
+	if (have >= target) {
+		return false;
+	}
+	uint64_t want = std::min<uint64_t>(target - have, static_cast<uint64_t>(kAudioChunkFrames));
+	want = std::min<uint64_t>(want, audioRing_->writable());
+	if (want == 0) {
+		return false;
+	}
+	const int frames = source_->readAudio(audioRaw_.data(), static_cast<int>(want));
+	if (frames <= 0) {
+		audioAtEnd_ = true;
+		return false;
+	}
+	for (int i = 0; i < frames; ++i) {
+		const float left = audioRaw_[static_cast<std::size_t>(i) * static_cast<std::size_t>(audioChannels_)];
+		const float right = audioChannels_ > 1 ? audioRaw_[static_cast<std::size_t>(i) * 2u + 1u] : left;
+		audioStereo_[static_cast<std::size_t>(i) * 2u] = left;
+		audioStereo_[static_cast<std::size_t>(i) * 2u + 1u] = right;
+	}
+	audioRing_->push(audioStereo_.data(), static_cast<std::size_t>(frames));
+	audioHeadLocal_ += static_cast<double>(frames) / rate;
+	return true;
+}
+
+// Compares where the sound is with where the picture clock is and realigns when they have parted.
+// Also follows a change of the engine's sample rate.
+void Engine::audioKeepInSync() {
+	if (!audioOpen_ || !audioPrimed_) {
+		return;
+	}
+	const Clock::time_point now = Clock::now();
+	const double sinceRealign = std::chrono::duration<double>(now - audioLastRealign_).count();
+	const double rate = audioRate_.load(std::memory_order_relaxed);
+	if (rate != audioOpenRate_ && rate >= 1000.0) {
+		const double at = mediaNow();
+		audioRealign(at, at - audioOffset_);
+		return;
+	}
+	if (audioAtEnd_ || !audioRing_->readerCaughtUp() || sinceRealign < kAudioResyncGapSeconds) {
+		return;
+	}
+	const double headTimeline = audioOffset_ + audioHeadLocal_;
+	const double playedTimeline = headTimeline - static_cast<double>(audioRing_->buffered()) / audioOpenRate_;
+	const double clock = mediaNow();
+	if (std::fabs(playedTimeline - clock) > options_.audioDriftSeconds) {
+		audioRealign(clock, clock - audioOffset_);
+	}
 }
 
 // ---------------------------------------------------------------------------------------------

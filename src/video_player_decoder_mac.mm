@@ -12,6 +12,7 @@
 #include <exception>
 #include <limits>
 #include <string>
+#include <vector>
 
 namespace video_player {
 namespace {
@@ -221,7 +222,215 @@ public:
 		return lastErrorText;
 	}
 
+	// ---- Soundtrack. Failures here never set lastErrorText: no sound is not a decode error. ----
+
+	bool openAudio(double sampleRate) override {
+		releaseAudioReader();
+		audioChannels_ = 0;
+		audioRate_ = sampleRate;
+		if (!asset || !(sampleRate >= 1000.0)) {
+			return false;
+		}
+		try {
+			@try {
+				return openAudioTrack();
+			} @catch (NSException*) {
+			}
+		} catch (...) {
+		}
+		releaseAudioReader();
+		audioChannels_ = 0;
+		return false;
+	}
+
+	int audioChannels() const override {
+		return audioChannels_;
+	}
+
+	bool seekAudio(double seconds) override {
+		if (audioChannels_ == 0 || !std::isfinite(seconds)) {
+			return false;
+		}
+		try {
+			@try {
+				return startAudioReading(std::max(0.0, seconds));
+			} @catch (NSException*) {
+			}
+		} catch (...) {
+		}
+		releaseAudioReader();
+		return false;
+	}
+
+	int readAudio(float* interleaved, int maxFrames) override {
+		if (!audioOutput || audioChannels_ == 0 || maxFrames <= 0) {
+			return 0;
+		}
+		try {
+			@try {
+				return readAudioFrames(interleaved, maxFrames);
+			} @catch (NSException*) {
+			}
+		} catch (...) {
+		}
+		releaseAudioReader();
+		return 0;
+	}
+
 private:
+	// Finds the first audio track and its channel count (1, or 2 for anything wider).
+	bool openAudioTrack() {
+		@autoreleasepool {
+			if (!audioTrack) {
+				dispatch_semaphore_t loaded = dispatch_semaphore_create(0);
+				__block NSArray* loadedTracks = nil;
+				[asset loadTracksWithMediaType:AVMediaTypeAudio
+				             completionHandler:^(NSArray<AVAssetTrack*>* tracks, NSError*) {
+					loadedTracks = [tracks retain];
+					dispatch_semaphore_signal(loaded);
+				}];
+				dispatch_semaphore_wait(loaded, DISPATCH_TIME_FOREVER);
+				dispatch_release(loaded);
+				NSArray* audioTracks = [loadedTracks autorelease];
+				if ([audioTracks count] == 0) {
+					return false;
+				}
+				audioTrack = [[audioTracks objectAtIndex:0] retain];
+				int channels = 2;
+				NSArray* formats = [audioTrack formatDescriptions];
+				if ([formats count] > 0) {
+					const AudioStreamBasicDescription* description =
+						CMAudioFormatDescriptionGetStreamBasicDescription((CMAudioFormatDescriptionRef)[formats objectAtIndex:0]);
+					if (description && description->mChannelsPerFrame > 0) {
+						channels = static_cast<int>(description->mChannelsPerFrame);
+					}
+				}
+				audioNativeChannels_ = channels;
+			}
+			audioChannels_ = audioNativeChannels_ == 1 ? 1 : 2;
+			// Not started yet: the engine seeks before it reads.
+			return true;
+		}
+	}
+
+	// Replaces the audio reader with one that starts at startSeconds and runs to the end of the clip.
+	bool startAudioReading(double startSeconds) {
+		@autoreleasepool {
+			releaseAudioReader();
+			NSError* error = nil;
+			audioReader = [[AVAssetReader alloc] initWithAsset:asset error:&error];
+			if (!audioReader) {
+				return false;
+			}
+			NSDictionary* settings = @{
+				AVFormatIDKey : @(kAudioFormatLinearPCM),
+				AVLinearPCMBitDepthKey : @32,
+				AVLinearPCMIsFloatKey : @YES,
+				AVLinearPCMIsBigEndianKey : @NO,
+				AVLinearPCMIsNonInterleaved : @NO,
+				AVSampleRateKey : @(audioRate_),
+				AVNumberOfChannelsKey : @(audioChannels_)
+			};
+			audioOutput = [[AVAssetReaderTrackOutput alloc] initWithTrack:audioTrack outputSettings:settings];
+			if (!audioOutput || ![audioReader canAddOutput:audioOutput]) {
+				releaseAudioReader();
+				return false;
+			}
+			[audioReader addOutput:audioOutput];
+			if (startSeconds > 0.0) {
+				const CMTime from = CMTimeMakeWithSeconds(startSeconds, kSeekTimescale);
+				[audioReader setTimeRange:CMTimeRangeMake(from, kCMTimePositiveInfinity)];
+			}
+			if (![audioReader startReading]) {
+				releaseAudioReader();
+				return false;
+			}
+			audioStartSeconds_ = startSeconds;
+			audioNeedTrim_ = startSeconds > 0.0;
+			audioPending_.clear();
+			audioPendingPos_ = 0;
+			return true;
+		}
+	}
+
+	// Fills interleaved with up to maxFrames frames, pulling sample buffers from the reader as needed.
+	int readAudioFrames(float* interleaved, int maxFrames) {
+		const size_t channels = static_cast<size_t>(audioChannels_);
+		size_t written = 0;
+		const size_t wanted = static_cast<size_t>(maxFrames);
+		while (written < wanted) {
+			const size_t availableFrames = (audioPending_.size() - audioPendingPos_) / channels;
+			if (availableFrames > 0) {
+				const size_t take = std::min(availableFrames, wanted - written);
+				std::copy_n(audioPending_.begin() + static_cast<std::ptrdiff_t>(audioPendingPos_), take * channels,
+					interleaved + written * channels);
+				audioPendingPos_ += take * channels;
+				written += take;
+				continue;
+			}
+			audioPending_.clear();
+			audioPendingPos_ = 0;
+			if (!pullAudioBuffer()) {
+				break;
+			}
+		}
+		return static_cast<int>(written);
+	}
+
+	// Appends the next sample buffer's float samples to audioPending_. False at the end or on error.
+	bool pullAudioBuffer() {
+		@autoreleasepool {
+			if (!audioOutput) {
+				return false;
+			}
+			RetainedSample sample([audioOutput copyNextSampleBuffer]);
+			if (!sample.get()) {
+				return false;
+			}
+			CMBlockBufferRef block = CMSampleBufferGetDataBuffer(sample.get());
+			if (!block) {
+				return true;  // an empty buffer; ask again
+			}
+			const size_t bytes = CMBlockBufferGetDataLength(block);
+			const size_t channels = static_cast<size_t>(audioChannels_);
+			const size_t frames = bytes / (sizeof(float) * channels);
+			if (frames == 0) {
+				return true;
+			}
+			audioPending_.resize(frames * channels);
+			if (CMBlockBufferCopyDataBytes(block, 0, frames * channels * sizeof(float), audioPending_.data()) != kCMBlockBufferNoErr) {
+				audioPending_.clear();
+				return false;
+			}
+			if (audioNeedTrim_) {
+				// The reader may hand over a buffer that starts a little before the wanted time.
+				audioNeedTrim_ = false;
+				const double bufferStart = CMTimeGetSeconds(CMSampleBufferGetPresentationTimeStamp(sample.get()));
+				if (std::isfinite(bufferStart) && bufferStart < audioStartSeconds_) {
+					const size_t skip = std::min(frames, static_cast<size_t>(std::llround((audioStartSeconds_ - bufferStart) * audioRate_)));
+					audioPendingPos_ = skip * channels;
+				}
+			}
+			return true;
+		}
+	}
+
+	void releaseAudioReader() {
+		audioPending_.clear();
+		audioPendingPos_ = 0;
+		if (audioOutput) {
+			[audioOutput release];
+			audioOutput = nil;
+		}
+		if (audioReader) {
+			if ([audioReader status] == AVAssetReaderStatusReading) {
+				[audioReader cancelReading];
+			}
+			[audioReader release];
+			audioReader = nil;
+		}
+	}
+
 	// Loads the asset and its first video track, then starts reading. Returns false with lastErrorText set.
 	bool openFile(const std::string& path, int maxLongSide) {
 		@autoreleasepool {
@@ -430,6 +639,13 @@ private:
 
 	void releaseResources() {
 		releaseReader();
+		releaseAudioReader();
+		if (audioTrack) {
+			[audioTrack release];
+			audioTrack = nil;
+		}
+		audioChannels_ = 0;
+		audioNativeChannels_ = 0;
 		if (track) {
 			[track release];
 			track = nil;
@@ -450,6 +666,16 @@ private:
 	AVAssetTrack* track = nil;
 	AVAssetReader* reader = nil;
 	AVAssetReaderTrackOutput* output = nil;
+	AVAssetTrack* audioTrack = nil;
+	AVAssetReader* audioReader = nil;
+	AVAssetReaderTrackOutput* audioOutput = nil;
+	int audioChannels_ = 0;        // what readAudio() delivers: 1 or 2
+	int audioNativeChannels_ = 0;  // what the track has
+	double audioRate_ = 48000.0;
+	double audioStartSeconds_ = 0.0;
+	bool audioNeedTrim_ = false;
+	std::vector<float> audioPending_;
+	size_t audioPendingPos_ = 0;
 	// After a seek: samples earlier than this are skipped. -infinity when the reader covers the whole clip.
 	double dropBeforeSeconds_ = -std::numeric_limits<double>::infinity();
 	int rotation = 0;  // degrees clockwise: 0, 90, 180 or 270

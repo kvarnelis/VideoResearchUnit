@@ -4,7 +4,7 @@
 
 The plugin is Video Research Unit (VRU), version 2.0.0, with 23 modules. It was called RasterLab before
 2.8.0. Every module has a catalogue number, VRU–01 to VRU–22, and Rack's module browser shows
-`VRU–01 Deflection Yoke`. The table is in `AGENTS.md`. The plugin slug is `VideoResearchUnit`.
+`VRU–01 Deflection Yoke`. The table is in `AGENTS.md`. The plugin slug is `VideoResearchUnit`. Version 2.1.0 renamed two module slugs, Wobbulator to DeflectionYoke and RuttEtra to ScanProcessor; `scripts/migrate-slug.py` migrates patches saved with 2.0.0.
 
 This document names modules by their Rack names. The code names are `DeflectionYoke` for VRU–01 Deflection
 Yoke and `ScanProcessor` for VRU–02 Scan Processor.
@@ -1412,7 +1412,8 @@ classification, YouTube ID, cache path, yt-dlp lookup and arguments, the transpo
 status messages, saved settings), `src/video_player_decoder.hpp` (the decoder interface),
 `src/video_player_decoder_mac.mm` (AVAssetReader) and `src/video_player_decoder_stub.cpp` (every
 other platform: a status message, no crash). The module plays a local file or a YouTube link and puts
-the picture on the video bus. Audio is out of scope.
+the picture on the video bus, and the clip's own soundtrack on the L and R outputs.
+`src/video_player_audio.hpp` holds the soundtrack hand-off.
 
 Decisions:
 
@@ -1420,6 +1421,29 @@ Decisions:
   clock. `process()` only calls the engine's lock-free setters (play toggle, stop, loop, speed) and
   getters (`hasFrame`, `isPlaying`, `endCount`), so the audio thread never waits on a file, a child
   process or a lock. The UI thread reads a copy of the state (`snapshot()`) once per drawn frame.
+- **Soundtrack (2.1.0).** `FrameSource` has four non-pure calls with silent defaults: `openAudio(rate)`,
+  `audioChannels()`, `seekAudio(seconds)` and `readAudio(buffer, frames)`. The AVFoundation decoder
+  uses a second `AVAssetReader` with a float PCM track output, which also resamples to Rack's rate and
+  reduces anything wider than stereo to two channels; no audio track means `openAudio` returns false
+  and the module is silent, with no message. The worker (never the audio thread) reads ahead into an
+  `AudioRing` of 2^17 stereo frames, keeping about half a second queued. `process()` calls
+  `audioFrame()`, which reads the ring at the SPEED ratio with linear interpolation and never locks or
+  allocates. Mono is copied to both sides in the worker.
+  - Realigning (seek, loop wrap, start, drift correction) calls `AudioRing::flush()`: it records the
+    ring head as a mark and bumps a generation counter. The audio thread sees the new generation,
+    fades out over 4 ms on what it was playing (it reads only as far as the mark), jumps to the mark
+    and fades in. The worker never rewrites data behind the reader.
+  - Sync follows the picture's wall clock. The sound's timeline is mapped onto the picture's
+    (`audioOffset_`, `audioHeadLocal_`). Every worker step compares what has played with `mediaNow()`
+    and realigns when they differ by more than 80 ms (`EngineOptions::audioDriftSeconds`), at most once
+    per 0.5 s. A change of Rack's sample rate also realigns, reopening the track at the new rate.
+  - Silent while paused, stopped, ended, and at speed 0 (SPEED clamps to 0.25 in the engine, so only
+    the reader itself can reach 0). Reverse play does not exist. A ring that runs dry ramps the level
+    down over the last 4 ms and gives silence, counted by `audioUnderruns()`. The sound ending before
+    the picture also just goes silent.
+  - Full scale is +-1 in the engine and +-5 V at the jacks.
+  - YouTube needs nothing extra: the single-file `best[ext=mp4][vcodec^=avc1]` format is a muxed
+    file that already contains audio, so ffmpeg is not involved either way.
 - **Pixels.** Frames go into an external frame slot (`video_external_frame.hpp`), and `process()`
   publishes only the slot id on the bus, as Syphon In does. With no frame the bus is cleared, so a
   removed video does not leave a stale picture. Frames are scaled down to 960 px on the long side,
@@ -1480,7 +1504,26 @@ Decisions:
   after the end, a flood of targets (only the first and the newest reach the decoder), a target at
   and past the end, a decoder that fails or finds no frame, no video, a load or a download in
   progress, a loop wrap after a seek, no END pulse, and a clip whose first frame is not at 0.
+  The soundtrack tests use a fake decoder that plays a sine whose phase follows clip time, and pull
+  frames at 48 kHz like Rack: the pitch at 1x, 2x and 0.5x, a stereo pair staying stereo, silence
+  when paused, stopped or before Play, no click larger than a threshold at a pause, a seek (playing
+  and paused) or a loop wrap, a mono clip on both sides, a clip with no audio track, a soundtrack
+  shorter than the picture, and a decoder that stalls (underrun, counted, no click).
   Dragging on the real panel is not covered; it needs a running Rack.
+
+### Focus (VRU–24)
+
+A single-input processor, bus node type `Focus` carrying `FocusParams` (focus, smear, sharp, converge,
+mix). `Focus.cpp` only publishes the knobs; `renderFocusFrame` does the work with the separable
+running-sum filters in `src/focus_filter.hpp`: box windows with fractional ends, two passes each, so
+the kernel is a triangle. Order: CONVERGE (red and blue shifted by up to 3% of the width, linear
+sampling) while the rows are loaded, then FOCUS (radius up to 6% of the width, rows then columns),
+then SMEAR (rows only, a window of 80% behind and 20% ahead, up to 15% of the width in all), then
+SHARP (unsharp mask, radius 0.4% of the width, amount 3 x SHARP), then MIX against the source. When
+MIX is 0 or every effect is 0 the source frame is swapped through. Scratch buffers are sized only when
+the frame size changes. `tests/focus_test.cpp` (in `make test`, also `focus_test <dir> bench` for
+timings) checks identity at zero, MIX, FOCUS reach in x and y, the SMEAR tail and that lines stay
+apart, SHARP overshoot, CONVERGE direction, and writes `focus_contact_sheet.png`.
 
 ### Octoscillator (VRU–23)
 

@@ -186,6 +186,17 @@ struct Probe {
 	std::atomic<int> rewindSleepMs{0};
 	std::atomic<bool> failSeek{false};
 	std::atomic<int> seekSleepMs{0};
+	// The soundtrack: 0 channels is a clip with no audio track. The fake plays a sine of audioFreq Hz
+	// whose phase follows clip time, so a seek or a loop wrap jumps the waveform. A second channel is
+	// half as loud. audioSeconds > 0 makes the sound end before the picture does. Once the sound has
+	// played past audioStallAfter seconds, every read takes audioStallMs, as a decoder that falls behind.
+	std::atomic<int> audioChannels{0};
+	std::atomic<double> audioFreq{440.0};
+	std::atomic<double> audioSeconds{0.0};
+	std::atomic<double> audioStallAfter{1e9};
+	std::atomic<int> audioStallMs{0};
+	std::atomic<double> audioRate{0.0};
+	std::atomic<int> audioSeeks{0};
 
 	// What the engine did.
 	std::atomic<int> rewinds{0};
@@ -297,6 +308,44 @@ public:
 		return true;
 	}
 
+	bool openAudio(double sampleRate) override {
+		probe_->audioRate.store(sampleRate);
+		rate_ = sampleRate;
+		channels_ = probe_->audioChannels.load();
+		return channels_ > 0;
+	}
+	int audioChannels() const override {
+		return channels_;
+	}
+	bool seekAudio(double seconds) override {
+		probe_->audioSeeks.fetch_add(1);
+		const double at = std::max(0.0, seconds - probe_->ptsOffset) * rate_;
+		audioPos_ = static_cast<long long>(std::llround(at));
+		return true;
+	}
+	int readAudio(float* interleaved, int maxFrames) override {
+		if (channels_ <= 0) {
+			return 0;
+		}
+		if (static_cast<double>(audioPos_) / rate_ > probe_->audioStallAfter.load()) {
+			sleepMs(probe_->audioStallMs.load());
+		}
+		const double seconds = probe_->audioSeconds.load();
+		const double total = (seconds > 0.0 ? seconds : static_cast<double>(probe_->frames) / probe_->fps) * rate_;
+		const double freq = probe_->audioFreq.load();
+		int produced = 0;
+		while (produced < maxFrames && static_cast<double>(audioPos_) < total) {
+			const float value = static_cast<float>(0.5 * std::sin(2.0 * M_PI * freq * static_cast<double>(audioPos_) / rate_));
+			interleaved[produced * channels_] = value;
+			if (channels_ > 1) {
+				interleaved[produced * channels_ + 1] = value * 0.5f;
+			}
+			++audioPos_;
+			++produced;
+		}
+		return produced;
+	}
+
 	double durationSeconds() const override {
 		return static_cast<double>(probe_->frames) / probe_->fps + probe_->extraDuration;
 	}
@@ -315,6 +364,9 @@ private:
 	bool opened_ = false;
 	int index_ = 0;
 	std::string error_;
+	double rate_ = 48000.0;
+	int channels_ = 0;
+	long long audioPos_ = 0;
 };
 
 // ---------------------------------------------------------------------------------------------
@@ -344,6 +396,7 @@ public:
 		options.factory = [p]() { return std::unique_ptr<FrameSource>(new FakeSource(p)); };
 		options.onFramePublished = [p](const DecodedFrame& frame) { p->onShown(frame); };
 		engine.reset(new Engine(frameId, options));
+		engine->setAudioSampleRate(48000.f);
 	}
 	~Rig() {
 		engine.reset();
@@ -724,6 +777,286 @@ void testSpeed() {
 	CHECK(waitState(*rig.engine, TransportState::Ready));
 	rig.engine->requestPlayToggle();
 	CHECK(waitState(*rig.engine, TransportState::Ended, 4.0));
+}
+
+// ---------------------------------------------------------------------------------------------
+// Soundtrack. The test plays the part of the audio thread: it pulls frames at 48 kHz, paced by the
+// wall clock, the way Rack would.
+
+struct Capture {
+	std::vector<float> left;
+	std::vector<float> right;
+};
+
+void pull(Engine& engine, double seconds, Capture& capture) {
+	const Clock::time_point start = Clock::now();
+	long long produced = 0;
+	for (;;) {
+		const double elapsed = secondsSince(start);
+		const long long target = static_cast<long long>(std::min(elapsed, seconds) * 48000.0);
+		while (produced < target) {
+			float l = 0.f;
+			float r = 0.f;
+			engine.audioFrame(l, r);
+			capture.left.push_back(l);
+			capture.right.push_back(r);
+			++produced;
+		}
+		if (elapsed >= seconds) {
+			return;
+		}
+		sleepMs(2);
+	}
+}
+
+float peak(const std::vector<float>& values, size_t from, size_t to) {
+	float out = 0.f;
+	for (size_t i = from; i < to && i < values.size(); ++i) {
+		out = std::max(out, std::fabs(values[i]));
+	}
+	return out;
+}
+
+// The biggest jump between two neighbouring samples. A 440 Hz sine of 0.5 never steps more than 0.03.
+float biggestStep(const std::vector<float>& values) {
+	float out = 0.f;
+	for (size_t i = 1; i < values.size(); ++i) {
+		out = std::max(out, std::fabs(values[i] - values[i - 1]));
+	}
+	return out;
+}
+
+// Pitch from upward zero crossings between two sample positions.
+double pitchHz(const std::vector<float>& values, size_t from, size_t to) {
+	int crossings = 0;
+	for (size_t i = std::max<size_t>(from, 1); i < to && i < values.size(); ++i) {
+		if (values[i - 1] < 0.f && values[i] >= 0.f) {
+			++crossings;
+		}
+	}
+	return static_cast<double>(crossings) / (static_cast<double>(to - from) / 48000.0);
+}
+
+// A clip that is `seconds` long with a stereo or mono soundtrack, loaded and ready.
+void loadWithSound(Rig& rig, int channels, double seconds, const char* name) {
+	rig.probe.frames = static_cast<int>(seconds * rig.probe.fps);
+	rig.probe.audioChannels.store(channels);
+	rig.engine->loadFile(makeMedia(name));
+	CHECK(waitState(*rig.engine, TransportState::Ready));
+}
+
+void testAudioPitch() {
+	currentTest = "audio pitch";
+	Rig rig(Setup(), 10, 50.0);
+	loadWithSound(rig, 2, 6.0, "sound1.mp4");
+	CHECK(near(rig.probe.audioRate.load(), 48000.0, 0.5));
+	// Nothing plays before Play.
+	Capture idle;
+	pull(*rig.engine, 0.1, idle);
+	CHECK(peak(idle.left, 0, idle.left.size()) == 0.f);
+
+	rig.engine->requestPlayToggle();
+	Capture one;
+	pull(*rig.engine, 1.0, one);
+	CHECK(peak(one.left, 0, one.left.size()) > 0.4f);
+	CHECK(peak(one.left, 0, one.left.size()) <= 0.51f);
+	const double hz = pitchHz(one.left, 12000, 40000);
+	CHECK(near(hz, 440.0, 15.0));
+	CHECK(biggestStep(one.left) < 0.08f);
+	// The second channel is the half-loud one: stereo stays stereo.
+	CHECK(peak(one.right, 12000, 40000) > 0.2f && peak(one.right, 12000, 40000) < 0.3f);
+	CHECK(rig.engine->audioUnderruns() == 0);
+
+	// 2x is faster and higher.
+	rig.engine->setSpeed(2.f);
+	Capture two;
+	pull(*rig.engine, 1.0, two);
+	const double hz2 = pitchHz(two.left, 12000, 40000);
+	CHECK(near(hz2, 880.0, 30.0));
+	CHECK(biggestStep(two.left) < 0.12f);
+
+	// Half speed is lower.
+	rig.engine->setSpeed(0.5f);
+	Capture half;
+	pull(*rig.engine, 1.0, half);
+	CHECK(near(pitchHz(half.left, 12000, 40000), 220.0, 12.0));
+
+	// setSpeed clamps to 0.25, but the reader itself mutes at speed 0.
+	AudioRing ring(1024);
+	std::vector<float> block(2000, 0.3f);
+	ring.push(block.data(), 1000);
+	AudioReader reader;
+	float l = 1.f;
+	float r = 1.f;
+	for (int i = 0; i < 400; ++i) {
+		reader.tick(ring, true, 1.f, 48000.f, l, r);
+	}
+	CHECK(l > 0.29f);
+	for (int i = 0; i < 400; ++i) {
+		reader.tick(ring, true, 0.f, 48000.f, l, r);
+	}
+	CHECK(l == 0.f && r == 0.f);
+}
+
+void testAudioPause() {
+	currentTest = "audio pause and stop";
+	Rig rig(Setup(), 10, 50.0);
+	loadWithSound(rig, 2, 8.0, "sound2.mp4");
+	rig.engine->requestPlayToggle();
+	Capture a;
+	pull(*rig.engine, 0.4, a);
+	CHECK(peak(a.left, 10000, a.left.size()) > 0.4f);
+	rig.engine->requestPlayToggle();  // pause
+	CHECK(waitState(*rig.engine, TransportState::Paused));
+	Capture fade;
+	pull(*rig.engine, 0.05, fade);  // the fade-out
+	Capture quiet;
+	pull(*rig.engine, 0.3, quiet);
+	CHECK(peak(quiet.left, 0, quiet.left.size()) == 0.f);
+	CHECK(peak(quiet.right, 0, quiet.right.size()) == 0.f);
+	CHECK(biggestStep(fade.left) < 0.08f);
+
+	// Play again: sound returns. Then stop: silence again.
+	rig.engine->requestPlayToggle();
+	Capture b;
+	pull(*rig.engine, 0.4, b);
+	CHECK(peak(b.left, 10000, b.left.size()) > 0.4f);
+	CHECK(biggestStep(b.left) < 0.08f);
+	rig.engine->requestStop();
+	CHECK(waitState(*rig.engine, TransportState::Ready));
+	Capture c;
+	pull(*rig.engine, 0.1, c);
+	Capture d;
+	pull(*rig.engine, 0.2, d);
+	CHECK(peak(d.left, 0, d.left.size()) == 0.f);
+	CHECK(biggestStep(c.left) < 0.08f);
+}
+
+void testAudioSeekAndLoop() {
+	currentTest = "audio seek";
+	Rig rig(Setup(), 10, 50.0);
+	loadWithSound(rig, 2, 6.0, "sound3.mp4");
+	rig.engine->requestPlayToggle();
+	Capture a;
+	pull(*rig.engine, 0.3, a);
+	const int seeksBefore = rig.probe.audioSeeks.load();
+	rig.engine->requestSeek(3.0);
+	pull(*rig.engine, 0.6, a);
+	CHECK(rig.probe.audioSeeks.load() > seeksBefore);
+	CHECK(biggestStep(a.left) < 0.08f);
+	CHECK(peak(a.left, a.left.size() - 8000, a.left.size()) > 0.4f);
+	CHECK(near(pitchHz(a.left, a.left.size() - 12000, a.left.size()), 440.0, 20.0));
+	CHECK(rig.engine->snapshot().positionSeconds > 3.0);
+
+	// Another seek backwards while playing, then a pause and a seek while paused (silent), then play.
+	rig.engine->requestSeek(0.5);
+	Capture b;
+	pull(*rig.engine, 0.4, b);
+	CHECK(biggestStep(b.left) < 0.08f);
+	CHECK(peak(b.left, b.left.size() - 6000, b.left.size()) > 0.4f);
+	rig.engine->requestPlayToggle();
+	CHECK(waitState(*rig.engine, TransportState::Paused));
+	Capture fade;
+	pull(*rig.engine, 0.05, fade);
+	rig.engine->requestSeek(2.0);
+	Capture quiet;
+	pull(*rig.engine, 0.2, quiet);
+	CHECK(peak(quiet.left, 0, quiet.left.size()) == 0.f);
+	rig.engine->requestPlayToggle();
+	Capture c;
+	pull(*rig.engine, 0.4, c);
+	CHECK(biggestStep(c.left) < 0.08f);
+	CHECK(peak(c.left, c.left.size() - 6000, c.left.size()) > 0.4f);
+}
+
+void testAudioLoopWrap() {
+	currentTest = "audio loop wrap";
+	Rig rig(Setup(), 10, 50.0);
+	loadWithSound(rig, 2, 1.0, "sound4.mp4");
+	rig.engine->setLoop(true);
+	rig.engine->requestPlayToggle();
+	Capture a;
+	pull(*rig.engine, 3.2, a);
+	CHECK(rig.engine->endCount() >= 2);
+	CHECK(biggestStep(a.left) < 0.08f);
+	// The sound is there after the wraps, not just before.
+	CHECK(peak(a.left, a.left.size() - 8000, a.left.size()) > 0.4f);
+	// The sound wrapped with the picture: it was sent back to the clip start more than once.
+	CHECK(rig.probe.audioSeeks.load() >= 3);
+	size_t loud = 0;
+	for (size_t i = 0; i < a.left.size(); ++i) {
+		loud += std::fabs(a.left[i]) > 0.05f ? 1 : 0;
+	}
+	CHECK(loud > a.left.size() * 8 / 10);  // only the short fades and zero crossings are quiet
+}
+
+void testAudioMono() {
+	currentTest = "audio mono";
+	Rig rig(Setup(), 10, 50.0);
+	loadWithSound(rig, 1, 4.0, "sound5.mp4");
+	rig.engine->requestPlayToggle();
+	Capture a;
+	pull(*rig.engine, 0.6, a);
+	CHECK(peak(a.left, 8000, a.left.size()) > 0.4f);
+	bool same = a.left.size() == a.right.size();
+	for (size_t i = 0; same && i < a.left.size(); ++i) {
+		same = a.left[i] == a.right[i];
+	}
+	CHECK(same);
+}
+
+void testAudioNone() {
+	currentTest = "audio none";
+	Rig rig(Setup(), 10, 50.0);
+	loadWithSound(rig, 0, 3.0, "silent.mp4");
+	rig.engine->requestPlayToggle();
+	Capture a;
+	pull(*rig.engine, 0.5, a);
+	CHECK(peak(a.left, 0, a.left.size()) == 0.f);
+	CHECK(peak(a.right, 0, a.right.size()) == 0.f);
+	CHECK(rig.engine->snapshot().state == TransportState::Playing);
+	CHECK(rig.engine->snapshot().message.empty());
+	CHECK(rig.engine->audioUnderruns() == 0);
+	rig.engine->requestSeek(1.0);
+	pull(*rig.engine, 0.2, a);
+	CHECK(peak(a.left, 0, a.left.size()) == 0.f);
+}
+
+void testAudioShortAndUnderrun() {
+	currentTest = "audio underrun";
+	// The sound ends before the picture: silence afterwards, picture keeps going, no error.
+	{
+		Rig rig(Setup(), 10, 50.0);
+		rig.probe.audioSeconds.store(0.3);
+		loadWithSound(rig, 2, 2.0, "short.mp4");
+		rig.engine->requestPlayToggle();
+		Capture a;
+		pull(*rig.engine, 0.9, a);
+		CHECK(peak(a.left, 0, 12000) > 0.4f);
+		CHECK(peak(a.left, 24000, a.left.size()) == 0.f);
+		CHECK(rig.engine->snapshot().message.empty());
+		CHECK(rig.engine->snapshot().state == TransportState::Playing);
+	}
+	// A decoder that stalls: the ring runs dry, the output goes quiet and is counted.
+	{
+		Rig rig(Setup(), 10, 50.0);
+		rig.probe.audioStallAfter.store(0.2);
+		rig.probe.audioStallMs.store(1500);
+		loadWithSound(rig, 2, 6.0, "stall.mp4");
+		rig.engine->requestPlayToggle();
+		Capture a;
+		pull(*rig.engine, 1.2, a);
+		CHECK(peak(a.left, 0, 8000) > 0.4f);
+		CHECK(peak(a.left, 38000, a.left.size()) == 0.f);
+		CHECK(rig.engine->audioUnderruns() >= 1);
+		CHECK(biggestStep(a.left) < 0.08f);
+		for (float v : a.left) {
+			if (!std::isfinite(v)) {
+				CHECK(false);
+				break;
+			}
+		}
+	}
 }
 
 void testMissingFile() {
@@ -1768,6 +2101,58 @@ void testSeekThenLoopWrap() {
 	CHECK(rig.engine->snapshot().state == TransportState::Playing);
 }
 
+// The Video Player module publishes its picture only while hasFrame() is true, and the Display shows
+// NO VIDEO whenever the bus is empty. So while a clip plays on LOOP, hasFrame() and the frame slot
+// must stay valid at every instant between the first frame and a real clear: across loop wraps, a seek,
+// and a stop and play. A second thread watches them as tightly as it can, like the audio thread does.
+void testLoopNeverClearsThePicture() {
+	currentTest = "loop wraps, seeks and stop/play never clear the picture";
+	Rig rig(Setup(), 20, 50.0);  // 0.4 s per trip
+	rig.probe.rewindSleepMs = 8;
+	rig.engine->loadFile(makeMedia("holdloop.mp4"));
+	CHECK(waitState(*rig.engine, TransportState::Ready));
+	CHECK(rig.engine->hasFrame());
+
+	std::atomic<bool> stopWatching(false);
+	std::atomic<long> samples(0);
+	std::atomic<long> gaps(0);
+	std::thread watcher([&] {
+		ExternalVideoFrame frame;
+		while (!stopWatching.load()) {
+			const bool flag = rig.engine->hasFrame();
+			const bool slot = videoExternalFrameRead(rig.frameId, frame);
+			if (!flag || !slot) {
+				gaps.fetch_add(1);
+			}
+			samples.fetch_add(1);
+		}
+	});
+
+	rig.engine->setLoop(true);
+	rig.engine->requestPlayToggle();
+	CHECK(waitFor([&] { return rig.engine->endCount() >= 5; }, 10.0));  // five wraps, about two seconds
+	rig.engine->requestSeek(0.2);
+	sleepMs(150);
+	rig.engine->requestSeek(0.0);
+	sleepMs(150);
+	rig.engine->requestStop();
+	sleepMs(100);
+	rig.engine->requestPlayToggle();
+	CHECK(waitFor([&] { return rig.engine->endCount() >= 7; }, 10.0));
+
+	stopWatching.store(true);
+	watcher.join();
+	CHECK(samples.load() > 1000);
+	CHECK(gaps.load() == 0);
+	CHECK(rig.engine->hasFrame());
+
+	// A real clear still empties it, so there is no stale picture from the old source.
+	rig.engine->clearSource();
+	CHECK(waitFor([&] { return !rig.engine->hasFrame(); }, 3.0));
+	ExternalVideoFrame after;
+	CHECK(!videoExternalFrameRead(rig.frameId, after));
+}
+
 void testSeekFiresNoEndPulse() {
 	currentTest = "seek fires no end pulse";
 
@@ -1877,6 +2262,13 @@ int main() {
 	testLoopWrap();
 	testLoopSwitchedOnLate();
 	testSpeed();
+	testAudioPitch();
+	testAudioPause();
+	testAudioSeekAndLoop();
+	testAudioLoopWrap();
+	testAudioMono();
+	testAudioNone();
+	testAudioShortAndUnderrun();
 	testMissingFile();
 	testUnsupportedContainer();
 	testDecoderProblems();
@@ -1902,6 +2294,7 @@ int main() {
 	testSeekDroppedByLoad();
 	testSeekDuringDownload();
 	testSeekThenLoopWrap();
+	testLoopNeverClearsThePicture();
 	testSeekFiresNoEndPulse();
 	testSeekClipStartOffset();
 

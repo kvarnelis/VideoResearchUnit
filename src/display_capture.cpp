@@ -318,6 +318,33 @@ std::string shortenForMenu(const std::string& path, std::size_t maxChars) {
 	return "..." + s.substr(start);
 }
 
+std::string elapsedClock(double seconds) {
+	long total = 0;
+	if (seconds > 0.0 && seconds < 1e9) {
+		total = static_cast<long>(seconds);
+	}
+	const long h = total / 3600;
+	const long m = (total / 60) % 60;
+	const long s = total % 60;
+	char text[32];
+	if (h > 0) {
+		std::snprintf(text, sizeof(text), "%ld:%02ld:%02ld", h, m, s);
+	} else {
+		std::snprintf(text, sizeof(text), "%ld:%02ld", m, s);
+	}
+	return text;
+}
+
+std::string recTooltipText(bool recording, double elapsedSeconds, const std::string& lastFailure) {
+	if (recording) {
+		return "Recording " + elapsedClock(elapsedSeconds);
+	}
+	if (!lastFailure.empty()) {
+		return "Recording failed: " + lastFailure;
+	}
+	return "Not recording";
+}
+
 std::string timestampStem(std::time_t when) {
 	struct tm parts = {};
 #if defined(_WIN32)

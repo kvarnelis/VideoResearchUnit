@@ -13,6 +13,7 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <functional>
 #include <cstdlib>
 #include <ctime>
 #include <limits>
@@ -124,6 +125,42 @@ struct TWhiteRedLight : TBase {
 	}
 };
 using WhiteRedLight = TWhiteRedLight<>;
+
+// A light whose tooltip is a line of words, not Rack's standard name and brightness percentage. The SHOT and
+// REC lights breathe and blink, so a percentage reads like a progress counter and says nothing true. The words
+// come from tipText(), called on the UI thread every frame while the mouse is over the light.
+template <typename TBase>
+struct TextTipLight : TBase {
+	std::function<std::string()> tipText;
+	ui::Tooltip* tip = nullptr;
+
+	void onEnter(const widget::Widget::EnterEvent& e) override {
+		if (!settings::tooltips || !tipText || tip || !this->module) {
+			return;
+		}
+		tip = new ui::Tooltip;
+		tip->text = tipText();
+		APP->scene->addChild(tip);
+	}
+	void onLeave(const widget::Widget::LeaveEvent& e) override {
+		drop();
+	}
+	void step() override {
+		TBase::step();
+		if (tip) {
+			tip->text = tipText();
+		}
+	}
+	void drop() {
+		if (tip) {
+			tip->requestDelete();
+			tip = nullptr;
+		}
+	}
+	~TextTipLight() override {
+		drop();
+	}
+};
 }
 
 struct Display : Module {
@@ -226,6 +263,9 @@ struct Display : Module {
 	double recFailAt = -1e9;
 	float recGlow = 0.f;           // brightness of the REC light, 0 to 1, shared with the screen badge
 	bool badgeFailed = false;
+	double recStartedAt = 0.0;     // nowSeconds() when the recorder's session was created; the REC tooltip's clock
+	std::string recFailureText;    // why the last recording failed; empty once a new one starts or none failed
+	std::string shotStatusText = "Screenshot ready";  // the SHOT tooltip
 
 	Display() {
 		config(PARAMS_LEN, INPUTS_LEN, OUTPUTS_LEN, LIGHTS_LEN);
@@ -439,6 +479,7 @@ struct Display : Module {
 			return;
 		}
 		shotOkAt = now;
+		shotStatusText = "Screenshot saved";
 	}
 
 	void toggleRecording(double now) {
@@ -451,6 +492,7 @@ struct Display : Module {
 			return;
 		}
 		recFailAt = -1e9;
+		recFailureText.clear();
 		recordingOn = true;
 		pendingRecStart = true;
 		pendingRecAt = now;
@@ -479,6 +521,7 @@ struct Display : Module {
 			options.audioSampleRate = static_cast<int>(rate + 0.5f);
 		}
 		session = std::make_unique<display_recorder::Session>(std::move(options), rgba, width, height);
+		recStartedAt = nowSeconds();
 		if (withAudio) {
 			// The session has claimed the ring, so it is safe to let the audio thread start filling it.
 			audioRingPtr.store(audioRingKeep.get(), std::memory_order_release);
@@ -555,11 +598,13 @@ struct Display : Module {
 	void shotFailed(double now, const std::string& why) {
 		WARN("Display: screenshot failed: %s", why.c_str());
 		shotFailAt = now;
+		shotStatusText = "Screenshot failed: " + why;
 	}
 
 	void recFailed(double now, const std::string& why) {
 		WARN("Display: recording failed: %s", why.c_str());
 		recFailAt = now;
+		recFailureText = why.empty() ? std::string("unknown error") : why;
 	}
 
 	// SHOT light: a white blink when a screenshot was handed to the writer, red pulses when one failed.
@@ -845,12 +890,12 @@ struct DisplayWidget : ModuleWidget {
 	rasterlab_panel::OutputPlate* thruPlate = nullptr;
 	PJ301MPort* thruOut = nullptr;
 	ParamWidget* shotButton = nullptr;
-	Widget* shotLight = nullptr;
+	TextTipLight<MediumLight<WhiteRedLight>>* shotLight = nullptr;
 	rasterlab_panel::PanelText* shotLabel = nullptr;
 	PortWidget* audioPorts[2] = {nullptr, nullptr};
 	rasterlab_panel::PanelText* audioLabels[2] = {nullptr, nullptr};
 	ParamWidget* recButton = nullptr;
-	Widget* recLight = nullptr;
+	TextTipLight<MediumLight<RedLight>>* recLight = nullptr;
 	rasterlab_panel::PanelText* recLabel = nullptr;
 
 	DisplayWidget(Display* module) {
@@ -912,14 +957,25 @@ struct DisplayWidget : ModuleWidget {
 		// button), and the name on the outer side. The label's side is set in applyPanelHp.
 		shotButton = createParamCentered<LEDButton>(Vec(0.f, 0.f), module, Display::SHOT_PARAM);
 		addParam(shotButton);
-		shotLight = createLightCentered<MediumLight<WhiteRedLight>>(Vec(0.f, 0.f), module, Display::SHOT_LIGHT);
+		shotLight = createLightCentered<TextTipLight<MediumLight<WhiteRedLight>>>(Vec(0.f, 0.f), module, Display::SHOT_LIGHT);
+		shotLight->tipText = [light = shotLight]() {
+			const Display* d = dynamic_cast<const Display*>(light->module);
+			return d ? d->shotStatusText : std::string("Screenshot");
+		};
 		addChild(shotLight);
 		shotLabel = createPanelTextAt(Vec(0.f, 0.f), "SHOT", LABEL_MM, NVG_ALIGN_RIGHT);
 		addChild(shotLabel);
 
 		recButton = createParamCentered<LEDButton>(Vec(0.f, 0.f), module, Display::REC_PARAM);
 		addParam(recButton);
-		recLight = createLightCentered<MediumLight<RedLight>>(Vec(0.f, 0.f), module, Display::REC_LIGHT);
+		recLight = createLightCentered<TextTipLight<MediumLight<RedLight>>>(Vec(0.f, 0.f), module, Display::REC_LIGHT);
+		recLight->tipText = [light = recLight]() {
+			const Display* d = dynamic_cast<const Display*>(light->module);
+			if (!d) {
+				return std::string("Recording");
+			}
+			return display_capture::recTooltipText(d->recordingOn, nowSeconds() - d->recStartedAt, d->recFailureText);
+		};
 		addChild(recLight);
 		recLabel = createPanelTextAt(Vec(0.f, 0.f), "REC", LABEL_MM, NVG_ALIGN_LEFT);
 		addChild(recLabel);

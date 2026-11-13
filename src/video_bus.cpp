@@ -147,7 +147,10 @@ void videoBusClear(int busId) {
 	commitNode(busId, VideoBusNode {});
 }
 
-bool videoBusReadNode(int busId, VideoBusNode& node) {
+bool videoBusReadNode(int busId, VideoBusNode& node, bool* contended) {
+	if (contended) {
+		*contended = false;
+	}
 	if (!validBusId(busId)) {
 		return false;
 	}
@@ -168,7 +171,11 @@ bool videoBusReadNode(int busId, VideoBusNode& node) {
 			return node.type != VideoBusNodeType::Empty;
 		}
 	}
-	// The writer kept interrupting. Treat the bus as empty for this read only.
+	// The writer kept interrupting (for instance the audio thread was descheduled mid-write). The bus is
+	// not known to be empty: say so, so the Display can keep its last picture instead of flashing NO VIDEO.
+	if (contended) {
+		*contended = true;
+	}
 	return false;
 }
 
@@ -243,6 +250,14 @@ void videoBusPublishFeedback(int busId, int sourceBusId, const FeedbackParams& p
 	node.type = VideoBusNodeType::Feedback;
 	node.sourceBusId = sourceBusId;
 	node.feedback = params;
+	commitNode(busId, node);
+}
+
+void videoBusPublishFocus(int busId, int sourceBusId, const FocusParams& params) {
+	VideoBusNode node;
+	node.type = VideoBusNodeType::Focus;
+	node.sourceBusId = sourceBusId;
+	node.focus = params;
 	commitNode(busId, node);
 }
 

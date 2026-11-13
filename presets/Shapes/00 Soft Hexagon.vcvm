@@ -1,7 +1,7 @@
 {
   "plugin": "VideoResearchUnit",
   "model": "Shapes",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "params": [
     {"id": 0, "value": 6.0},
     {"id": 1, "value": 0.15},

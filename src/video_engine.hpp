@@ -372,6 +372,19 @@ struct RotatorParams {
 	int folds = 1;
 };
 
+// Focus (VRU-24). All values are already set by the module: focus 0..1 is the all-directions soften (0 off, 1 a
+// blur reaching 6% of the frame width each way), smear 0..1 softens along each line only (0 off, 1 a tail 15% of
+// the frame width long, mostly behind the edge, as from a signal that lags), sharp 0..1 is edge emphasis (0 off),
+// converge -1..1 slides red right and blue left by that fraction of 3% of the frame width (negative the other
+// way), mix 0..1 is dry to wet. Everything at its zero (and mix 1) passes the picture through untouched.
+struct FocusParams {
+	float focus = 0.f;
+	float smear = 0.f;
+	float sharp = 0.f;
+	float converge = 0.f;
+	float mix = 1.f;
+};
+
 // Shapes (VRU-21). One closed shape drawn as a distance picture: grey is brightness by distance from the
 // shape's edge (mid grey on the edge, brighter inside, darker outside). Sides run 3 to 12 and may fall between
 // whole numbers (the shape blends into the next polygon). Round 0..1 rounds the corners to a circle; point

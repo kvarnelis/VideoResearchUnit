@@ -39,6 +39,15 @@ std::string shortenHome(const std::string& path);
 // shortenHome(), cut to about maxChars for a menu: the end of the path is kept, with "..." in front.
 std::string shortenForMenu(const std::string& path, std::size_t maxChars = 42);
 
+// Elapsed time as a clock: "0:42", or "1:02:03" from one hour on. Negative or non-finite counts as 0.
+std::string elapsedClock(double seconds);
+
+// The words on the REC light's tooltip. `elapsedSeconds` is the recorder's own running time.
+//   recording:  "Recording 0:42"
+//   failed:     "Recording failed: <why>"   (the last recording failed and none has started since)
+//   otherwise:  "Not recording"
+std::string recTooltipText(bool recording, double elapsedSeconds, const std::string& lastFailure);
+
 // "vru-YYYY-MM-DD_HH-MM-SS" in local time. The caller adds ".png" or ".mov".
 std::string timestampStem(std::time_t when);
 

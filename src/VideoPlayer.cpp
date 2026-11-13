@@ -42,6 +42,8 @@ struct VideoPlayer : Module {
 	enum OutputId {
 		VIDEO_BUS_OUTPUT,
 		END_OUTPUT,
+		LEFT_AUDIO_OUTPUT,
+		RIGHT_AUDIO_OUTPUT,
 		OUTPUTS_LEN
 	};
 	enum LightId {
@@ -83,6 +85,8 @@ struct VideoPlayer : Module {
 		configInput(SPEED_INPUT, "Speed (1 V per doubling)");
 		configOutput(VIDEO_BUS_OUTPUT, "Video bus token");
 		configOutput(END_OUTPUT, "End of clip trigger");
+		configOutput(LEFT_AUDIO_OUTPUT, "Left audio");
+		configOutput(RIGHT_AUDIO_OUTPUT, "Right audio");
 		configLight(PLAY_LIGHT, "Playing");
 		configLight(LOOP_LIGHT, "Loop on");
 
@@ -126,6 +130,14 @@ struct VideoPlayer : Module {
 		const float speed = std::exp2(clamp(octaves, -2.f, 1.f));
 		engine->setSpeed(speed);
 		speedNow.store(speed, std::memory_order_relaxed);
+
+		// The clip's own soundtrack, +-5 V at full scale. The engine follows SPEED and the transport.
+		engine->setAudioSampleRate(args.sampleRate);
+		float audioLeft = 0.f;
+		float audioRight = 0.f;
+		engine->audioFrame(audioLeft, audioRight);
+		outputs[LEFT_AUDIO_OUTPUT].setVoltage(clamp(audioLeft, -1.f, 1.f) * 5.f);
+		outputs[RIGHT_AUDIO_OUTPUT].setVoltage(clamp(audioRight, -1.f, 1.f) * 5.f);
 
 		// One trigger pulse each time the clip ends, including each wrap while looping.
 		const uint32_t endNow = engine->endCount();
@@ -641,8 +653,11 @@ struct VideoPlayerWidget : ModuleWidget {
 		addInput(createInputCentered<PJ301MPort>(mm2px(Vec(jackX, speedY)), module, VideoPlayer::SPEED_INPUT));
 
 		// Outputs. BUS is the video bus output, labelled the same way on every VRU module.
-		addPlatedOutput<PJ301MPort>(this, Vec(W * 0.5f - 13.f, 119.f), "END", module, VideoPlayer::END_OUTPUT);
-		addPlatedOutput<PJ301MPort>(this, Vec(W * 0.5f + 13.f, 119.f), "BUS", module, VideoPlayer::VIDEO_BUS_OUTPUT);
+		// L and R carry the clip's soundtrack; four plates of 9.2 mm fit the 12 HP width at 14 mm pitch.
+		addPlatedOutput<PJ301MPort>(this, Vec(W * 0.5f - 21.f, 119.f), "L", module, VideoPlayer::LEFT_AUDIO_OUTPUT);
+		addPlatedOutput<PJ301MPort>(this, Vec(W * 0.5f - 7.f, 119.f), "R", module, VideoPlayer::RIGHT_AUDIO_OUTPUT);
+		addPlatedOutput<PJ301MPort>(this, Vec(W * 0.5f + 7.f, 119.f), "END", module, VideoPlayer::END_OUTPUT);
+		addPlatedOutput<PJ301MPort>(this, Vec(W * 0.5f + 21.f, 119.f), "BUS", module, VideoPlayer::VIDEO_BUS_OUTPUT);
 	}
 
 	void appendContextMenu(ui::Menu* menu) override {

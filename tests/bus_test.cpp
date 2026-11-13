@@ -556,6 +556,47 @@ void testSeqlock() {
 	videoBusClear(bus);
 }
 
+// The Display shows NO VIDEO when the renderer has no signal. A bus read that the writer keeps interrupting
+// (the audio thread publishing every sample) says nothing about whether the bus is empty, so the renderer
+// holds its last picture for that frame. Here the writer republishes the same live picture as fast as it
+// can; the renderer must never lose the signal. After a real clear it must lose it at once.
+void testNoFlashUnderWriterContention() {
+	std::printf("no NO VIDEO flash while the writer hammers the bus\n");
+	const int bus = 41;
+	const int frameId = videoExternalFrameAllocate();
+	const std::vector<unsigned char> px(4u * 8u * 8u, 200);
+	videoExternalFramePublish(frameId, px.data(), 8, 8, 0.0);
+	videoBusPublishExternalFrame(bus, frameId);
+	VideoGraphRenderer renderer;
+	renderer.renderBus(bus, 8, 8);
+	check(renderer.hasSignal(), "the first picture has a signal");
+
+	std::atomic<bool> done {false};
+	std::thread writer([&]() {
+		while (!done.load()) {
+			videoBusPublishExternalFrame(bus, frameId);
+		}
+	});
+	long frames = 0;
+	long lost = 0;
+	for (int i = 0; i < 200000; ++i) {
+		renderer.renderBus(bus, 8, 8);
+		++frames;
+		if (!renderer.hasSignal()) {
+			++lost;
+		}
+	}
+	done.store(true);
+	writer.join();
+	std::printf("  %ld renders, %ld without signal\n", frames, lost);
+	check(lost == 0, "the renderer never loses the signal while the bus is only being rewritten");
+
+	videoBusClear(bus);
+	renderer.renderBus(bus, 8, 8);
+	check(!renderer.hasSignal(), "a real clear still shows no signal at once");
+	videoExternalFrameRelease(frameId);
+}
+
 void testSlotAllocation() {
 	std::printf("slot allocation past 8 instances\n");
 
@@ -7764,6 +7805,7 @@ int main(int argc, char** argv) {
 	testBusMixer();
 	testCycle();
 	testSeqlock();
+	testNoFlashUnderWriterContention();
 	testSlotAllocation();
 	testSignalRingRetry();
 	testSignalRingSlotReuse();

@@ -68,6 +68,7 @@ private:
 	void renderWaveShaperFrame(Frame& src, Frame& out, int width, int height, const WaveShaperParams& params);
 	void renderFreezeFrame(Frame& src, Frame& out, int width, int height, const FreezeFrameParams& params);
 	void renderFeedbackFrame(Frame& src, Frame& out, int width, int height, const FeedbackParams& params);
+	void renderFocusFrame(Frame& src, Frame& out, int width, int height, const FocusParams& params);
 	void renderRotatorFrame(Frame& src, Frame& out, int width, int height, const RotatorParams& params);
 	Status renderVideoMixerNode(const VideoMixerParams& params, int width, int height, int depth, Frame& out);
 	void renderVideoMixerFrame(const Frame* onAir, const Frame* next, const Frame* pattern, const Frame* key, const Frame* matte, Frame& out, int width, int height, const VideoMixerParams& params);
@@ -100,6 +101,13 @@ private:
 	Frame frozenResampled;
 	FrameRingFrame feedbackPrev;
 	Frame feedbackResampled;
+	// Focus scratch: three planar float pictures (R, G, B planes of width x height each), a padded line and a
+	// column sum. Sized on the first frame and when the picture size changes, never per frame.
+	std::vector<float> focusPlanes[3];
+	std::vector<float> focusLine;
+	std::vector<float> focusColumn;
+	std::vector<float> focusRowA;
+	std::vector<float> focusRowB;
 	ExternalVideoFrame externalFrame;
 	// CRT beam state (see crt_beam.hpp). Each beam node on a bus (Scope Trace, DeflectionYoke) has its own
 	// energy field: it decays once per render and takes new beam energy on top, so persistence is a
@@ -148,6 +156,7 @@ private:
 	std::vector<std::array<float, 2>> scanProcessorBounds;
 	SignalWindow scanProcessorSignal;
 
+	bool readContended = false;  // a bus read gave up because the writer kept interrupting it
 	bool signal = false;
 	bool cycle = false;
 };

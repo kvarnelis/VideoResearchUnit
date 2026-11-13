@@ -6,6 +6,7 @@
 #include "inverse_map.hpp"
 #include "cv_param.hpp"
 #include "deflection_yoke_math.hpp"
+#include "focus_filter.hpp"
 
 #include <algorithm>
 #include <array>
@@ -34,6 +35,7 @@ VideoGraphRenderer::VideoGraphRenderer() : pool(static_cast<size_t>((kMaxDepth +
 const VideoGraphRenderer::Frame& VideoGraphRenderer::renderBus(int busId, int width, int height) {
 	signal = false;
 	cycle = false;
+	readContended = false;
 	if (width <= 0 || height <= 0) {
 		return none;
 	}
@@ -50,8 +52,9 @@ const VideoGraphRenderer::Frame& VideoGraphRenderer::renderBus(int busId, int wi
 		return lastGood;
 	}
 
-	if (status == Status::Cycle) {
-		cycle = true;
+	// A read the writer kept interrupting says nothing about the bus: hold the last picture for this frame.
+	if (status == Status::Cycle || (status == Status::Empty && readContended)) {
+		cycle = status == Status::Cycle;
 		if (busId == lastGoodBus && width == lastGoodWidth && height == lastGoodHeight && !lastGood.empty()) {
 			signal = true;
 			return lastGood;
@@ -66,7 +69,11 @@ VideoGraphRenderer::Status VideoGraphRenderer::renderNode(int busId, int width, 
 	}
 
 	VideoBusNode node;
-	if (!videoBusReadNode(busId, node)) {
+	bool contended = false;
+	if (!videoBusReadNode(busId, node, &contended)) {
+		if (contended) {
+			readContended = true;
+		}
 		return Status::Empty;
 	}
 
@@ -129,6 +136,7 @@ VideoGraphRenderer::Status VideoGraphRenderer::renderNodeBody(int busId, const V
 	case VideoBusNodeType::WaveShaper:
 	case VideoBusNodeType::Feedback:
 	case VideoBusNodeType::Rotator:
+	case VideoBusNodeType::Focus:
 	case VideoBusNodeType::FreezeFrame: {
 		// Single-input processors: the source renders into this depth's scratch frame.
 		Frame& src = scratch(depth, 0);
@@ -146,6 +154,7 @@ VideoGraphRenderer::Status VideoGraphRenderer::renderNodeBody(int busId, const V
 		case VideoBusNodeType::WaveShaper: renderWaveShaperFrame(src, out, width, height, node.waveShaper); break;
 		case VideoBusNodeType::Feedback: renderFeedbackFrame(src, out, width, height, node.feedback); break;
 		case VideoBusNodeType::Rotator: renderRotatorFrame(src, out, width, height, node.rotator); break;
+		case VideoBusNodeType::Focus: renderFocusFrame(src, out, width, height, node.focus); break;
 		case VideoBusNodeType::FreezeFrame: renderFreezeFrame(src, out, width, height, node.freezeFrame); break;
 		default: return Status::Empty;
 		}
@@ -1648,6 +1657,144 @@ void VideoGraphRenderer::renderFeedbackFrame(Frame& src, Frame& out, int width, 
 		// A concurrent renderer may have won the write while this pass was being computed.
 		if (feedbackPrev.width == width && feedbackPrev.height == height) out = feedbackPrev.rgba;
 		else resampleInto(feedbackPrev.rgba, feedbackPrev.width, feedbackPrev.height, out, width, height);
+	}
+}
+
+// Focus (VRU-24): CONVERGE, then FOCUS and SMEAR, then SHARP, then MIX (see focus_filter.hpp). A control at its
+// zero costs nothing; with every control at zero, or MIX at 0, the source is swapped into the output untouched.
+void VideoGraphRenderer::renderFocusFrame(Frame& src, Frame& out, int width, int height, const FocusParams& params) {
+	namespace ff = focus_filter;
+	const size_t pixels = static_cast<size_t>(width) * static_cast<size_t>(height);
+	if (src.size() != pixels * 4u || width < 1 || height < 1) {
+		out.swap(src);
+		return;
+	}
+	const float mix = clamp01(params.mix);
+	const float focusPx = ff::focusRadius(params.focus, width);
+	const float smearPx = ff::smearLength(params.smear, width);
+	const float shiftPx = ff::convergeShift(params.converge, width);
+	const float sharp = clamp01(params.sharp);
+	const bool doFocus = focusPx >= 0.05f;
+	const bool doSmear = smearPx >= 0.05f;
+	const bool doSharp = sharp > 0.001f;
+	const bool doConverge = std::fabs(shiftPx) >= 0.01f;
+	if (mix <= 0.0005f || !(doFocus || doSmear || doSharp || doConverge)) {
+		out.swap(src);
+		return;
+	}
+	prepare(out, width, height);
+
+	// Scratch, sized only when the picture size changes. C is needed only for SHARP's blurred copy.
+	const size_t planeCount = pixels;
+	const int sets = doSharp ? 3 : 2;
+	for (int s = 0; s < 3; ++s) {
+		const size_t want = s < sets ? planeCount * 3u : 0u;
+		if (focusPlanes[s].size() < want) {
+			focusPlanes[s].resize(want);
+		}
+	}
+	// The line pad is the largest window any pass here uses, plus its partial pixel.
+	const float maxReach = std::max({focusPx * 0.5f, smearPx * 0.5f, sharp > 0.f ? std::max(1.f, ff::kSharpRadiusFraction * static_cast<float>(width)) : 0.f}) + 3.f;
+	const size_t lineNeed = 3u * (static_cast<size_t>(width) + 2u * static_cast<size_t>(maxReach) + 8u);
+	if (focusLine.size() < lineNeed) focusLine.resize(lineNeed);
+	if (focusColumn.size() < static_cast<size_t>(width)) focusColumn.resize(static_cast<size_t>(width));
+	if (focusRowA.size() < 3u * static_cast<size_t>(width)) focusRowA.resize(3u * static_cast<size_t>(width));
+	if (focusRowB.size() < 3u * static_cast<size_t>(width)) focusRowB.resize(3u * static_cast<size_t>(width));
+	float* A = focusPlanes[0].data();
+	float* B = focusPlanes[1].data();
+	float* C = doSharp ? focusPlanes[2].data() : nullptr;
+	float* line = focusLine.data();
+	float* column = focusColumn.data();
+
+	// 1. Row by row, while the row is still in cache: load a channel (red slid right and blue slid left for
+	// CONVERGE, linear between pixels), then FOCUS's sideways passes and SMEAR (sideways only), each two passes so
+	// the kernel is a triangle. These sideways steps commute, so doing them per row is the same picture as doing
+	// them on whole planes, with far less memory traffic.
+	const float focusHalf = focusPx * 0.5f;  // two passes of this reach focusPx, the stated radius
+	const ff::Window focusWin = ff::makeWindow(focusHalf, focusHalf);
+	const float smearHalf = smearPx * 0.5f;  // two passes, so the tail is about the stated length
+	const ff::Window smearWin = ff::makeWindow(smearHalf * ff::kSmearBehindShare, smearHalf * (1.f - ff::kSmearBehindShare));
+	float* rowA[3] = {focusRowA.data(), focusRowA.data() + width, focusRowA.data() + 2 * static_cast<size_t>(width)};
+	float* rowB[3] = {focusRowB.data(), focusRowB.data() + width, focusRowB.data() + 2 * static_cast<size_t>(width)};
+	const float* inA[3] = {rowA[0], rowA[1], rowA[2]};
+	const float* inB[3] = {rowB[0], rowB[1], rowB[2]};
+	for (int y = 0; y < height; ++y) {
+		const unsigned char* row = src.data() + static_cast<size_t>(y) * width * 4u;
+		for (int c = 0; c < 3; ++c) {
+			if (doConverge && c != 1) {
+				const float shift = c == 0 ? -shiftPx : shiftPx;
+				for (int x = 0; x < width; ++x) {
+					const float at = std::clamp(static_cast<float>(x) + shift, 0.f, static_cast<float>(width - 1));
+					const int i0 = static_cast<int>(at);
+					const int i1 = std::min(i0 + 1, width - 1);
+					const float f = at - static_cast<float>(i0);
+					rowA[c][x] = row[i0 * 4 + c] * (1.f - f) + row[i1 * 4 + c] * f;
+				}
+			}
+			else {
+				for (int x = 0; x < width; ++x) {
+					rowA[c][x] = row[x * 4 + c];
+				}
+			}
+		}
+		if (doFocus) {
+			ff::boxRow3(inA, rowB, width, focusWin, line);
+			ff::boxRow3(inB, rowA, width, focusWin, line);
+		}
+		if (doSmear) {
+			ff::boxRow3(inA, rowB, width, smearWin, line);
+			ff::boxRow3(inB, rowA, width, smearWin, line);
+		}
+		for (int c = 0; c < 3; ++c) {
+			std::copy(rowA[c], rowA[c] + width, A + c * planeCount + static_cast<size_t>(y) * width);
+		}
+	}
+
+	// 2. FOCUS's up and down passes need whole planes.
+	if (doFocus) {
+		for (int c = 0; c < 3; ++c) {
+			ff::twiceColumns(A + c * planeCount, B + c * planeCount, width, height, focusWin, column);
+		}
+	}
+
+	// 3. SHARP: unsharp mask. C is a small blur of the picture; the difference is added back.
+	if (doSharp) {
+		const float r = std::max(1.f, ff::kSharpRadiusFraction * static_cast<float>(width)) * 0.5f;
+		const ff::Window win = ff::makeWindow(r, r);
+		for (int y = 0; y < height; ++y) {
+			const size_t base = static_cast<size_t>(y) * width;
+			const float* inRows[3] = {A + base, A + planeCount + base, A + 2 * planeCount + base};
+			float* tmp[3] = {rowA[0], rowA[1], rowA[2]};
+			float* dst[3] = {C + base, C + planeCount + base, C + 2 * planeCount + base};
+			ff::boxRow3(inRows, tmp, width, win, line);
+			ff::boxRow3(inA, dst, width, win, line);
+		}
+		for (int c = 0; c < 3; ++c) {
+			ff::boxColumns(C + c * planeCount, B + c * planeCount, width, height, win, column);
+			ff::boxColumns(B + c * planeCount, C + c * planeCount, width, height, win, column);
+		}
+	}
+
+	// 4. Mix with the untouched source and write bytes.
+	const float amount = sharp * ff::kSharpMaxAmount;
+	for (int y = 0; y < height; ++y) {
+		const size_t base = static_cast<size_t>(y) * width;
+		const unsigned char* in = src.data() + base * 4u;
+		unsigned char* dst = out.data() + base * 4u;
+		for (int ch = 0; ch < 3; ++ch) {
+			const float* a = A + ch * planeCount + base;
+			const float* d = doSharp ? C + ch * planeCount + base : nullptr;
+			for (int x = 0; x < width; ++x) {
+				float v = a[x];
+				if (d) v += amount * (v - d[x]);
+				const float dry = in[x * 4 + ch];
+				v = dry + (v - dry) * mix;
+				dst[x * 4 + ch] = static_cast<unsigned char>(std::clamp(v + 0.5f, 0.f, 255.f));
+			}
+		}
+		for (int x = 0; x < width; ++x) {
+			dst[x * 4 + 3] = 255;
+		}
 	}
 }
 

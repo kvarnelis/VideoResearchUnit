@@ -48,6 +48,7 @@ extern Model* modelColorizer;
 extern Model* modelRamps;
 extern Model* modelFeedback;
 extern Model* modelRotator;
+extern Model* modelFocus;
 extern Model* modelShapes;
 extern Model* modelVideoMixer;
 

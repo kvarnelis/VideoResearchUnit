@@ -1,7 +1,7 @@
 # Video Research Unit
 
-Video Research Unit (VRU) is a video synthesizer you patch in VCV Rack 2. It is one plugin with 23
-modules, numbered VRU–01 to VRU–23. Rack's module browser lists them under the brand
+Video Research Unit (VRU) is a video synthesizer you patch in VCV Rack 2. It is one plugin with 24
+modules, numbered VRU–01 to VRU–24. Rack's module browser lists them under the brand
 "Video Research Unit". Sources make a picture. Processors bend, color and mix it. Display or Syphon
 Out shows it. CV from any Rack module can drive the CV inputs.
 
@@ -40,6 +40,7 @@ VRU–20  ROTATOR
 VRU–21  SHAPES
 VRU–22  VIDEO MIXER
 VRU–23  OCTOSCILLATOR
+VRU–24  FOCUS
 ```
 
 The sections below group the modules by what they do and call them by name.
@@ -85,10 +86,12 @@ Modules with a BUS output put a picture on a numbered video bus. Later sections 
   - BEAM sets the width of the beam, a round soft spot. DWELL sets how much brighter the trace is
     where the beam moves slowly. At 0 the line is even. At 1 a stopped beam burns a dot, as on a CRT.
   - Presets: XY Lissajous, Audio Scope, Dual Trace, Vector Bloom and Polar Drift.
-- **Video Player**: plays a video file or a YouTube link and puts the picture on its bus. It has no
-  audio. Press OPEN FILE, or right-click the module, to choose an mp4, m4v or mov file. Jacks cover
-  play/pause, STOP, LOOP and SPEED, which runs from 0.25x to 2x at 1 V per doubling. END gives a
-  pulse at the end of each clip.
+- **Video Player**: plays a video file or a YouTube link and puts the picture on its bus and the
+  clip's own sound on the L and R outputs (+-5 V at full scale; a mono clip feeds both, and a clip with
+  no sound track is silent). Press OPEN FILE, or right-click the module, to choose an mp4, m4v or mov
+  file. Jacks cover play/pause, STOP, LOOP and SPEED, which runs from 0.25x to 2x at 1 V per doubling.
+  The sound follows SPEED like tape, so 2x is faster and higher, and it is silent while paused or
+  stopped. END gives a pulse at the end of each clip.
   - For YouTube, right-click the module and paste a link. VRU runs yt-dlp to download one
     H.264 mp4 file into a cache folder in Rack's user folder and plays that file. Downloads are
     reused, and the menu can open the folder.
@@ -136,6 +139,13 @@ Processors read a picture on BUS IN and put a changed picture on BUS.
   round by 1/16, 1/12, 1/8, 1/6 or 1/4 turn, with GLIDE to ease the move. FOLDS cuts the picture into 2 to 12
   wedges for a kaleidoscope. EDGE is Black, Hold, Repeat or Mirror. RESET zeroes the spin and the notches.
   There is no perspective tilt.
+- **Focus**: softens, smears, sharpens and misconverges a picture the way an old picture tube did.
+  FOCUS softens in every direction, up to a blur about 6% of the picture width. SMEAR softens along
+  each line only, mostly trailing to the right, up to about 15% of the width, and leaves the lines
+  apart. SHARP crisps the edges with a thin bright and dark rim; zero is off. CONVERGE slides red and
+  blue apart sideways in opposite directions. MIX blends with the original. Each knob has a CV jack
+  and a small CV AMT trimmer. The order is CONVERGE, then FOCUS and SMEAR, then SHARP, then MIX.
+  With every effect at zero it costs nothing.
 
 ### Mixing
 
@@ -330,6 +340,26 @@ Syphon In, Syphon Out, the Video Player decoder and Display REC use macOS framew
 without them they are stand-ins that do nothing, and the Syphon modules report NO SYPHON. Syphon
 works inside Rack, both in a loop from Syphon Out to Syphon In and in the system server list. It
 has not yet been checked with OBS or Resolume.
+
+## Old patches
+
+Version 2.1.0 added the Focus module, gives the Video Player L and R audio outputs carrying the clip's own sound, stops the Display flashing NO VIDEO now and then while the Video Player
+loops, and makes the Display's REC light tooltip show how long the recording has run. It also gave two modules new internal names: Wobbulator is now DeflectionYoke and RuttEtra is now ScanProcessor.
+Panels, names and every parameter are unchanged, but a patch saved with 2.0.0 that uses the Deflection Yoke or the Scan Processor will not find them until it is migrated.
+Run `python3 scripts/migrate-slug.py --dry-run` to see what it would change, then run it without `--dry-run` while Rack is closed. It backs up every file
+it touches to `~/VRU-migration-backups/` first, with a restore script. Patches that use neither module are unaffected.
+
+Three recent changes to Scope Trace affect patches saved before them.
+
+- DWELL did not exist. A patch saved before DWELL loads it at 0, the even trace that patch was made
+  with. A new Scope Trace starts at DWELL 0.5.
+- ROTATE wraps around instead of stopping at plus or minus 180 degrees. A patch whose rotation knob plus
+  CV stayed inside the range draws the same. A patch that drove it past the end now keeps turning.
+- BEAM is now a true Gaussian width, so an old patch draws wider, softer lines. Where strokes
+  overlap, under a long DECAY and with BLOOM, it can also look brighter overall.
+
+`docs/scope-trace-audit.md`, section 8, has the numbers. `docs/architecture.md` lists every
+behavior change under "Behaviour changes for old patches".
 
 ## Building from source
 
