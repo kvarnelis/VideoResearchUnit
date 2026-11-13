@@ -2,8 +2,8 @@
 
 ## Names
 
-The plugin is Video Research Unit (VRU), version 2.0.0, with 23 modules. It was called RasterLab before
-2.8.0. Every module has a catalogue number, VRU–01 to VRU–22, and Rack's module browser shows
+The plugin is Video Research Unit (VRU), version 2.1.0, with 24 modules. It was called RasterLab before
+2.8.0. Every module has a catalogue number, VRU–01 to VRU–24, and Rack's module browser shows
 `VRU–01 Deflection Yoke`. The table is in `AGENTS.md`. The plugin slug is `VideoResearchUnit`. Version 2.1.0 renamed two module slugs, Wobbulator to DeflectionYoke and RuttEtra to ScanProcessor; `scripts/migrate-slug.py` migrates patches saved with 2.0.0.
 
 This document names modules by their Rack names. The code names are `DeflectionYoke` for VRU–01 Deflection
@@ -58,7 +58,7 @@ node into a plugin-global registry and emits a normal Rack voltage token.
 
 A downstream video module input reads the token and resolves the corresponding
 node in the registry. `Video Oscillator`, `Ramps` and `Shapes` publish generator nodes. `Deflection Yoke`, `Scan Processor`, `Line Field`, `Color Lab`, `Colorizer`,
-`Keyer`, `Wave Shaper`, `Freeze Frame`, `Feedback`, and `Rotator` publish processor nodes that point to
+`Keyer`, `Wave Shaper`, `Freeze Frame`, `Feedback`, `Rotator` and `Focus` publish processor nodes that point to
 their source bus and store processor state. `Bus Mixer` publishes a processor
 node that points to bus A plus secondary bus tokens for bus B and an optional
 matte bus. `Video Mixer` publishes a processor node whose params hold seven buses (the four pictures,
@@ -87,7 +87,7 @@ interfaces do not provide the MHz bandwidth expected by patchable video.
 - The render size is 4:3. Rows = on-screen height in device pixels (zoom times the larger of pixelRatio and windowRatio), clamped to 480..1080; width = rows x 4/3, capped at 2048. At 2x on the default panel that is 837 x 628 (screen 106.3 mm tall at 75 px/in).
 - Ports: A, B and C take video bus tokens. L and R take audio for REC only. THRU repeats the selected input voltage, so a Display can sit mid-chain. When the selected input is unpatched, THRU outputs 0 V. The checks are `testDisplayInputs()` and `testThruVoltage()` in `tests/bus_test.cpp`.
 - Existing param, port and light IDs are unchanged. A is input 0, the former `VIDEO_BUS_INPUT`, now `BUS_A_INPUT`. `BUS_B_INPUT` and `BUS_C_INPUT`, `SEL_PARAM`, and the consecutive green/red pairs `SEL_A_LIGHT` / `SEL_A_LIGHT_RED`, `SEL_B_LIGHT` / `SEL_B_LIGHT_RED`, `SEL_C_LIGHT` / `SEL_C_LIGHT_RED` are appended before their respective `*_LEN`. `SIGNAL_LIGHT` keeps its retired ID, with no widget or updates. `AUDIO_L_INPUT` and `AUDIO_R_INPUT` were appended after `BUS_C_INPUT` (ids 3 and 4), so cables in saved patches keep their ids. Their tooltips read "Audio left" and "Audio right, record only".
-- SEL cycles A, B, C, A on the audio thread, so THRU follows in the same step. The selected input light is green when its bus is active and red when there is no video; unselected lights are off. Unpatched A still reads bus 1; unpatched B or C reads no bus and shows NO VIDEO. Patch JSON saves `selectedInput` as 0, 1 or 2; missing or invalid values load as A. The Input submenu beside Panel width also selects A, B or C. The pure rules live in `src/display_select.hpp`.
+- SEL cycles A, B, C, A on the audio thread, so THRU follows in the same step. The selected input light is green when its bus is active and red when there is no video; unselected lights are off. Unpatched A still reads bus 1; unpatched B or C reads no bus and shows NO VIDEO. Since 2.1.0 a read that the writer kept interrupting (the Video Player republishes its picture every audio sample) does not count as an empty bus: the Display holds its last picture for that frame, and only a real clear shows NO VIDEO at once. Patch JSON saves `selectedInput` as 0, 1 or 2; missing or invalid values load as A. The Input submenu beside Panel width also selects A, B or C. The pure rules live in `src/display_select.hpp`.
 - The widget box is sized in Rack grid units: `Vec(hp * RACK_GRID_WIDTH, RACK_GRID_HEIGHT)`. Never size a ModuleWidget from millimetres. Rack's `RackWidget::addModule` throws unless the height is exactly 380 px, and the uncaught throw aborts Rack. `mm2px(128.5 mm)` is 379.43 px, and that crashed Rack on every Display added from the module browser (2026-11-07). Loading a patch skips the check, so saved patches hid the bug.
 
 ### Display capture: SHOT and REC
@@ -96,7 +96,7 @@ interfaces do not provide the MHz bandwidth expected by patchable video.
 - **No dialog on any button press, ever.** Names are automatic: `vru-YYYY-MM-DD_HH-MM-SS.png` / `.mov` (local time), with `-2`, `-3`, ... added when the name exists. Files are created exclusively, so nothing is overwritten.
 - Folder: `~/Pictures/Video Research Unit` by default (`~/Pictures/RasterLab` before 2.8.0; files saved there stay where they are), created on the first save. It is deliberately not Desktop, Documents or Downloads, where macOS asks for permission. It is also used when the chosen folder no longer exists. The right-click menu is the only place a folder picker opens ("Choose folder...", `osdialog_file(OSDIALOG_OPEN_DIR, ...)` from the menu action on the UI thread); it also has "Show folder" and "Use default folder". The chosen folder is saved per module (`captureFolder` in `dataToJson`) and as the default for new Displays (`settingsToJson` / `settingsFromJson` in `src/plugin.cpp`), so it lasts across patches and restarts.
 - Failures show no dialog: a `WARN` line in the Rack log, and the SHOT light flashes red (REC: its light flickers red and the badge reads "REC FAILED" for 4 s) instead of the normal blink.
-- Indicator: the REC light breathes while recording, and a small "REC" badge sits at the top left of the screen. The badge is drawn with NanoVG after the picture has been read back, so it is never in a screenshot or a movie.
+- Indicator: the REC light breathes while recording, and a small "REC" badge sits at the top left of the screen. Since 2.1.0 the REC light's tooltip reads "Recording 0:42" (h:mm:ss from an hour) while a recording runs, "Not recording" when idle and "Recording failed: <why>" after a failed one; the SHOT light's reads "Screenshot ready", "Screenshot saved" or "Screenshot failed: <why>". The badge is drawn with NanoVG after the picture has been read back, so it is never in a screenshot or a movie.
 - Button positions (mm from the panel's left edge). Each light is centred on its button. The SHOT label is right-aligned 4.45 mm left of the SHOT button and the REC label is left-aligned 4.45 mm right of the REC button, both in `LABEL_MM` text. Below 24 HP there is no room beside the jacks, so the pair sits in its own row above the strip (y 108.6); from 24 HP it sits on the strip row (y 119.8), one each side of the A / B / C / SEL / THRU / L / R group, four pitches from the panel centre with each label's outer edge on the bezel. Jack and button x, with the audio jacks:
 
   | HP | SHOT x | REC x | SHOT/REC y | A x | SEL x | THRU x | L x | R x | L/R y |
@@ -1375,7 +1375,7 @@ INTENSITY (CV added to the knob, 10 V = full knob travel), H POS and V POS (CV a
 filtered), BLANK (beam off while above 1 V). Outputs: BUS 1 and BUS 2 (on black plates, the same video bus
 token), with a SIG light.
 
-Panel (13 HP, 66.04 mm, titled SCAN WIGGLER): four columns 15.24 mm apart and six rows. The knobs and
+Panel (13 HP, 66.04 mm, titled SCAN PROCESSOR): four columns 15.24 mm apart and six rows. The knobs and
 switches fill the top three rows. Each switch carries only its name, with no position words. The CV jacks
 fill rows four and five, each H POS, INTENSITY and V POS jack under the knob it adds to, and the bus jacks
 and SIG light are in row six. The panel label for Z-INTENSITY is Z-INT.
@@ -1527,7 +1527,7 @@ apart, SHARP overshoot, CONVERGE direction, and writes `focus_contact_sheet.png`
 
 ### Octoscillator (VRU–23)
 
-Added in 2.12.0. CV-only: no video bus, texture, frame or signal-ring allocation. Eight
+Added in the private 2.12.0 build, so it is in the first public release, 2.0.0. CV-only: no video bus, texture, frame or signal-ring allocation. Eight
 independent Lorenz trajectories (sigma 10, rho 28, beta 8/3) expose X, Y and centered Z, giving
 24 mono Rack voltage outputs. A ninth trajectory supplies common movement. RELATE is a convex
 blend of each local coordinate with the corresponding common coordinate, not nonlinear coupling

@@ -329,7 +329,7 @@ You need a `.vcvplugin` file. Building from source makes one, as described below
 2. Copy `VideoResearchUnit-<version>-mac-arm64.vcvplugin` into `plugins-mac-arm64` in Rack's user folder.
    On a Mac that is `~/Library/Application Support/Rack2`. Help > Open user folder opens it.
 3. Start Rack. It unpacks the file. The modules appear in the module browser under
-   "Video Research Unit", named VRU–01 to VRU–22.
+   "Video Research Unit", named VRU–01 to VRU–24.
 
 The plugin's id is `VideoResearchUnit`. It is in the package file name and the plugin folder.
 
@@ -343,8 +343,8 @@ has not yet been checked with OBS or Resolume.
 
 ## Old patches
 
-Version 2.1.0 added the Focus module, gives the Video Player L and R audio outputs carrying the clip's own sound, stops the Display flashing NO VIDEO now and then while the Video Player
-loops, and makes the Display's REC light tooltip show how long the recording has run. It also gave two modules new internal names: Wobbulator is now DeflectionYoke and RuttEtra is now ScanProcessor.
+Version 2.1.0 added the Focus module, gave the Video Player L and R audio outputs carrying the clip's own sound, stopped the Display flashing NO VIDEO now and then while the Video Player
+loops, and made the Display's REC light tooltip show how long the recording has run. It also gave two modules new internal names: Wobbulator is now DeflectionYoke and RuttEtra is now ScanProcessor.
 Panels, names and every parameter are unchanged, but a patch saved with 2.0.0 that uses the Deflection Yoke or the Scan Processor will not find them until it is migrated.
 Run `python3 scripts/migrate-slug.py --dry-run` to see what it would change, then run it without `--dry-run` while Rack is closed. It backs up every file
 it touches to `~/VRU-migration-backups/` first, with a restore script. Patches that use neither module are unaffected.

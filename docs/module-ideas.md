@@ -1,7 +1,7 @@
 # Candidate modules
 
 Drafted 2026-11-09 as an ideas list, not a plan. Since then Colorizer, Ramps
-and Feedback have been built and Slit Scan and Tape Loop planned; nothing else
+and Feedback have been built (and later Rotator, Shapes and Video Mixer) and Slit Scan and Tape Loop planned; nothing else
 in it is committed to. It was made from the code as of commit fa0fd91 and a
 survey of video-art and television techniques; sources are at the end.
 
@@ -719,7 +719,7 @@ Keep to plain television and video-art vocabulary, as the current panels do
 names; AGENTS.md says why.
 
 2026-11-11: the plugin was renamed Video Research Unit (VRU) and its modules numbered
-VRU–01 to VRU–19 (table in AGENTS.md). Scan Wiggler is now Scan Processor (VRU–02).
+VRU–01 to VRU–19 (the catalogue now runs to VRU–24; table in AGENTS.md). Scan Wiggler is now Scan Processor (VRU–02).
 
 ## Sources checked
 

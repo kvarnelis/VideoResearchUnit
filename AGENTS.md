@@ -57,7 +57,7 @@ output ids and the `rasterlab_panel` namespace are as in the source.
   on its own allocated video bus (see docs/architecture.md, "Video bus model").
 - `VRU–05 Video Oscillator`: publishes generated video/test-pattern state on its own allocated video bus (see docs/architecture.md, "Video bus model").
 - `VRU–06 Ramps`: publishes two-layer grayscale shape state on its own allocated video bus (see docs/architecture.md, "Video bus model").
-- `VRU–07 Video Player`: plays a local video file or YouTube source and publishes its frames on its own allocated video bus (see docs/architecture.md, "Video bus model").
+- `VRU–07 Video Player`: plays a local video file or YouTube source and publishes its frames on its own allocated video bus (see docs/architecture.md, "Video bus model"). Since 2.1.0 it also has L and R audio outputs carrying the clip's own soundtrack (docs/architecture.md, "Video Player").
 - `VRU–08 Syphon In`: receives frames through the optional macOS Syphon bridge and publishes an external frame on its own allocated video bus.
 - `VRU–09 Color Lab`: consumes a video bus token and publishes color-mutated output on its own allocated video bus (see docs/architecture.md, "Video bus model").
 - `VRU–10 Colorizer`: consumes a video bus token and publishes a four-stop luma-to-colour gradient on its own allocated video bus (see docs/architecture.md, "Video bus model").
@@ -66,7 +66,7 @@ output ids and the `rasterlab_panel` namespace are as in the source.
 - `VRU–13 Bus Mixer`: consumes two video bus tokens plus optional matte bus and publishes mixed output on its own allocated video bus (see docs/architecture.md, "Video bus model").
 - `VRU–14 Feedback`: consumes a video bus token and publishes feedback output on its own allocated video bus; frame copy and the feedback step happen in the renderer, not `process()`.
 - `VRU–15 Freeze Frame`: consumes a video bus token and publishes held/strobed frame output on its own allocated video bus (see docs/architecture.md, "Video bus model"); frame copy happens in the renderer, not `process()`.
-- `VRU–16 Display`: selects one of three video bus inputs (A, B, C) with SEL or the Input submenu, renders its resolved graph, and repeats its token on THRU. L and R are audio inputs for REC only: with a cable in either, the recorded `.mov` gets a stereo AAC track (docs/architecture.md, "Audio for REC"). The selected input light is green for an active bus and red for no video. Unpatched A reads bus 1; unpatched B/C means no video.
+- `VRU–16 Display`: selects one of three video bus inputs (A, B, C) with SEL or the Input submenu, renders its resolved graph, and repeats its token on THRU. L and R are audio inputs for REC only: with a cable in either, the recorded `.mov` gets a stereo AAC track (docs/architecture.md, "Audio for REC"). The selected input light is green for an active bus and red for no video. Unpatched A reads bus 1; unpatched B/C means no video. Since 2.1.0 it holds its last picture when a bus read is interrupted instead of flashing NO VIDEO, and its SHOT and REC light tooltips say what happened (REC shows elapsed recording time).
 - `VRU–17 Syphon Out`: resolves a video bus, uploads it to an OpenGL texture, and publishes through the optional macOS Syphon bridge.
 - `VRU–18 Dual LFO Chaos`: CV-only modulation utility; it does not publish a video bus.
 - `VRU–19 1V CV Out`: scales ordinary Rack CV into `0-1V`, `+/-1V`, `0-5V`, or `+/-5V` video-synth ranges for routing through VCV Audio to DC-coupled Expert Sleepers-style outputs. It does not generate video-rate RGB.
@@ -98,7 +98,7 @@ The plugin-global video bus currently stores small graph nodes:
 
 - generator nodes from `Video Oscillator`, `Ramps`, and `Shapes`
 - processor nodes from `Deflection Yoke`
-- processor nodes from `Line Field`, `Color Lab`, `Colorizer`, `Keyer`, `Bus Mixer`, `Wave Shaper`, `Freeze Frame`, `Feedback`, `Rotator`, and `Video Mixer`
+- processor nodes from `Line Field`, `Color Lab`, `Colorizer`, `Keyer`, `Bus Mixer`, `Wave Shaper`, `Freeze Frame`, `Feedback`, `Rotator`, `Focus`, and `Video Mixer`
 - external frame nodes from `Syphon In`
 - oscilloscope/Lissajous source nodes from `Scope Trace`
 

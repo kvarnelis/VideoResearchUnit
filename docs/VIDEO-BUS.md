@@ -5,7 +5,7 @@ video bus. Written for developers of other plugins.
 
 ## What you can do
 
-VRU modules pass pictures to each other over BUS cables. Since VRU 2.12 a plugin you write can join in,
+VRU modules pass pictures to each other over BUS cables. Since the first public release, VRU 2.0.0, a plugin you write can join in,
 through a small public C interface. Your module can read any bus as an RGBA picture (to draw it, save it,
 send it to a device), and it can act as a source: you hand VRU an RGBA picture each time you have a new
 one, and every VRU processor and sink (Display, Syphon Out, Colorizer, Keyer, Video Mixer and the rest)
@@ -282,7 +282,7 @@ Node types and how they connect:
 | Kind | Types | Source slot |
 | --- | --- | --- |
 | Generator | Generator (Video Oscillator), Ramps, Shapes, ScopeTrace, ExternalFrame (Syphon In, Video Player, outside sources) | none |
-| One-input processor | DeflectionYoke, LineField, ColorLab, Keyer, WaveShaper, FreezeFrame, ScanProcessor, Colorizer, Feedback, Rotator | `sourceBusId` |
+| One-input processor | DeflectionYoke, LineField, ColorLab, Keyer, WaveShaper, FreezeFrame, ScanProcessor, Colorizer, Feedback, Rotator, Focus | `sourceBusId` |
 | Multi-input | BusMixer (A in `sourceBusId`; B and matte in its params), VideoMixer (seven buses in its params) | see params |
 
 ### Sketches against the real internals
