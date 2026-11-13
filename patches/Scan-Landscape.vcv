@@ -1,0 +1,252 @@
+{
+  "version": "2.5.2",
+  "zoom": 1.0,
+  "gridOffset": [
+    0.0,
+    0.0
+  ],
+  "modules": [
+    {
+      "id": 1,
+      "plugin": "VideoResearchUnit",
+      "model": "VideoPlayer",
+      "version": "2.6.0",
+      "params": [
+        {
+          "id": 3,
+          "value": 1
+        }
+      ],
+      "pos": [
+        0,
+        0
+      ]
+    },
+    {
+      "id": 2,
+      "plugin": "VideoResearchUnit",
+      "model": "VideoOsc",
+      "version": "2.6.0",
+      "params": [
+        {
+          "id": 0,
+          "value": 2.0
+        }
+      ],
+      "data": {
+        "phase": 3.0
+      },
+      "pos": [
+        12,
+        0
+      ]
+    },
+    {
+      "id": 3,
+      "plugin": "VideoResearchUnit",
+      "model": "BusMixer",
+      "version": "2.6.0",
+      "params": [
+        {
+          "id": 0,
+          "value": 0.85
+        }
+      ],
+      "pos": [
+        24,
+        0
+      ]
+    },
+    {
+      "id": 4,
+      "plugin": "VideoResearchUnit",
+      "model": "ScanProcessor",
+      "version": "2.6.0",
+      "params": [
+        {
+          "id": 0,
+          "value": 0.3
+        },
+        {
+          "id": 3,
+          "value": 0.2
+        },
+        {
+          "id": 4,
+          "value": 0.7
+        },
+        {
+          "id": 5,
+          "value": 1
+        },
+        {
+          "id": 6,
+          "value": 0.7
+        },
+        {
+          "id": 8,
+          "value": 1
+        },
+        {
+          "id": 9,
+          "value": 0.5
+        },
+        {
+          "id": 10,
+          "value": 0.45
+        }
+      ],
+      "pos": [
+        32,
+        0
+      ]
+    },
+    {
+      "id": 5,
+      "plugin": "VideoResearchUnit",
+      "model": "ColorLab",
+      "version": "2.6.0",
+      "params": [
+        {
+          "id": 1,
+          "value": 1.25
+        },
+        {
+          "id": 2,
+          "value": 1.1
+        },
+        {
+          "id": 3,
+          "value": 1.1
+        }
+      ],
+      "pos": [
+        45,
+        0
+      ]
+    },
+    {
+      "id": 6,
+      "plugin": "VideoResearchUnit",
+      "model": "Display",
+      "version": "2.6.0",
+      "params": [],
+      "pos": [
+        55,
+        0
+      ]
+    },
+    {
+      "id": 7,
+      "plugin": "VideoResearchUnit",
+      "model": "DualLfoChaos",
+      "version": "2.6.0",
+      "params": [
+        {
+          "id": 0,
+          "value": 0.21174
+        },
+        {
+          "id": 1,
+          "value": 0.18
+        },
+        {
+          "id": 2,
+          "value": 0.27895
+        },
+        {
+          "id": 3,
+          "value": 0.3
+        }
+      ],
+      "data": {
+        "phaseA": 0.0,
+        "phaseB": 0.0
+      },
+      "pos": [
+        0,
+        1
+      ]
+    },
+    {
+      "id": 8,
+      "plugin": "Core",
+      "model": "Notes",
+      "version": "2.5.2",
+      "params": [],
+      "data": {
+        "text": "Footage drawn as scan lines.\nLoad a clip: Video Player OPEN\n(or right-click), then PLAY.\nNo clip yet? Oscillator shows.\nTweak: LUMA GAIN, LFO RATE."
+      },
+      "pos": [
+        8,
+        1
+      ]
+    }
+  ],
+  "cables": [
+    {
+      "id": 1,
+      "outputModuleId": 2,
+      "outputId": 0,
+      "inputModuleId": 3,
+      "inputId": 0,
+      "color": "#f3374b"
+    },
+    {
+      "id": 2,
+      "outputModuleId": 1,
+      "outputId": 0,
+      "inputModuleId": 3,
+      "inputId": 1,
+      "color": "#3695ef"
+    },
+    {
+      "id": 3,
+      "outputModuleId": 3,
+      "outputId": 0,
+      "inputModuleId": 4,
+      "inputId": 0,
+      "color": "#8b4ade"
+    },
+    {
+      "id": 4,
+      "outputModuleId": 4,
+      "outputId": 0,
+      "inputModuleId": 5,
+      "inputId": 0,
+      "color": "#8b4ade"
+    },
+    {
+      "id": 5,
+      "outputModuleId": 5,
+      "outputId": 0,
+      "inputModuleId": 6,
+      "inputId": 0,
+      "color": "#8b4ade"
+    },
+    {
+      "id": 6,
+      "outputModuleId": 7,
+      "outputId": 0,
+      "inputModuleId": 4,
+      "inputId": 1,
+      "color": "#ffb437"
+    },
+    {
+      "id": 7,
+      "outputModuleId": 7,
+      "outputId": 0,
+      "inputModuleId": 4,
+      "inputId": 3,
+      "color": "#ffb437"
+    },
+    {
+      "id": 8,
+      "outputModuleId": 7,
+      "outputId": 1,
+      "inputModuleId": 5,
+      "inputId": 1,
+      "color": "#00b56e"
+    }
+  ]
+}

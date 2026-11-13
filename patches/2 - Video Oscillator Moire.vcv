@@ -1,0 +1,236 @@
+{
+  "version": "2.6.6",
+  "zoom": 1.0,
+  "gridOffset": [
+    0.0,
+    0.0
+  ],
+  "modules": [
+    {
+      "id": 1,
+      "plugin": "VideoResearchUnit",
+      "model": "VideoOsc",
+      "version": "2.0.0",
+      "params": [
+        {
+          "id": 0,
+          "value": 3.0
+        },
+        {
+          "id": 1,
+          "value": 0.5
+        },
+        {
+          "id": 2,
+          "value": 0.3
+        },
+        {
+          "id": 3,
+          "value": 0.5
+        }
+      ],
+      "pos": [
+        0,
+        0
+      ]
+    },
+    {
+      "id": 2,
+      "plugin": "VideoResearchUnit",
+      "model": "VideoOsc",
+      "version": "2.0.0",
+      "params": [
+        {
+          "id": 0,
+          "value": 5.0
+        },
+        {
+          "id": 1,
+          "value": 0.05
+        },
+        {
+          "id": 2,
+          "value": 0.2
+        },
+        {
+          "id": 3,
+          "value": 0.25
+        }
+      ],
+      "pos": [
+        20,
+        0
+      ]
+    },
+    {
+      "id": 3,
+      "plugin": "VideoResearchUnit",
+      "model": "BusMixer",
+      "version": "2.0.0",
+      "params": [
+        {
+          "id": 0,
+          "value": 0.5
+        },
+        {
+          "id": 1,
+          "value": 4
+        }
+      ],
+      "pos": [
+        40,
+        0
+      ]
+    },
+    {
+      "id": 4,
+      "plugin": "VideoResearchUnit",
+      "model": "Colorizer",
+      "version": "2.0.0",
+      "params": [],
+      "pos": [
+        48,
+        0
+      ]
+    },
+    {
+      "id": 5,
+      "plugin": "VideoResearchUnit",
+      "model": "Display",
+      "version": "2.0.0",
+      "params": [],
+      "pos": [
+        0,
+        1
+      ]
+    },
+    {
+      "id": 6,
+      "plugin": "VideoResearchUnit",
+      "model": "DualLfoChaos",
+      "version": "2.0.0",
+      "params": [
+        {
+          "id": 0,
+          "value": 0.3154750749087803
+        },
+        {
+          "id": 1,
+          "value": 0.25
+        },
+        {
+          "id": 2,
+          "value": 0.25601040921297985
+        },
+        {
+          "id": 3,
+          "value": 0.25
+        }
+      ],
+      "pos": [
+        30,
+        1
+      ]
+    },
+    {
+      "id": 7,
+      "plugin": "Fundamental",
+      "model": "LFO",
+      "version": "2.6.4",
+      "params": [
+        {
+          "id": 0,
+          "value": 0
+        },
+        {
+          "id": 2,
+          "value": -5.0
+        }
+      ],
+      "pos": [
+        38,
+        1
+      ]
+    },
+    {
+      "id": 8,
+      "plugin": "Core",
+      "model": "Notes",
+      "version": "2.6.6",
+      "params": [],
+      "pos": [
+        47,
+        1
+      ],
+      "data": {
+        "text": "Two video oscillators are mixed with the Bus Mixer in Difference mode. Where the two patterns disagree you see moire stripes.\nThe Colorizer paints the grey stripes with colour.\nSlow LFOs move the stripe frequencies and shift the colours, so the picture never stops flowing.\nTry the MIX knob and the blend MODE on the Bus Mixer.\nTry the FREQ knobs on the oscillators and the HUE knobs on the Colorizer."
+      }
+    }
+  ],
+  "cables": [
+    {
+      "id": 1,
+      "outputModuleId": 1,
+      "outputId": 0,
+      "inputModuleId": 3,
+      "inputId": 0,
+      "color": "#8b4ade"
+    },
+    {
+      "id": 2,
+      "outputModuleId": 2,
+      "outputId": 0,
+      "inputModuleId": 3,
+      "inputId": 1,
+      "color": "#8b4ade"
+    },
+    {
+      "id": 3,
+      "outputModuleId": 3,
+      "outputId": 0,
+      "inputModuleId": 4,
+      "inputId": 0,
+      "color": "#8b4ade"
+    },
+    {
+      "id": 4,
+      "outputModuleId": 4,
+      "outputId": 0,
+      "inputModuleId": 5,
+      "inputId": 0,
+      "color": "#3695ef"
+    },
+    {
+      "id": 5,
+      "outputModuleId": 6,
+      "outputId": 0,
+      "inputModuleId": 1,
+      "inputId": 0,
+      "color": "#ffb437"
+    },
+    {
+      "id": 6,
+      "outputModuleId": 6,
+      "outputId": 1,
+      "inputModuleId": 2,
+      "inputId": 0,
+      "color": "#ffb437"
+    },
+    {
+      "id": 7,
+      "outputModuleId": 6,
+      "outputId": 3,
+      "inputModuleId": 4,
+      "inputId": 7,
+      "color": "#00b56e"
+    },
+    {
+      "id": 8,
+      "outputModuleId": 7,
+      "outputId": 0,
+      "inputModuleId": 1,
+      "inputId": 1,
+      "color": "#00b56e"
+    }
+  ]
+}

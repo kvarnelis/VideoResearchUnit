@@ -1,0 +1,23 @@
+{
+  "plugin": "VideoResearchUnit",
+  "model": "BusMixer",
+  "version": "2.0.0",
+  "params": [
+    {
+      "id": 0,
+      "value": 0.35
+    },
+    {
+      "id": 1,
+      "value": 1
+    },
+    {
+      "id": 2,
+      "value": 0
+    },
+    {
+      "id": 3,
+      "value": 0
+    }
+  ]
+}

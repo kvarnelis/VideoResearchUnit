@@ -1,0 +1,16 @@
+.DS_Store
+
+# Rack SDK and generated build output
+Rack-SDK/
+build/
+dep/
+dist/
+plugin.dylib
+
+# Local package/install artifacts
+*.vcvplugin
+*.dSYM/
+
+# Editor state
+.idea/
+.vscode/

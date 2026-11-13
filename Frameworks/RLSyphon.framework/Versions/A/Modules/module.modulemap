@@ -1,0 +1,20 @@
+//
+//  RLSyphon.modulemap
+//  Syphon
+//
+//  Created by Tom Butterworth on 03/10/2023.
+//
+
+framework module RLSyphon {
+    umbrella header "RLSyphon.h"
+
+    export *
+    module * {
+        export *
+    }
+
+    explicit module RLSyphonSubclassing {
+        header "RLSyphonSubclassing.h"
+        export *
+    }
+}

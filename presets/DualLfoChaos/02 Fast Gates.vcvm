@@ -1,0 +1,35 @@
+{
+  "plugin": "VideoResearchUnit",
+  "model": "DualLfoChaos",
+  "version": "2.0.0",
+  "params": [
+    {
+      "id": 0,
+      "value": 4
+    },
+    {
+      "id": 1,
+      "value": 0.65
+    },
+    {
+      "id": 2,
+      "value": 6.5
+    },
+    {
+      "id": 3,
+      "value": 0.55
+    },
+    {
+      "id": 4,
+      "value": 0.25
+    },
+    {
+      "id": 5,
+      "value": 0.1
+    },
+    {
+      "id": 6,
+      "value": 1
+    }
+  ]
+}

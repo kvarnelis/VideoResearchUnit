@@ -1,0 +1,222 @@
+{
+  "slug": "VideoResearchUnit",
+  "name": "Video Research Unit",
+  "version": "2.0.0",
+  "license": "GPL-3.0-or-later",
+  "brand": "Video Research Unit",
+  "author": "Kazys Varnelis",
+  "pluginUrl": "",
+  "manualUrl": "",
+  "sourceUrl": "",
+  "donateUrl": "",
+  "modules": [
+    {
+      "slug": "DeflectionYoke",
+      "name": "VRU–01 Deflection Yoke",
+      "description": "CV-controlled raster-bending video-bus processor",
+      "tags": [
+        "Visual",
+        "Effect"
+      ]
+    },
+    {
+      "slug": "ScanProcessor",
+      "name": "VRU–02 Scan Processor",
+      "description": "Scan processor: luma lifts each scanline into a vector-monitor relief, on the shared CRT beam layer",
+      "tags": [
+        "Visual",
+        "Effect"
+      ]
+    },
+    {
+      "slug": "ScopeTrace",
+      "name": "VRU–03 Scope Trace",
+      "description": "Audio/CV oscilloscope and Lissajous video-bus source",
+      "tags": [
+        "Visual",
+        "Oscilloscope"
+      ]
+    },
+    {
+      "slug": "LineField",
+      "name": "VRU–04 Line Field",
+      "description": "Scanline heightfield video-bus processor",
+      "tags": [
+        "Visual",
+        "Effect"
+      ]
+    },
+    {
+      "slug": "VideoOsc",
+      "name": "VRU–05 Video Oscillator",
+      "description": "CV-controllable video oscillator preview and video-bus source",
+      "tags": [
+        "Visual",
+        "Oscillator"
+      ]
+    },
+    {
+      "slug": "Ramps",
+      "name": "VRU–06 Ramps",
+      "description": "Two-layer grayscale ramp, triangle, sine and square shape generator for the VRU video bus",
+      "tags": [
+        "Visual",
+        "Oscillator"
+      ]
+    },
+    {
+      "slug": "VideoPlayer",
+      "name": "VRU–07 Video Player",
+      "description": "Local video file and YouTube playback source for the VRU video bus",
+      "tags": [
+        "Visual",
+        "Sampler"
+      ]
+    },
+    {
+      "slug": "SyphonIn",
+      "name": "VRU–08 Syphon In",
+      "description": "macOS Syphon input source for the VRU video bus",
+      "tags": [
+        "Visual",
+        "External"
+      ]
+    },
+    {
+      "slug": "ColorLab",
+      "name": "VRU–09 Color Lab",
+      "description": "Hue, saturation, contrast, posterize, solarize, and channel-swap video-bus processor",
+      "tags": [
+        "Visual",
+        "Effect"
+      ]
+    },
+    {
+      "slug": "Colorizer",
+      "name": "VRU–10 Colorizer",
+      "description": "Four-stop luma-to-colour gradient processor with band quantizing for VRU video buses",
+      "tags": [
+        "Visual",
+        "Effect"
+      ]
+    },
+    {
+      "slug": "WaveShaper",
+      "name": "VRU–11 Wave Shaper",
+      "description": "RGB and luma folding, wrapping, quantizing, and mirroring processor",
+      "tags": [
+        "Visual",
+        "Effect"
+      ]
+    },
+    {
+      "slug": "Keyer",
+      "name": "VRU–12 Keyer",
+      "description": "Luma matte and color key output processor for VRU video buses",
+      "tags": [
+        "Visual",
+        "Effect"
+      ]
+    },
+    {
+      "slug": "BusMixer",
+      "name": "VRU–13 Bus Mixer",
+      "description": "Two-bus visual mixer with blend modes and optional matte bus",
+      "tags": [
+        "Visual",
+        "Mixer"
+      ]
+    },
+    {
+      "slug": "Feedback",
+      "name": "VRU–14 Feedback",
+      "description": "Video feedback processor: zoom, rotate, shift and hue-shift the previous frame back into the picture",
+      "tags": [
+        "Visual",
+        "Effect"
+      ]
+    },
+    {
+      "slug": "FreezeFrame",
+      "name": "VRU–15 Freeze Frame",
+      "description": "Triggerable frame hold and strobe processor for VRU video buses",
+      "tags": [
+        "Visual",
+        "Sampler"
+      ]
+    },
+    {
+      "slug": "Display",
+      "name": "VRU–16 Display",
+      "description": "Video-bus display monitor",
+      "tags": [
+        "Visual"
+      ]
+    },
+    {
+      "slug": "SyphonOut",
+      "name": "VRU–17 Syphon Out",
+      "description": "macOS Syphon output publisher for a VRU video bus",
+      "tags": [
+        "Visual",
+        "External"
+      ]
+    },
+    {
+      "slug": "DualLfoChaos",
+      "name": "VRU–18 Dual LFO Chaos",
+      "description": "Dual LFO and chaotic CV generator for modulating visual modules",
+      "tags": [
+        "LFO",
+        "Random",
+        "Utility"
+      ]
+    },
+    {
+      "slug": "OneVoltCvOut",
+      "name": "VRU–19 1V CV Out",
+      "description": "Calibrated CV scaler for 0-1V and +/-1V video-synth voltage ranges",
+      "tags": [
+        "Visual",
+        "Utility"
+      ]
+    },
+    {
+      "slug": "Rotator",
+      "name": "VRU–20 Rotator",
+      "description": "Turns, zooms and slides a whole picture: spin, pivot, edge modes, kaleidoscope folds and a clocked notch turn",
+      "tags": [
+        "Visual",
+        "Effect"
+      ]
+    },
+    {
+      "slug": "Shapes",
+      "name": "VRU–21 Shapes",
+      "description": "Draws one closed shape and lets voltages move it: sides, round, point, size, place, repeat, copies and melt, as a grey picture of distance from the edge",
+      "tags": [
+        "Visual",
+        "Oscillator"
+      ]
+    },
+    {
+      "slug": "VideoMixer",
+      "name": "VRU–22 Video Mixer",
+      "description": "Four pictures in, one out: per-input color, a fader, cut and timed take, dissolve, add or a wipe shaped by any picture, a soft key with fill and matte, a clock that walks the inputs, fade to black and a live gate for each picture",
+      "tags": [
+        "Visual",
+        "Effect"
+      ]
+    },
+    {
+      "slug": "Octoscillator",
+      "name": "VRU–23 Octoscillator",
+      "description": "Eight chaotic CV channels with 24 coordinate outputs and adjustable shared movement",
+      "tags": [
+        "LFO",
+        "Random",
+        "Utility"
+      ]
+    }
+  ]
+}

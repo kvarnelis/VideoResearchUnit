@@ -1,0 +1,39 @@
+{
+  "plugin": "VideoResearchUnit",
+  "model": "WaveShaper",
+  "version": "2.0.0",
+  "params": [
+    {
+      "id": 0,
+      "value": 2.1
+    },
+    {
+      "id": 1,
+      "value": 0
+    },
+    {
+      "id": 2,
+      "value": 0.62
+    },
+    {
+      "id": 3,
+      "value": 0
+    },
+    {
+      "id": 4,
+      "value": 0.15
+    },
+    {
+      "id": 5,
+      "value": 1.2
+    },
+    {
+      "id": 6,
+      "value": 0
+    },
+    {
+      "id": 7,
+      "value": 1
+    }
+  ]
+}

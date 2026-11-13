@@ -1,0 +1,232 @@
+{
+  "version": "2.6.6",
+  "zoom": 1.0,
+  "gridOffset": [
+    0.0,
+    0.0
+  ],
+  "modules": [
+    {
+      "id": 1,
+      "plugin": "VideoResearchUnit",
+      "model": "Shapes",
+      "version": "2.0.0",
+      "params": [
+        {
+          "id": 0,
+          "value": 4.0
+        },
+        {
+          "id": 1,
+          "value": 0.9
+        },
+        {
+          "id": 3,
+          "value": 0.3
+        },
+        {
+          "id": 8,
+          "value": 1
+        },
+        {
+          "id": 9,
+          "value": 6
+        },
+        {
+          "id": 10,
+          "value": 0.5
+        },
+        {
+          "id": 11,
+          "value": 0.55
+        },
+        {
+          "id": 12,
+          "value": 0.5
+        }
+      ],
+      "pos": [
+        0,
+        0
+      ]
+    },
+    {
+      "id": 2,
+      "plugin": "VideoResearchUnit",
+      "model": "Rotator",
+      "version": "2.0.0",
+      "params": [
+        {
+          "id": 1,
+          "value": 0.06
+        },
+        {
+          "id": 2,
+          "value": 0.12
+        },
+        {
+          "id": 7,
+          "value": 3
+        },
+        {
+          "id": 8,
+          "value": 6
+        },
+        {
+          "id": 9,
+          "value": 1
+        },
+        {
+          "id": 10,
+          "value": 0.25
+        }
+      ],
+      "pos": [
+        14,
+        0
+      ]
+    },
+    {
+      "id": 3,
+      "plugin": "VideoResearchUnit",
+      "model": "Colorizer",
+      "version": "2.0.0",
+      "params": [],
+      "pos": [
+        28,
+        0
+      ]
+    },
+    {
+      "id": 4,
+      "plugin": "VideoResearchUnit",
+      "model": "Display",
+      "version": "2.0.0",
+      "params": [],
+      "pos": [
+        40,
+        0
+      ]
+    },
+    {
+      "id": 5,
+      "plugin": "VideoResearchUnit",
+      "model": "Octoscillator",
+      "version": "2.0.0",
+      "params": [
+        {
+          "id": 0,
+          "value": -1.0
+        },
+        {
+          "id": 3,
+          "value": 0.6
+        },
+        {
+          "id": 15,
+          "value": 0.25
+        }
+      ],
+      "pos": [
+        0,
+        1
+      ]
+    },
+    {
+      "id": 6,
+      "plugin": "Core",
+      "model": "Notes",
+      "version": "2.6.6",
+      "params": [],
+      "pos": [
+        36,
+        1
+      ],
+      "data": {
+        "text": "A ring of soft shapes melts and turns while a kaleidoscope folds them over.\nThe Octoscillator is a set of slow chaotic voltages, and it moves the shape's sides, melt and size, the kaleidoscope's angle and zoom, and the colours.\nNothing repeats, so leave it running.\nTry the SPEED knob on the Octoscillator, and its LEVEL knob for bigger moves.\nTry FOLDS on the Rotator and BANDS on the Colorizer."
+      }
+    }
+  ],
+  "cables": [
+    {
+      "id": 1,
+      "outputModuleId": 1,
+      "outputId": 0,
+      "inputModuleId": 2,
+      "inputId": 0,
+      "color": "#8b4ade"
+    },
+    {
+      "id": 2,
+      "outputModuleId": 2,
+      "outputId": 0,
+      "inputModuleId": 3,
+      "inputId": 0,
+      "color": "#8b4ade"
+    },
+    {
+      "id": 3,
+      "outputModuleId": 3,
+      "outputId": 0,
+      "inputModuleId": 4,
+      "inputId": 0,
+      "color": "#3695ef"
+    },
+    {
+      "id": 4,
+      "outputModuleId": 5,
+      "outputId": 0,
+      "inputModuleId": 1,
+      "inputId": 0,
+      "color": "#00b56e"
+    },
+    {
+      "id": 5,
+      "outputModuleId": 5,
+      "outputId": 3,
+      "inputModuleId": 1,
+      "inputId": 8,
+      "color": "#00b56e"
+    },
+    {
+      "id": 6,
+      "outputModuleId": 5,
+      "outputId": 6,
+      "inputModuleId": 1,
+      "inputId": 3,
+      "color": "#00b56e"
+    },
+    {
+      "id": 7,
+      "outputModuleId": 5,
+      "outputId": 9,
+      "inputModuleId": 2,
+      "inputId": 1,
+      "color": "#00b56e"
+    },
+    {
+      "id": 8,
+      "outputModuleId": 5,
+      "outputId": 13,
+      "inputModuleId": 2,
+      "inputId": 3,
+      "color": "#00b56e"
+    },
+    {
+      "id": 9,
+      "outputModuleId": 5,
+      "outputId": 15,
+      "inputModuleId": 3,
+      "inputId": 7,
+      "color": "#00b56e"
+    },
+    {
+      "id": 10,
+      "outputModuleId": 5,
+      "outputId": 18,
+      "inputModuleId": 1,
+      "inputId": 7,
+      "color": "#00b56e"
+    }
+  ]
+}

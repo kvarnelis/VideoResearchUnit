@@ -1,0 +1,99 @@
+{
+  "plugin": "VideoResearchUnit",
+  "model": "ScopeTrace",
+  "version": "2.0.0",
+  "params": [
+    {
+      "id": 0,
+      "value": 3
+    },
+    {
+      "id": 1,
+      "value": 0.95
+    },
+    {
+      "id": 2,
+      "value": 0.95
+    },
+    {
+      "id": 3,
+      "value": 0
+    },
+    {
+      "id": 4,
+      "value": 0
+    },
+    {
+      "id": 5,
+      "value": 0.64
+    },
+    {
+      "id": 6,
+      "value": 0.48
+    },
+    {
+      "id": 7,
+      "value": 0.82
+    },
+    {
+      "id": 8,
+      "value": 0.58
+    },
+    {
+      "id": 9,
+      "value": 1.45
+    },
+    {
+      "id": 10,
+      "value": 0.18
+    },
+    {
+      "id": 11,
+      "value": 0
+    },
+    {
+      "id": 12,
+      "value": 1
+    },
+    {
+      "id": 13,
+      "value": 1
+    },
+    {
+      "id": 14,
+      "value": 1
+    },
+    {
+      "id": 15,
+      "value": 1
+    },
+    {
+      "id": 16,
+      "value": 1
+    },
+    {
+      "id": 17,
+      "value": 1
+    },
+    {
+      "id": 18,
+      "value": 1
+    },
+    {
+      "id": 19,
+      "value": 1
+    },
+    {
+      "id": 20,
+      "value": 0
+    },
+    {
+      "id": 21,
+      "value": 0.5
+    }
+  ],
+  "data": {
+    "phase": 0.0,
+    "outputBusVoltage": 5.0
+  }
+}

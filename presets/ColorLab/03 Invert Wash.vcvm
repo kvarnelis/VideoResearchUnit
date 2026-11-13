@@ -1,0 +1,43 @@
+{
+  "plugin": "VideoResearchUnit",
+  "model": "ColorLab",
+  "version": "2.0.0",
+  "params": [
+    {
+      "id": 0,
+      "value": 0.33
+    },
+    {
+      "id": 1,
+      "value": 0.85
+    },
+    {
+      "id": 2,
+      "value": 1.1
+    },
+    {
+      "id": 3,
+      "value": 0.9
+    },
+    {
+      "id": 4,
+      "value": 0
+    },
+    {
+      "id": 5,
+      "value": 0.2
+    },
+    {
+      "id": 6,
+      "value": 0
+    },
+    {
+      "id": 7,
+      "value": 1
+    },
+    {
+      "id": 8,
+      "value": 0.8
+    }
+  ]
+}

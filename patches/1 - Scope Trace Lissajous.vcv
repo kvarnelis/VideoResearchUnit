@@ -1,0 +1,300 @@
+{
+  "version": "2.6.6",
+  "zoom": 1.0,
+  "gridOffset": [
+    0.0,
+    0.0
+  ],
+  "modules": [
+    {
+      "id": 1,
+      "plugin": "VideoResearchUnit",
+      "model": "ScopeTrace",
+      "version": "2.0.0",
+      "params": [
+        {
+          "id": 0,
+          "value": 0
+        },
+        {
+          "id": 1,
+          "value": 0.85
+        },
+        {
+          "id": 2,
+          "value": 0.85
+        },
+        {
+          "id": 5,
+          "value": 0.32
+        },
+        {
+          "id": 6,
+          "value": 0.42
+        },
+        {
+          "id": 7,
+          "value": 0.72
+        },
+        {
+          "id": 8,
+          "value": 0.32
+        },
+        {
+          "id": 9,
+          "value": 1.25
+        },
+        {
+          "id": 14,
+          "value": 1.0
+        },
+        {
+          "id": 21,
+          "value": 0.3
+        },
+        {
+          "id": 22,
+          "value": 0.5
+        }
+      ],
+      "pos": [
+        0,
+        0
+      ]
+    },
+    {
+      "id": 2,
+      "plugin": "VideoResearchUnit",
+      "model": "Display",
+      "version": "2.0.0",
+      "params": [],
+      "pos": [
+        20,
+        0
+      ]
+    },
+    {
+      "id": 3,
+      "plugin": "Core",
+      "model": "Notes",
+      "version": "2.6.6",
+      "params": [],
+      "pos": [
+        50,
+        0
+      ],
+      "data": {
+        "text": "Two sine oscillators a fifth apart draw a Lissajous figure on the Scope Trace.\nA slow LFO detunes the second oscillator a little, so the figure keeps turning inside out.\nA second LFO swells the beam dwell, and a slow saw turns the whole picture.\nTry the Scope Trace knobs: DECAY, BEAM, BLOOM and HUE.\nTry the frequency knob on the first oscillator. A whole number ratio like 3 to 2 makes a still figure.\nThe oscillators also play quietly through the audio output."
+      }
+    },
+    {
+      "id": 4,
+      "plugin": "Fundamental",
+      "model": "VCO",
+      "version": "2.6.4",
+      "params": [
+        {
+          "id": 2,
+          "value": -12.0
+        }
+      ],
+      "pos": [
+        0,
+        1
+      ]
+    },
+    {
+      "id": 5,
+      "plugin": "Fundamental",
+      "model": "VCO",
+      "version": "2.6.4",
+      "params": [
+        {
+          "id": 2,
+          "value": -5.0
+        },
+        {
+          "id": 4,
+          "value": 0.001
+        }
+      ],
+      "pos": [
+        9,
+        1
+      ]
+    },
+    {
+      "id": 6,
+      "plugin": "Fundamental",
+      "model": "LFO",
+      "version": "2.6.4",
+      "params": [
+        {
+          "id": 0,
+          "value": 0
+        },
+        {
+          "id": 2,
+          "value": -3.5
+        }
+      ],
+      "pos": [
+        18,
+        1
+      ]
+    },
+    {
+      "id": 7,
+      "plugin": "Fundamental",
+      "model": "LFO",
+      "version": "2.6.4",
+      "params": [
+        {
+          "id": 0,
+          "value": 1
+        },
+        {
+          "id": 2,
+          "value": -3.0
+        }
+      ],
+      "pos": [
+        27,
+        1
+      ]
+    },
+    {
+      "id": 8,
+      "plugin": "Fundamental",
+      "model": "LFO",
+      "version": "2.6.4",
+      "params": [
+        {
+          "id": 0,
+          "value": 1
+        },
+        {
+          "id": 2,
+          "value": -4.3
+        }
+      ],
+      "pos": [
+        36,
+        1
+      ]
+    },
+    {
+      "id": 9,
+      "plugin": "Fundamental",
+      "model": "VCA",
+      "version": "2.6.4",
+      "params": [
+        {
+          "id": 0,
+          "value": 0.2
+        },
+        {
+          "id": 1,
+          "value": 0.2
+        }
+      ],
+      "pos": [
+        45,
+        1
+      ]
+    },
+    {
+      "id": 10,
+      "plugin": "Core",
+      "model": "AudioInterface2",
+      "version": "2.6.6",
+      "params": [],
+      "pos": [
+        50,
+        1
+      ]
+    }
+  ],
+  "cables": [
+    {
+      "id": 1,
+      "outputModuleId": 4,
+      "outputId": 0,
+      "inputModuleId": 1,
+      "inputId": 0,
+      "color": "#ffb437"
+    },
+    {
+      "id": 2,
+      "outputModuleId": 5,
+      "outputId": 0,
+      "inputModuleId": 1,
+      "inputId": 1,
+      "color": "#ffb437"
+    },
+    {
+      "id": 3,
+      "outputModuleId": 1,
+      "outputId": 0,
+      "inputModuleId": 2,
+      "inputId": 0,
+      "color": "#3695ef"
+    },
+    {
+      "id": 4,
+      "outputModuleId": 6,
+      "outputId": 0,
+      "inputModuleId": 5,
+      "inputId": 1,
+      "color": "#00b56e"
+    },
+    {
+      "id": 5,
+      "outputModuleId": 7,
+      "outputId": 0,
+      "inputModuleId": 1,
+      "inputId": 12,
+      "color": "#00b56e"
+    },
+    {
+      "id": 6,
+      "outputModuleId": 8,
+      "outputId": 2,
+      "inputModuleId": 1,
+      "inputId": 8,
+      "color": "#00b56e"
+    },
+    {
+      "id": 7,
+      "outputModuleId": 4,
+      "outputId": 0,
+      "inputModuleId": 9,
+      "inputId": 2,
+      "color": "#f3374b"
+    },
+    {
+      "id": 8,
+      "outputModuleId": 5,
+      "outputId": 0,
+      "inputModuleId": 9,
+      "inputId": 5,
+      "color": "#f3374b"
+    },
+    {
+      "id": 9,
+      "outputModuleId": 9,
+      "outputId": 0,
+      "inputModuleId": 10,
+      "inputId": 0,
+      "color": "#f3374b"
+    },
+    {
+      "id": 10,
+      "outputModuleId": 9,
+      "outputId": 1,
+      "inputModuleId": 10,
+      "inputId": 1,
+      "color": "#f3374b"
+    }
+  ]
+}
