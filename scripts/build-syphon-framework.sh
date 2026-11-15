@@ -47,6 +47,9 @@ ln -s Versions/Current/Modules "$DEST/Modules"
 ln -s Versions/Current/Resources "$DEST/Resources"
 
 cp "$SRC/License.txt" "$ROOT/Frameworks/RLSyphon-LICENSE.txt"
+# Drop debug stabs. They carry the build machine's absolute source paths (/Users/...,
+# the old project name). Exported symbols are unchanged.
+strip -S -x "$DEST/Versions/A/RLSyphon"
 # Seal the whole bundle so the resource seal matches the renamed binary and Info.plist.
 codesign --force --sign - "$DEST"
 
