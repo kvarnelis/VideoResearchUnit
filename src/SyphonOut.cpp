@@ -3,7 +3,7 @@
 #include "panel_style.hpp"
 #include "syphon_bridge.hpp"
 #include "video_bus.hpp"
-#include "video_graph_renderer.hpp"
+#include "render_service.hpp"
 
 #include <atomic>
 #include <memory>
@@ -112,13 +112,28 @@ struct SyphonOut : Module {
 
 struct SyphonOutRenderWidget : widget::OpenGlWidget {
 	SyphonOut* module = nullptr;
-	std::unique_ptr<VideoGraphRenderer> renderer;
 	std::unique_ptr<SyphonOutputBridge> bridge;
 	OpenGlVideoTexture texture;
 
 	SyphonOutRenderWidget() {
-		renderer = std::make_unique<VideoGraphRenderer>();
 		bridge = createSyphonOutputBridge();
+	}
+	~SyphonOutRenderWidget() override {
+		renderService().forget(this);
+	}
+
+	// Runs every UI frame, drawn or not. While publishing is on, it registers the bus with the render service so the
+	// picture (and every trail behind it) keeps advancing when this widget is not drawn. The GL upload and the
+	// Syphon publish still happen only in drawFramebuffer(), so nothing reaches Syphon while the widget is hidden.
+	void step() override {
+		widget::OpenGlWidget::step();
+		if (module && module->isPublishEnabled()) {
+			const SyphonFrameSize& size = module->frameSize();
+			renderService().touch(this, module->snapshotBusId(), size.width, size.height);
+		}
+		else {
+			renderService().forget(this);
+		}
 	}
 
 	void drawFramebuffer() override {
@@ -134,8 +149,12 @@ struct SyphonOutRenderWidget : widget::OpenGlWidget {
 		}
 
 		const SyphonFrameSize& size = module->frameSize();
-		const std::vector<unsigned char>& rgba = renderer->renderBus(module->snapshotBusId(), size.width, size.height);
-		if (!renderer->hasSignal() || rgba.empty()) {
+		const RenderService::Result picture = renderService().frame(this, module->snapshotBusId(), size.width, size.height);
+		if (picture.pending) {
+			return;  // render thread: the first picture is not finished yet; keep what was published
+		}
+		const std::vector<unsigned char>& rgba = *picture.pixels;
+		if (!picture.signal || rgba.empty()) {
 			module->framePublished.store(false, std::memory_order_relaxed);
 			return;
 		}

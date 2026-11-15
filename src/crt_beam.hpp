@@ -155,6 +155,8 @@ private:
 // Tone-maps energy plus an optional glow field into RGBA8 (alpha 255): out = 1 - exp(-k (E + G)).
 // glow may be nullptr. out must hold width * height * 4 bytes.
 void toneMap(const EnergyField& energy, const float* glow, float k, unsigned char* rgba);
+// The same into float RGBA in 0..255 units (full precision): the curve is evaluated, nothing is rounded.
+void toneMapF(const EnergyField& energy, const float* glow, float k, float* rgba);
 
 // One-pole lowpass for one deflection channel: the yoke's inductance. High tones deflect less.
 class CoilFilter {

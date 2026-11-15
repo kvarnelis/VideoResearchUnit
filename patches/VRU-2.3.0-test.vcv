@@ -1,0 +1,951 @@
+{
+  "version": "2.6.6",
+  "zoom": 1.0,
+  "gridOffset": [
+    0.0,
+    0.0
+  ],
+  "modules": [
+    {
+      "id": 1,
+      "plugin": "Fundamental",
+      "model": "LFO",
+      "version": "2.6.4",
+      "params": [
+        {
+          "id": 0,
+          "value": 0
+        },
+        {
+          "id": 2,
+          "value": -2.6
+        }
+      ],
+      "pos": [
+        0,
+        0
+      ]
+    },
+    {
+      "id": 2,
+      "plugin": "VideoResearchUnit",
+      "model": "VideoOsc",
+      "version": "2.3.0",
+      "params": [
+        {
+          "id": 0,
+          "value": 3.0
+        },
+        {
+          "id": 2,
+          "value": 0.0
+        },
+        {
+          "id": 3,
+          "value": 0.0
+        },
+        {
+          "id": 4,
+          "value": 6
+        },
+        {
+          "id": 10,
+          "value": 1
+        },
+        {
+          "id": 12,
+          "value": 0.8
+        },
+        {
+          "id": 15,
+          "value": 0
+        }
+      ],
+      "pos": [
+        9,
+        0
+      ]
+    },
+    {
+      "id": 3,
+      "plugin": "VideoResearchUnit",
+      "model": "VideoProbe",
+      "version": "2.3.0",
+      "params": [
+        {
+          "id": 2,
+          "value": 0.2
+        },
+        {
+          "id": 3,
+          "value": 0.1
+        }
+      ],
+      "pos": [
+        29,
+        0
+      ]
+    },
+    {
+      "id": 4,
+      "plugin": "VideoResearchUnit",
+      "model": "VideoOsc",
+      "version": "2.3.0",
+      "params": [
+        {
+          "id": 0,
+          "value": 0.6
+        },
+        {
+          "id": 1,
+          "value": 0.58
+        },
+        {
+          "id": 2,
+          "value": 0.0
+        },
+        {
+          "id": 3,
+          "value": 0.0
+        },
+        {
+          "id": 4,
+          "value": 6
+        },
+        {
+          "id": 10,
+          "value": 1
+        },
+        {
+          "id": 12,
+          "value": 1.0
+        },
+        {
+          "id": 15,
+          "value": 0
+        }
+      ],
+      "pos": [
+        49,
+        0
+      ]
+    },
+    {
+      "id": 5,
+      "plugin": "VideoResearchUnit",
+      "model": "Display",
+      "version": "2.3.0",
+      "params": [],
+      "pos": [
+        69,
+        0
+      ]
+    },
+    {
+      "id": 6,
+      "plugin": "VideoResearchUnit",
+      "model": "Shapes",
+      "version": "2.3.0",
+      "params": [
+        {
+          "id": 0,
+          "value": 5.0
+        },
+        {
+          "id": 1,
+          "value": 0.25
+        },
+        {
+          "id": 3,
+          "value": 0.2
+        },
+        {
+          "id": 13,
+          "value": 1
+        }
+      ],
+      "pos": [
+        0,
+        1
+      ]
+    },
+    {
+      "id": 7,
+      "plugin": "VideoResearchUnit",
+      "model": "VideoMixer",
+      "version": "2.3.0",
+      "params": [
+        {
+          "id": 10,
+          "value": 0.45
+        },
+        {
+          "id": 15,
+          "value": 1
+        }
+      ],
+      "pos": [
+        14,
+        1
+      ]
+    },
+    {
+      "id": 8,
+      "plugin": "VideoResearchUnit",
+      "model": "Rotator",
+      "version": "2.3.0",
+      "params": [
+        {
+          "id": 0,
+          "value": 0.012
+        },
+        {
+          "id": 2,
+          "value": -0.012
+        }
+      ],
+      "pos": [
+        44,
+        1
+      ]
+    },
+    {
+      "id": 9,
+      "plugin": "VideoResearchUnit",
+      "model": "FrameDelay",
+      "version": "2.3.0",
+      "params": [
+        {
+          "id": 0,
+          "value": 3.0
+        }
+      ],
+      "pos": [
+        58,
+        1
+      ]
+    },
+    {
+      "id": 10,
+      "plugin": "Fundamental",
+      "model": "LFO",
+      "version": "2.6.4",
+      "params": [
+        {
+          "id": 0,
+          "value": 0
+        },
+        {
+          "id": 2,
+          "value": -3.3
+        }
+      ],
+      "pos": [
+        65,
+        1
+      ]
+    },
+    {
+      "id": 11,
+      "plugin": "Fundamental",
+      "model": "LFO",
+      "version": "2.6.4",
+      "params": [
+        {
+          "id": 0,
+          "value": 0
+        },
+        {
+          "id": 2,
+          "value": -3.0
+        }
+      ],
+      "pos": [
+        74,
+        1
+      ]
+    },
+    {
+      "id": 12,
+      "plugin": "Fundamental",
+      "model": "VCA",
+      "version": "2.6.4",
+      "params": [
+        {
+          "id": 0,
+          "value": 0.5
+        },
+        {
+          "id": 1,
+          "value": 0.5
+        }
+      ],
+      "pos": [
+        83,
+        1
+      ]
+    },
+    {
+      "id": 13,
+      "plugin": "VideoResearchUnit",
+      "model": "Display",
+      "version": "2.3.0",
+      "params": [],
+      "pos": [
+        88,
+        1
+      ]
+    },
+    {
+      "id": 14,
+      "plugin": "VideoResearchUnit",
+      "model": "VideoOsc",
+      "version": "2.3.0",
+      "params": [
+        {
+          "id": 0,
+          "value": 2.5868848128521846
+        },
+        {
+          "id": 2,
+          "value": 0.0
+        },
+        {
+          "id": 3,
+          "value": 0.0
+        },
+        {
+          "id": 4,
+          "value": 6
+        },
+        {
+          "id": 5,
+          "value": 0.0
+        },
+        {
+          "id": 10,
+          "value": 0
+        },
+        {
+          "id": 12,
+          "value": 0.8
+        },
+        {
+          "id": 15,
+          "value": 0
+        }
+      ],
+      "pos": [
+        0,
+        2
+      ]
+    },
+    {
+      "id": 15,
+      "plugin": "VideoResearchUnit",
+      "model": "VideoOsc",
+      "version": "2.3.0",
+      "params": [
+        {
+          "id": 0,
+          "value": 5.321928094887363
+        },
+        {
+          "id": 1,
+          "value": 0.58
+        },
+        {
+          "id": 2,
+          "value": 0.0
+        },
+        {
+          "id": 3,
+          "value": 0.0
+        },
+        {
+          "id": 4,
+          "value": 6
+        },
+        {
+          "id": 10,
+          "value": 1
+        },
+        {
+          "id": 12,
+          "value": 1.0
+        },
+        {
+          "id": 15,
+          "value": 0
+        },
+        {
+          "id": 17,
+          "value": 0.5
+        }
+      ],
+      "pos": [
+        20,
+        2
+      ]
+    },
+    {
+      "id": 16,
+      "plugin": "VideoResearchUnit",
+      "model": "Colorizer",
+      "version": "2.3.0",
+      "params": [],
+      "pos": [
+        40,
+        2
+      ]
+    },
+    {
+      "id": 17,
+      "plugin": "VideoResearchUnit",
+      "model": "Display",
+      "version": "2.3.0",
+      "params": [],
+      "pos": [
+        52,
+        2
+      ]
+    },
+    {
+      "id": 18,
+      "plugin": "VideoResearchUnit",
+      "model": "VideoOsc",
+      "version": "2.3.0",
+      "params": [
+        {
+          "id": 0,
+          "value": 3.0
+        },
+        {
+          "id": 1,
+          "value": 0.5
+        },
+        {
+          "id": 2,
+          "value": 0.0
+        }
+      ],
+      "pos": [
+        0,
+        3
+      ]
+    },
+    {
+      "id": 19,
+      "plugin": "VideoResearchUnit",
+      "model": "Shapes",
+      "version": "2.3.0",
+      "params": [
+        {
+          "id": 0,
+          "value": 5.0
+        },
+        {
+          "id": 1,
+          "value": 0.25
+        },
+        {
+          "id": 3,
+          "value": 0.35
+        },
+        {
+          "id": 13,
+          "value": 1
+        }
+      ],
+      "pos": [
+        20,
+        3
+      ]
+    },
+    {
+      "id": 20,
+      "plugin": "Fundamental",
+      "model": "LFO",
+      "version": "2.6.4",
+      "params": [
+        {
+          "id": 0,
+          "value": 0
+        },
+        {
+          "id": 2,
+          "value": -3.0
+        }
+      ],
+      "pos": [
+        34,
+        3
+      ]
+    },
+    {
+      "id": 21,
+      "plugin": "Fundamental",
+      "model": "LFO",
+      "version": "2.6.4",
+      "params": [
+        {
+          "id": 0,
+          "value": 0
+        },
+        {
+          "id": 2,
+          "value": -2.6
+        }
+      ],
+      "pos": [
+        43,
+        3
+      ]
+    },
+    {
+      "id": 22,
+      "plugin": "Fundamental",
+      "model": "VCA",
+      "version": "2.6.4",
+      "params": [
+        {
+          "id": 0,
+          "value": 0.5
+        },
+        {
+          "id": 1,
+          "value": 0.5
+        }
+      ],
+      "pos": [
+        52,
+        3
+      ]
+    },
+    {
+      "id": 23,
+      "plugin": "VideoResearchUnit",
+      "model": "ScanProcessor",
+      "version": "2.3.0",
+      "params": [
+        {
+          "id": 0,
+          "value": 0.4
+        },
+        {
+          "id": 3,
+          "value": 0.1
+        },
+        {
+          "id": 4,
+          "value": 0.8
+        },
+        {
+          "id": 5,
+          "value": 1
+        },
+        {
+          "id": 6,
+          "value": 0.8
+        },
+        {
+          "id": 8,
+          "value": 1
+        },
+        {
+          "id": 9,
+          "value": 0.5
+        },
+        {
+          "id": 10,
+          "value": 0.3
+        },
+        {
+          "id": 11,
+          "value": 0.4
+        }
+      ],
+      "pos": [
+        57,
+        3
+      ]
+    },
+    {
+      "id": 24,
+      "plugin": "VideoResearchUnit",
+      "model": "Display",
+      "version": "2.3.0",
+      "params": [],
+      "pos": [
+        70,
+        3
+      ]
+    },
+    {
+      "id": 25,
+      "plugin": "VideoResearchUnit",
+      "model": "Shapes",
+      "version": "2.3.0",
+      "params": [
+        {
+          "id": 0,
+          "value": 12.0
+        },
+        {
+          "id": 1,
+          "value": 1.0
+        },
+        {
+          "id": 3,
+          "value": 0.1
+        },
+        {
+          "id": 13,
+          "value": 1
+        }
+      ],
+      "pos": [
+        0,
+        4
+      ]
+    },
+    {
+      "id": 26,
+      "plugin": "Fundamental",
+      "model": "LFO",
+      "version": "2.6.4",
+      "params": [
+        {
+          "id": 0,
+          "value": 0
+        },
+        {
+          "id": 2,
+          "value": -2.4
+        }
+      ],
+      "pos": [
+        14,
+        4
+      ]
+    },
+    {
+      "id": 27,
+      "plugin": "Fundamental",
+      "model": "LFO",
+      "version": "2.6.4",
+      "params": [
+        {
+          "id": 0,
+          "value": 0
+        },
+        {
+          "id": 2,
+          "value": -2.0
+        }
+      ],
+      "pos": [
+        23,
+        4
+      ]
+    },
+    {
+      "id": 28,
+      "plugin": "Fundamental",
+      "model": "VCA",
+      "version": "2.6.4",
+      "params": [
+        {
+          "id": 0,
+          "value": 0.7
+        },
+        {
+          "id": 1,
+          "value": 0.7
+        }
+      ],
+      "pos": [
+        32,
+        4
+      ]
+    },
+    {
+      "id": 29,
+      "plugin": "VideoResearchUnit",
+      "model": "Feedback",
+      "version": "2.3.0",
+      "params": [
+        {
+          "id": 5,
+          "value": 0.97
+        }
+      ],
+      "pos": [
+        37,
+        4
+      ],
+      "data": {
+        "fadeTrailsToBlack": true
+      }
+    },
+    {
+      "id": 30,
+      "plugin": "VideoResearchUnit",
+      "model": "Display",
+      "version": "2.3.0",
+      "params": [],
+      "pos": [
+        49,
+        4
+      ]
+    },
+    {
+      "id": 31,
+      "plugin": "Core",
+      "model": "Notes",
+      "version": "2.6.6",
+      "params": [],
+      "pos": [
+        80,
+        4
+      ],
+      "data": {
+        "text": "Everything new in 2.3.0, one row each, top to bottom.\n1. Picture to CV: a moving picture goes into the Video Probe. A slow LFO moves the probe across it, and its LUMA output sets the pitch of the bars on the second oscillator, so the bars bunch and spread as the probe moves.\n2. A loop through a Frame Delay: a shape is cabled round a loop and leaves a spiralling trail.\n3. One Video Oscillator bends another through FM IN.\n4. Scan Processor LIFT IN: the oscillator's picture is drawn as lines, and the moving shape on LIFT IN lifts them.\n5. Feedback with Fade trails fully to black: a small dot leaves a trail that fades out completely.\nEach row ends in its own Display."
+      }
+    }
+  ],
+  "cables": [
+    {
+      "id": 1,
+      "outputModuleId": 2,
+      "outputId": 0,
+      "inputModuleId": 3,
+      "inputId": 0,
+      "color": "#8b4ade"
+    },
+    {
+      "id": 2,
+      "outputModuleId": 1,
+      "outputId": 0,
+      "inputModuleId": 3,
+      "inputId": 1,
+      "color": "#00b56e"
+    },
+    {
+      "id": 3,
+      "outputModuleId": 3,
+      "outputId": 0,
+      "inputModuleId": 4,
+      "inputId": 0,
+      "color": "#ffb437"
+    },
+    {
+      "id": 4,
+      "outputModuleId": 4,
+      "outputId": 0,
+      "inputModuleId": 5,
+      "inputId": 0,
+      "color": "#3695ef"
+    },
+    {
+      "id": 5,
+      "outputModuleId": 6,
+      "outputId": 0,
+      "inputModuleId": 7,
+      "inputId": 0,
+      "color": "#8b4ade"
+    },
+    {
+      "id": 6,
+      "outputModuleId": 7,
+      "outputId": 0,
+      "inputModuleId": 13,
+      "inputId": 0,
+      "color": "#3695ef"
+    },
+    {
+      "id": 7,
+      "outputModuleId": 7,
+      "outputId": 0,
+      "inputModuleId": 8,
+      "inputId": 0,
+      "color": "#8b4ade"
+    },
+    {
+      "id": 8,
+      "outputModuleId": 8,
+      "outputId": 0,
+      "inputModuleId": 9,
+      "inputId": 0,
+      "color": "#8b4ade"
+    },
+    {
+      "id": 9,
+      "outputModuleId": 9,
+      "outputId": 0,
+      "inputModuleId": 7,
+      "inputId": 1,
+      "color": "#8b4ade"
+    },
+    {
+      "id": 10,
+      "outputModuleId": 10,
+      "outputId": 0,
+      "inputModuleId": 12,
+      "inputId": 2,
+      "color": "#00b56e"
+    },
+    {
+      "id": 11,
+      "outputModuleId": 12,
+      "outputId": 0,
+      "inputModuleId": 6,
+      "inputId": 4,
+      "color": "#00b56e"
+    },
+    {
+      "id": 12,
+      "outputModuleId": 11,
+      "outputId": 0,
+      "inputModuleId": 12,
+      "inputId": 5,
+      "color": "#00b56e"
+    },
+    {
+      "id": 13,
+      "outputModuleId": 12,
+      "outputId": 1,
+      "inputModuleId": 6,
+      "inputId": 5,
+      "color": "#00b56e"
+    },
+    {
+      "id": 14,
+      "outputModuleId": 14,
+      "outputId": 0,
+      "inputModuleId": 15,
+      "inputId": 10,
+      "color": "#8b4ade"
+    },
+    {
+      "id": 15,
+      "outputModuleId": 15,
+      "outputId": 0,
+      "inputModuleId": 16,
+      "inputId": 0,
+      "color": "#8b4ade"
+    },
+    {
+      "id": 16,
+      "outputModuleId": 16,
+      "outputId": 0,
+      "inputModuleId": 17,
+      "inputId": 0,
+      "color": "#3695ef"
+    },
+    {
+      "id": 17,
+      "outputModuleId": 18,
+      "outputId": 0,
+      "inputModuleId": 23,
+      "inputId": 0,
+      "color": "#8b4ade"
+    },
+    {
+      "id": 18,
+      "outputModuleId": 19,
+      "outputId": 0,
+      "inputModuleId": 23,
+      "inputId": 9,
+      "color": "#8b4ade"
+    },
+    {
+      "id": 19,
+      "outputModuleId": 23,
+      "outputId": 0,
+      "inputModuleId": 24,
+      "inputId": 0,
+      "color": "#3695ef"
+    },
+    {
+      "id": 20,
+      "outputModuleId": 20,
+      "outputId": 0,
+      "inputModuleId": 22,
+      "inputId": 2,
+      "color": "#00b56e"
+    },
+    {
+      "id": 21,
+      "outputModuleId": 22,
+      "outputId": 0,
+      "inputModuleId": 19,
+      "inputId": 4,
+      "color": "#00b56e"
+    },
+    {
+      "id": 22,
+      "outputModuleId": 21,
+      "outputId": 0,
+      "inputModuleId": 22,
+      "inputId": 5,
+      "color": "#00b56e"
+    },
+    {
+      "id": 23,
+      "outputModuleId": 22,
+      "outputId": 1,
+      "inputModuleId": 19,
+      "inputId": 5,
+      "color": "#00b56e"
+    },
+    {
+      "id": 24,
+      "outputModuleId": 25,
+      "outputId": 0,
+      "inputModuleId": 29,
+      "inputId": 0,
+      "color": "#8b4ade"
+    },
+    {
+      "id": 25,
+      "outputModuleId": 29,
+      "outputId": 0,
+      "inputModuleId": 30,
+      "inputId": 0,
+      "color": "#3695ef"
+    },
+    {
+      "id": 26,
+      "outputModuleId": 26,
+      "outputId": 0,
+      "inputModuleId": 28,
+      "inputId": 2,
+      "color": "#00b56e"
+    },
+    {
+      "id": 27,
+      "outputModuleId": 28,
+      "outputId": 0,
+      "inputModuleId": 25,
+      "inputId": 4,
+      "color": "#00b56e"
+    },
+    {
+      "id": 28,
+      "outputModuleId": 27,
+      "outputId": 0,
+      "inputModuleId": 28,
+      "inputId": 5,
+      "color": "#00b56e"
+    },
+    {
+      "id": 29,
+      "outputModuleId": 28,
+      "outputId": 1,
+      "inputModuleId": 25,
+      "inputId": 5,
+      "color": "#00b56e"
+    }
+  ]
+}

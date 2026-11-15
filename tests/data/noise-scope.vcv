@@ -1,0 +1,16 @@
+{
+  "version": "2.6.6",
+  "zoom": 1.0,
+  "gridOffset": [0.0, 0.0],
+  "modules": [
+    {"id": 1, "plugin": "Fundamental", "model": "Noise", "version": "2.6.4", "params": [], "pos": [0, 0]},
+    {"id": 2, "plugin": "VideoResearchUnit", "model": "ScopeTrace", "version": "2.3.0", "params": [], "pos": [8, 0]},
+    {"id": 3, "plugin": "VideoResearchUnit", "model": "Display", "version": "2.3.0", "params": [], "pos": [28, 0]},
+    {"id": 4, "plugin": "Mystery", "model": "Widget", "version": "1.0.0", "params": [], "pos": [40, 0]}
+  ],
+  "cables": [
+    {"id": 1, "outputModuleId": 1, "outputId": 0, "inputModuleId": 2, "inputId": 0, "color": "#ffb437"},
+    {"id": 2, "outputModuleId": 1, "outputId": 1, "inputModuleId": 2, "inputId": 1, "color": "#f3374b"},
+    {"id": 3, "outputModuleId": 2, "outputId": 0, "inputModuleId": 3, "inputId": 0, "color": "#24bd73"}
+  ]
+}

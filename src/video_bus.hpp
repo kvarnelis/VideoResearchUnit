@@ -37,6 +37,7 @@ enum class VideoBusNodeType : int {
 	Shapes = 16,
 	VideoMixer = 17,
 	Focus = 18,
+	FrameDelay = 19,
 };
 
 // Plain-old-data node stored in a bus. Must stay trivially copyable: it is copied word by word
@@ -63,6 +64,7 @@ struct VideoBusNode {
 	ShapesParams shapes;
 	VideoMixerParams videoMixer;
 	FocusParams focus;
+	FrameDelayParams frameDelay;
 };
 
 // Publishing (audio thread, owner of busId only). Each call replaces the whole node.
@@ -130,3 +132,5 @@ void videoBusPublishShapes(int busId, const ShapesParams& params);
 // The Video Mixer reads its four pictures, pattern, key and matte buses from the params (0 = absent).
 void videoBusPublishVideoMixer(int busId, const VideoMixerParams& params);
 void videoBusPublishFocus(int busId, int sourceBusId, const FocusParams& params);
+// A delay is a leaf for the renderer's walk: its picture comes from the ring, so a loop through it is not a cycle.
+void videoBusPublishFrameDelay(int busId, int sourceBusId, const FrameDelayParams& params);

@@ -25,6 +25,7 @@ struct VideoOsc : Module {
 		BEND_PARAM,
 		MIX_PARAM,
 		SPREAD_PARAM,
+		FM_AMOUNT_PARAM,
 		PARAMS_LEN
 	};
 	enum InputId {
@@ -34,6 +35,11 @@ struct VideoOsc : Module {
 		SHAPE_INPUT,
 		FREQ_B_INPUT,
 		BEND_INPUT,
+		LOCK_A_INPUT,
+		LOCK_B_INPUT,
+		IN_A_INPUT,
+		IN_B_INPUT,
+		FM_INPUT,
 		INPUTS_LEN
 	};
 	enum OutputId {
@@ -77,8 +83,10 @@ struct VideoOsc : Module {
 	float phase = 0.f;
 	PairClock pairClock;
 	VideoBusOwner videoBus;
+	int signalSlotId = 0;
 
 	VideoOsc() {
+		signalSlotId = signalRingAllocate();
 		config(PARAMS_LEN, INPUTS_LEN, OUTPUTS_LEN, LIGHTS_LEN);
 		configParam<FrequencyAQuantity>(FREQUENCY_PARAM, 0.f, 8.f, 4.f, "Frequency (A)");
 		configParam(HUE_PARAM, 0.f, 1.f, 0.58f, "Hue");
@@ -100,18 +108,40 @@ struct VideoOsc : Module {
 		configParam(WAVE_B_PARAM, 0.f, 1.f, 0.f, "Wave (B)");
 		configSwitch(RANGE_A_PARAM, 0.f, 1.f, 1.f, "Range (A)", {"Rows down the picture", "Bars across the picture"});
 		configSwitch(RANGE_B_PARAM, 0.f, 1.f, 0.f, "Range (B)", {"Rows down the picture", "Bars across the picture"});
-		configSwitch(LOCK_A_PARAM, 0.f, 1.f, 1.f, "Lock (A)", {"Free", "Locked to the scan"});
-		configSwitch(LOCK_B_PARAM, 0.f, 1.f, 1.f, "Lock (B)", {"Free", "Locked to the scan"});
+		// LOCK was a two-position switch (0 free, 1 locked to the scan). The ids are the same, so saved patches
+		// load: 0 stays fully free and 1 stays fully locked.
+		configParam(LOCK_A_PARAM, 0.f, 1.f, 1.f, "Lock (A)");
+		configParam(LOCK_B_PARAM, 0.f, 1.f, 1.f, "Lock (B)");
 		configParam(BEND_PARAM, 0.f, 4.f, 0.f, "Bend", " cycles");
 		configSwitch(MIX_PARAM, 0.f, 3.f, 1.f, "Mix", {"A", "A + B", "A - B", "A x B"});
 		configParam(SPREAD_PARAM, 0.f, 1.f, 0.33f, "Spread");
+		configParam(FM_AMOUNT_PARAM, -1.f, 1.f, 0.f, "FM amount");
 		configInput(FREQUENCY_INPUT, "Frequency (A) CV");
 		configInput(HUE_INPUT, "Hue CV");
 		configInput(FEEDBACK_INPUT, "Feedback CV");
 		configInput(SHAPE_INPUT, "Wave (A) CV");
 		configInput(FREQ_B_INPUT, "Frequency (B) CV");
 		configInput(BEND_INPUT, "Bend CV");
+		configInput(LOCK_A_INPUT, "Lock (A) CV");
+		configInput(LOCK_B_INPUT, "Lock (B) CV");
+		configInput(IN_A_INPUT, "In A");
+		configInput(IN_B_INPUT, "In B");
+		configInput(FM_INPUT, "FM In (video bus)");
 		configOutput(VIDEO_BUS_OUTPUT, "Video bus token");
+
+		paramQuantities[LOCK_A_PARAM]->description = "How firmly oscillator A is held to the television scan. All the way up, its pattern stands still at any frequency. All the way down, it runs free: bars lean and travel, rows roll. In between, each line pulls it part of the way back into step: near a whole number of cycles the pattern catches and stands, further off it tears into slanted bands and slips.";
+		paramQuantities[LOCK_B_PARAM]->description = "How firmly oscillator B is held to the television scan. All the way up, its pattern stands still at any frequency. All the way down, it runs free: bars lean and travel, rows roll. In between, each line pulls it part of the way back into step.";
+		inputInfos[LOCK_A_INPUT]->description = "10 V is the knob's whole range, added to the knob.";
+		inputInfos[LOCK_B_INPUT]->description = "10 V is the knob's whole range, added to the knob.";
+		inputInfos[IN_A_INPUT]->description = "Audio or CV that pushes the bars of oscillator A sideways, read at each point of the scan, not once a frame. 5 V moves them one cycle of A. A voice or a tone draws its own waveform down the bars.";
+		inputInfos[IN_B_INPUT]->description = "Audio or CV that pushes the bars of oscillator B sideways, read at each point of the scan, not once a frame. 5 V moves them one cycle of B.";
+		inputInfos[FM_INPUT]->description = "A second picture that bends oscillator A. In Bars and Rows its brightness, at each pixel, speeds A up (bright) or slows it down (dark), so A's bars bunch together where the picture is bright and spread apart where it is dark. Unpatched, or with FM AMT at zero, nothing changes. In the Oscillator pattern it shifts the carrier's phase. The test cards ignore it.";
+		paramQuantities[FM_AMOUNT_PARAM]->description = "How far the FM IN picture bends oscillator A. 0 is none. Positive: bright parts of the picture bunch the bars. Negative: dark parts do. At full, A's rate runs from a quarter (black) to one and three quarters (white) of its own.";
+		inputInfos[BEND_INPUT]->description = "0.4 cycles per volt, added to the Bend knob. It is read at each point of the scan, so an audio signal here bends the bars along the picture.";
+	}
+
+	~VideoOsc() override {
+		signalRingRelease(signalSlotId);
 	}
 
 	void process(const ProcessArgs& args) override {
@@ -145,17 +175,38 @@ struct VideoOsc : Module {
 		out.cyclesA = pairCycles(params[FREQUENCY_PARAM].getValue(), inputs[FREQUENCY_INPUT].getVoltage());
 		out.cyclesB = pairCycles(params[FREQ_B_PARAM].getValue(), inputs[FREQ_B_INPUT].getVoltage());
 		out.waveB = clamp(params[WAVE_B_PARAM].getValue(), 0.f, 1.f);
-		out.bend = clamp(params[BEND_PARAM].getValue() + inputs[BEND_INPUT].getVoltage() * 0.4f, -8.f, 8.f);
+		// BEND is the knob alone here; the BEND CV travels in the signal ring and is added at each pixel's scan time.
+		out.bend = clamp(params[BEND_PARAM].getValue(), -8.f, 8.f);
 		out.mix = static_cast<int>(clamp(std::round(params[MIX_PARAM].getValue()), 0.f, 3.f));
 		out.spread = clamp(params[SPREAD_PARAM].getValue(), 0.f, 1.f);
 		out.barsA = params[RANGE_A_PARAM].getValue() > 0.5f;
 		out.barsB = params[RANGE_B_PARAM].getValue() > 0.5f;
-		out.lockA = params[LOCK_A_PARAM].getValue() > 0.5f;
-		out.lockB = params[LOCK_B_PARAM].getValue() > 0.5f;
+		out.lockA = clamp(params[LOCK_A_PARAM].getValue() + inputs[LOCK_A_INPUT].getVoltage() * 0.1f, 0.f, 1.f);
+		out.lockB = clamp(params[LOCK_B_PARAM].getValue() + inputs[LOCK_B_INPUT].getVoltage() * 0.1f, 0.f, 1.f);
+
+		// Scan-time inputs: pushed into the ring once per sample (no allocation, no lock). With none of the
+		// three jacks patched the renderer ignores the ring and draws as it did before they existed.
+		signalRingSetSampleRate(signalSlotId, args.sampleRate);
+		float samples[kSignalRingChannels] = {};
+		samples[kVideoOscInA] = clamp(inputs[IN_A_INPUT].getVoltage() * 0.2f, -8.f, 8.f);
+		samples[kVideoOscInB] = clamp(inputs[IN_B_INPUT].getVoltage() * 0.2f, -8.f, 8.f);
+		samples[kVideoOscBend] = clamp(inputs[BEND_INPUT].getVoltage() * 0.4f, -8.f, 8.f);
+		signalRingPush(signalSlotId, samples);
+		out.signalSlotId = signalSlotId;
+		out.scanInputs = inputs[IN_A_INPUT].isConnected() || inputs[IN_B_INPUT].isConnected() || inputs[BEND_INPUT].isConnected();
 		pairClock.advance(args.sampleTime, out.cyclesA, out.barsA, out.cyclesB, out.barsB);
 		out.latchedA = pairClock.latchedA;
 		out.latchedB = pairClock.latchedB;
 		out.fieldOdd = pairClock.fieldOdd;
+
+		// FM IN: another picture bends oscillator A. Unpatched, a bus with no picture, or this module's own bus: none.
+		if (inputs[FM_INPUT].isConnected()) {
+			const int fmBus = videoBusIdFromVoltage(inputs[FM_INPUT].getVoltage());
+			if (fmBus != videoBus.id() && videoBusIsActive(fmBus)) {
+				out.fmBusId = fmBus;
+				out.fmAmount = clamp(params[FM_AMOUNT_PARAM].getValue(), -1.f, 1.f);
+			}
+		}
 
 		videoBusPublish(videoBus.id(), out);
 		outputs[VIDEO_BUS_OUTPUT].setVoltage(videoBus.voltage());
@@ -266,8 +317,8 @@ struct VideoOscWidget : ModuleWidget {
 		addInput(createInputCentered<PJ301MPort>(mm2px(Vec(x, y)), module, inputId));
 	}
 
-	// One oscillator's row: its tag, FREQ, WAVE, the RANGE switch (lever up is bars) and the LOCK switch
-	// (lever up is locked to the scan).
+	// One oscillator's row: its tag, FREQ, WAVE, the RANGE switch (lever up is bars) and the LOCK knob
+	// (all the way up is locked to the scan, all the way down is free).
 	void addOscillatorRow(VideoOsc* module, float y, const char* tag, int freqId, int waveId, int rangeId, int lockId) {
 		using namespace rasterlab_panel;
 		addChild(createPanelText(Vec(7.5f, y), tag, TITLE_MM));
@@ -275,8 +326,7 @@ struct VideoOscWidget : ModuleWidget {
 		addKnob<RoundBlackKnob>(module, 33.f, y, "WAVE", waveId);
 		addToggleLabels(this, Vec(45.f, y), "RANGE", "BARS", "ROWS");
 		addParam(createParamCentered<CKSS>(mm2px(Vec(45.f, y)), module, rangeId));
-		addToggleLabels(this, Vec(61.f, y), "LOCK", "SCAN", "FREE");
-		addParam(createParamCentered<CKSS>(mm2px(Vec(61.f, y)), module, lockId));
+		addKnob<RoundBlackKnob>(module, 61.f, y, "LOCK", lockId);
 	}
 
 	VideoOscWidget(VideoOsc* module) {
@@ -307,8 +357,12 @@ struct VideoOscWidget : ModuleWidget {
 		addKnob<RoundBlackKnob>(module, 79.f, 66.f, "BEND", VideoOsc::BEND_PARAM);
 		addKnob<RoundBlackSnapKnob>(module, 90.f, 66.f, "MIX", VideoOsc::MIX_PARAM);
 		addKnob<RoundBlackKnob>(module, 84.5f, 84.f, "FB", VideoOsc::FEEDBACK_PARAM);
+		// FM IN and its amount, on the B row's line: the jack between LOCK and FB, the amount to the right of FB.
+		addJackLabel(this, Vec(71.f, 84.f), "FM IN", R_KNOB);
+		addInput(createInputCentered<PJ301MPort>(mm2px(Vec(71.f, 84.f)), module, VideoOsc::FM_INPUT));
+		addKnob<RoundSmallBlackKnob>(module, 94.2f, 84.f, "AMT", VideoOsc::FM_AMOUNT_PARAM, R_SMALL);
 
-		// The six CV inputs in one row, 15.2 mm apart; FRAME and BUS sit under the last two.
+		// The six older CV inputs in one row, 15.2 mm apart; FRAME and BUS sit under the last two.
 		const float jackX[6] = {10.5f, 25.7f, 40.9f, 56.1f, 71.3f, 86.5f};
 		addCvJack(module, jackX[0], 100.f, "FREQ A", VideoOsc::FREQUENCY_INPUT);
 		addCvJack(module, jackX[1], 100.f, "WAVE A", VideoOsc::SHAPE_INPUT);
@@ -316,6 +370,12 @@ struct VideoOscWidget : ModuleWidget {
 		addCvJack(module, jackX[3], 100.f, "BEND", VideoOsc::BEND_INPUT);
 		addCvJack(module, jackX[4], 100.f, "HUE", VideoOsc::HUE_INPUT);
 		addCvJack(module, jackX[5], 100.f, "FB", VideoOsc::FEEDBACK_INPUT);
+
+		// The new jacks: scan-time inputs and the two LOCK CVs, in a row under the first four.
+		addCvJack(module, jackX[0], 116.f, "IN A", VideoOsc::IN_A_INPUT);
+		addCvJack(module, jackX[1], 116.f, "IN B", VideoOsc::IN_B_INPUT);
+		addCvJack(module, jackX[2], 116.f, "LOCK A", VideoOsc::LOCK_A_INPUT);
+		addCvJack(module, jackX[3], 116.f, "LOCK B", VideoOsc::LOCK_B_INPUT);
 
 		addJackLabel(this, Vec(jackX[4], 116.f), "FRAME");
 		addChild(createLightCentered<MediumLight<BlueLight>>(mm2px(Vec(jackX[4], 116.f)), module, VideoOsc::FRAME_LIGHT));

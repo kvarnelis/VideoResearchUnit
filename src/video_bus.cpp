@@ -261,6 +261,14 @@ void videoBusPublishFocus(int busId, int sourceBusId, const FocusParams& params)
 	commitNode(busId, node);
 }
 
+void videoBusPublishFrameDelay(int busId, int sourceBusId, const FrameDelayParams& params) {
+	VideoBusNode node;
+	node.type = VideoBusNodeType::FrameDelay;
+	node.sourceBusId = sourceBusId;
+	node.frameDelay = params;
+	commitNode(busId, node);
+}
+
 void videoBusPublishRotator(int busId, int sourceBusId, const RotatorParams& params) {
 	VideoBusNode node;
 	node.type = VideoBusNodeType::Rotator;

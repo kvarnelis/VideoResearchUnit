@@ -324,6 +324,23 @@ void toneMap(const EnergyField& energy, const float* glow, float k, unsigned cha
 	}
 }
 
+// The same curve into a float picture (0..255 units, alpha 255): no rounding, so a faint trail keeps its fraction of a level.
+void toneMapF(const EnergyField& energy, const float* glow, float k, float* rgba) {
+	const ToneLut& lut = toneLut();
+	const size_t pixels = static_cast<size_t>(energy.width()) * static_cast<size_t>(energy.height());
+	const float* e = energy.data();
+	for (size_t p = 0; p < pixels; ++p) {
+		for (size_t c = 0; c < 3u; ++c) {
+			float value = e[p * 3u + c];
+			if (glow) {
+				value += glow[p * 3u + c];
+			}
+			rgba[p * 4u + c] = std::clamp(lut.at(k * value) * 255.f, 0.f, 255.f);
+		}
+		rgba[p * 4u + 3] = 255.f;
+	}
+}
+
 // ---- CoilFilter ----
 
 void CoilFilter::setCutoff(float hz, float sampleRate) {

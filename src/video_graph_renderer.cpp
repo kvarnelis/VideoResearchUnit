@@ -30,6 +30,28 @@ constexpr float kScopeToneK = 1.6f;
 constexpr float kScopeBeamGain = 2.6f;
 }
 
+namespace {
+// The nodes that read their source through the frame helpers and so take a float picture as it is. Every other node
+// is given bytes. (Part of the list in docs/architecture.md, "Precision".)
+bool acceptsFloat(VideoBusNodeType type) {
+	switch (type) {
+	case VideoBusNodeType::ColorLab:
+	case VideoBusNodeType::Colorizer:
+	case VideoBusNodeType::Keyer:
+	case VideoBusNodeType::WaveShaper:
+	case VideoBusNodeType::FreezeFrame:
+	case VideoBusNodeType::Rotator:
+	case VideoBusNodeType::Feedback:
+	case VideoBusNodeType::DeflectionYoke:
+	case VideoBusNodeType::LineField:
+	case VideoBusNodeType::Focus:
+		return true;
+	default:
+		return false;
+	}
+}
+}
+
 VideoGraphRenderer::VideoGraphRenderer() : pool(static_cast<size_t>((kMaxDepth + 2) * kSlotsPerDepth)) {}
 
 const VideoGraphRenderer::Frame& VideoGraphRenderer::renderBus(int busId, int width, int height) {
@@ -40,10 +62,25 @@ const VideoGraphRenderer::Frame& VideoGraphRenderer::renderBus(int busId, int wi
 		return none;
 	}
 
-	++passId;
+	beginPass();
+	deepest = 0;
 	const Status status = renderNode(busId, width, height, 0, work);
+	if (delayJobCount > 0) {
+		// A Frame Delay was met. Its source may be this very picture (a loop), so keep the root as a finished tap
+		// for drawDelaySources() to reuse instead of drawing it again.
+		if (status == Status::Ok && memoPass[static_cast<size_t>(busId)] != passId) {
+			memo[static_cast<size_t>(busId)].copyFrom(work);
+			memoPass[static_cast<size_t>(busId)] = passId;
+			memoHeight[static_cast<size_t>(busId)] = deepest;
+		}
+		const bool contendedBefore = readContended;
+		drawDelaySources(width, height);
+		readContended = contendedBefore;
+	}
 	if (status == Status::Ok) {
-		// Swap instead of copy: work becomes scratch for the next pass.
+		// A picture leaves the graph as 8 bits (a float one is rounded here, half up). Swap instead of copy: work
+		// becomes scratch for the next pass.
+		work.ensureU8();
 		lastGood.swap(work);
 		lastGoodBus = busId;
 		lastGoodWidth = width;
@@ -63,9 +100,74 @@ const VideoGraphRenderer::Frame& VideoGraphRenderer::renderBus(int busId, int wi
 	return none;
 }
 
+void VideoGraphRenderer::beginPass() {
+	++passId;
+	passFloat = fullPrecision.load(std::memory_order_relaxed);
+	renderCounts.fill(0);
+	delayJobCount = 0;
+	delayJobNext = 0;
+}
+
+VideoGraphRenderer::Status VideoGraphRenderer::renderBusInPass(int busId, int width, int height, Frame& out, bool keepFloatPlane) {
+	signal = false;
+	cycle = false;
+	readContended = false;
+	if (width <= 0 || height <= 0) {
+		return Status::Empty;
+	}
+	deepest = 0;
+	memoizeRoots = true;
+	const Status status = renderNode(busId, width, height, 0, work);
+	memoizeRoots = false;
+	if (delayJobNext < delayJobCount) {
+		const bool contendedBefore = readContended;
+		drawDelaySources(width, height);
+		readContended = contendedBefore;
+	}
+	if (status == Status::Ok) {
+		// Same swap renderBus() makes with lastGood: `out` takes the picture, work becomes scratch. A float picture
+		// is rounded to 8 bits once, here, straight into `out`, so the service's buffers never hold a float plane.
+		bool keptPlane = false;
+		if (work.isFloat()) {
+			out.beginU8(work.f.size());
+			floatToBytes(work.f.data(), out.data(), work.f.size());
+			if (keepFloatPlane) {
+				// Hand the float plane on as well: a swap, so there is no copy; `work` takes the old plane as scratch.
+				out.precise.swap(work.f);
+				keptPlane = true;
+			}
+		}
+		else {
+			out.swap(work);
+		}
+		if (!keptPlane) {
+			out.precise.clear();  // capacity stays; the render service frees it (RenderService::acquireBuffer)
+		}
+		signal = true;
+	}
+	else if (status == Status::Cycle) {
+		cycle = true;
+	}
+	return status;
+}
+
 VideoGraphRenderer::Status VideoGraphRenderer::renderNode(int busId, int width, int height, int depth, Frame& out) {
 	if (depth > kMaxDepth) {
 		return Status::Cycle;
+	}
+
+	// Shared taps: a bus already finished in this pass is copied, not rendered again. Its stateful nodes
+	// (Feedback, Freeze Frame, Scope Trace and the CRT beam nodes) therefore advance once per pass.
+	const bool inRange = busId >= 0 && busId <= kVideoBusCount;
+	if (inRange && memoPass[static_cast<size_t>(busId)] == passId && !onStack[static_cast<size_t>(busId)]) {
+		const size_t index = static_cast<size_t>(busId);
+		// A fresh render would have walked memoHeight levels further down from here.
+		if (depth + memoHeight[index] > kMaxDepth) {
+			return Status::Cycle;
+		}
+		deepest = std::max(deepest, depth + memoHeight[index]);
+		out.copyFrom(memo[index]);
+		return Status::Ok;
 	}
 
 	VideoBusNode node;
@@ -82,9 +184,56 @@ VideoGraphRenderer::Status VideoGraphRenderer::renderNode(int busId, int width, 
 	}
 
 	onStack[static_cast<size_t>(busId)] = true;
+	const int outerDeepest = deepest;
+	deepest = depth;
 	const Status status = renderNodeBody(busId, node, width, height, depth, out);
+	const int height2 = deepest - depth;
+	deepest = std::max(outerDeepest, deepest);
 	onStack[static_cast<size_t>(busId)] = false;
+	++renderCounts[static_cast<size_t>(busId)];
+	// The top bus of renderBus() has no second tap in this pass, so it is not copied. A root of renderBusInPass()
+	// might be read by a later root, so it is.
+	if (status == Status::Ok && (depth > 0 || memoizeRoots)) {
+		const size_t index = static_cast<size_t>(busId);
+		memo[index].copyFrom(out);
+		memoPass[index] = passId;
+		memoHeight[index] = height2;
+	}
 	return status;
+}
+
+// Picture as modulation (docs/architecture.md, "Picture as modulation"). Draws `modBusId` through the ordinary walk, at
+// this node's size and one level below it, so it is counted in the depth limit, caught by the cycle check and drawn
+// once per pass when something else reads it too. Then it keeps the brightness of every pixel in modLuma, 0..1
+// (Rec. 709 weights as the Keyer's, read from a byte or a float picture; a float picture is not rounded).
+//
+// `luma` is left null, and the caller runs its own code unchanged, when there is no modulation: no bus, the node's
+// own bus, an amount of zero, a bus that has no picture, or a picture of the wrong size. Only a loop is an error
+// (Status::Cycle); the caller returns it. The buffer is shared by every node: it is filled after the nested draw is
+// finished and used before the caller returns, so no other node writes it in between.
+VideoGraphRenderer::Status VideoGraphRenderer::renderModulation(int ownBusId, int modBusId, float amount, int width, int height, int depth, int slot, const float*& luma) {
+	luma = nullptr;
+	if (modBusId <= 0 || modBusId == ownBusId || !(std::fabs(amount) > 1e-6f)) {
+		return Status::Ok;
+	}
+	Frame& picture = scratch(depth, slot);
+	const Status status = renderNode(modBusId, width, height, depth + 1, picture);
+	if (status == Status::Cycle) {
+		return Status::Cycle;
+	}
+	const size_t pixels = static_cast<size_t>(width) * static_cast<size_t>(height);
+	if (status != Status::Ok || picture.count() != pixels * 4u) {
+		return Status::Ok;
+	}
+	modLuma.resize(pixels);
+	withSource(picture, [&](auto src) {
+		for (size_t p = 0; p < pixels; ++p) {
+			const size_t i = p * 4u;
+			modLuma[p] = clamp01((src[i + 0] * 0.2126f + src[i + 1] * 0.7152f + src[i + 2] * 0.0722f) / 255.f);
+		}
+	});
+	luma = modLuma.data();
+	return Status::Ok;
 }
 
 VideoGraphRenderer::Status VideoGraphRenderer::renderNodeBody(int busId, const VideoBusNode& node, int width, int height, int depth, Frame& out) {
@@ -97,18 +246,37 @@ VideoGraphRenderer::Status VideoGraphRenderer::renderNodeBody(int busId, const V
 		PreviewVideoEngine& engine = *generatorEngines[index];
 		// A generator can be reached twice in one pass (e.g. both inputs of a Bus Mixer).
 		// Reuse its frame for that pass so it advances only once per render, and both paths agree.
-		const Frame& rendered = generatorPass[index] == passId ? engine.output() : engine.render(width, height, node.generator);
+		if (generatorPass[index] != passId) {
+			// FM IN (Video Oscillator): a picture whose brightness bends oscillator A. Drawn first, through the normal walk.
+			const float* fmLuma = nullptr;
+			if (renderModulation(busId, node.generator.fmBusId, node.generator.fmAmount, width, height, depth, 0, fmLuma) == Status::Cycle) {
+				return Status::Cycle;
+			}
+			engine.render(width, height, node.generator, passFloat, fmLuma);
+		}
 		generatorPass[index] = passId;
+		if (engine.outputIsFloat()) {
+			out.beginF32(engine.outputF().size());
+			std::copy(engine.outputF().begin(), engine.outputF().end(), out.f.begin());
+			return Status::Ok;
+		}
+		const std::vector<unsigned char>& rendered = engine.output();
 		out.assign(rendered.begin(), rendered.end());
 		return rendered.empty() ? Status::Empty : Status::Ok;
 	}
 
-	case VideoBusNodeType::Ramps:
-		renderRamps(out, width, height, node.ramps);
+	case VideoBusNodeType::Ramps: {
+		// MOD IN: a picture whose brightness offsets layer A's phase.
+		const float* modLuma = nullptr;
+		if (renderModulation(busId, node.ramps.modBusId, node.ramps.modAmount, width, height, depth, 0, modLuma) == Status::Cycle) {
+			return Status::Cycle;
+		}
+		renderRamps(out, width, height, node.ramps, passFloat, modLuma);
 		return Status::Ok;
+	}
 
 	case VideoBusNodeType::Shapes:
-		renderShapes(out, width, height, node.shapes);
+		renderShapes(out, width, height, node.shapes, passFloat);
 		return Status::Ok;
 
 	case VideoBusNodeType::ExternalFrame: {
@@ -128,7 +296,6 @@ VideoGraphRenderer::Status VideoGraphRenderer::renderNodeBody(int busId, const V
 		return renderScopeTraceFrame(busId, width, height, node.scopeTraceSlotId, node.scopeTrace, out) ? Status::Ok : Status::Empty;
 
 	case VideoBusNodeType::DeflectionYoke:
-	case VideoBusNodeType::ScanProcessor:
 	case VideoBusNodeType::LineField:
 	case VideoBusNodeType::ColorLab:
 	case VideoBusNodeType::Colorizer:
@@ -144,13 +311,24 @@ VideoGraphRenderer::Status VideoGraphRenderer::renderNodeBody(int busId, const V
 		if (child != Status::Ok) {
 			return child;
 		}
+		// A node that has not been converted to read through the frame helpers gets bytes (round half up).
+		if (!acceptsFloat(node.type)) {
+			src.ensureU8();
+		}
+		// MOD IN (Color Lab, Keyer): a second picture whose brightness, at each pixel, offsets one control.
+		const float* modLuma = nullptr;
+		if (node.type == VideoBusNodeType::ColorLab || node.type == VideoBusNodeType::Keyer) {
+			const bool lab = node.type == VideoBusNodeType::ColorLab;
+			if (renderModulation(busId, lab ? node.colorLab.modBusId : node.keyer.modBusId, lab ? node.colorLab.modAmount : node.keyer.modAmount, width, height, depth, 1, modLuma) == Status::Cycle) {
+				return Status::Cycle;
+			}
+		}
 		switch (node.type) {
 		case VideoBusNodeType::DeflectionYoke: renderDeflectionYokeFrame(busId, src, out, width, height, node.deflectionYoke); break;
-		case VideoBusNodeType::ScanProcessor: renderScanProcessorFrame(busId, src, out, width, height, node.scanProcessor); break;
 		case VideoBusNodeType::LineField: renderLineFieldFrame(src, out, width, height, node.lineField); break;
-		case VideoBusNodeType::ColorLab: renderColorLabFrame(src, out, width, height, node.colorLab); break;
+		case VideoBusNodeType::ColorLab: renderColorLabFrame(src, out, width, height, node.colorLab, modLuma); break;
 		case VideoBusNodeType::Colorizer: renderColorizerFrame(src, out, width, height, node.colorizer); break;
-		case VideoBusNodeType::Keyer: renderKeyerFrame(src, out, width, height, node.keyer); break;
+		case VideoBusNodeType::Keyer: renderKeyerFrame(src, out, width, height, node.keyer, modLuma); break;
 		case VideoBusNodeType::WaveShaper: renderWaveShaperFrame(src, out, width, height, node.waveShaper); break;
 		case VideoBusNodeType::Feedback: renderFeedbackFrame(src, out, width, height, node.feedback); break;
 		case VideoBusNodeType::Rotator: renderRotatorFrame(src, out, width, height, node.rotator); break;
@@ -158,6 +336,35 @@ VideoGraphRenderer::Status VideoGraphRenderer::renderNodeBody(int busId, const V
 		case VideoBusNodeType::FreezeFrame: renderFreezeFrame(src, out, width, height, node.freezeFrame); break;
 		default: return Status::Empty;
 		}
+		return Status::Ok;
+	}
+
+	case VideoBusNodeType::ScanProcessor: {
+		Frame& src = scratch(depth, 0);
+		const Status child = renderNode(node.sourceBusId, width, height, depth + 1, src);
+		if (child != Status::Ok) {
+			return child;
+		}
+		// With "Full precision between modules" on, the picture (and the lift) are read as floats, unrounded. Off, bytes.
+		if (!passFloat) {
+			src.ensureU8();
+		}
+		// LIFT IN: a second picture that supplies the lift. Absent, empty or not rendering: the main picture lifts itself.
+		Frame* lift = nullptr;
+		if (node.scanProcessor.liftBusId > 0) {
+			Frame& l = scratch(depth, 1);
+			const Status liftStatus = renderNode(node.scanProcessor.liftBusId, width, height, depth + 1, l);
+			if (liftStatus == Status::Cycle) {
+				return Status::Cycle;
+			}
+			if (liftStatus == Status::Ok) {
+				if (!passFloat) {
+					l.ensureU8();
+				}
+				lift = &l;
+			}
+		}
+		renderScanProcessorFrame(busId, src, lift, out, width, height, node.scanProcessor);
 		return Status::Ok;
 	}
 
@@ -200,12 +407,105 @@ VideoGraphRenderer::Status VideoGraphRenderer::renderNodeBody(int busId, const V
 	case VideoBusNodeType::VideoMixer:
 		return renderVideoMixerNode(node.videoMixer, width, height, depth, out);
 
+	case VideoBusNodeType::FrameDelay: {
+		// A leaf: the picture comes from the ring, so the walk does not go into the source. The source is drawn
+		// after the root, once per pass per delay, and stored for later ticks.
+		if (delayQueued[static_cast<size_t>(busId)] != passId && delayJobCount < static_cast<int>(delayJobs.size())) {
+			delayQueued[static_cast<size_t>(busId)] = passId;
+			DelayJob& job = delayJobs[static_cast<size_t>(delayJobCount++)];
+			job.busId = busId;
+			job.sourceBusId = node.sourceBusId;
+			job.params = node.frameDelay;
+		}
+		renderFrameDelayLeaf(node.frameDelay, out, width, height);
+		return Status::Ok;
+	}
+
 	default:
 		return Status::Empty;
 	}
 }
 
-void VideoGraphRenderer::resampleInto(const Frame& src, int srcWidth, int srcHeight, Frame& out, int width, int height) {
+void VideoGraphRenderer::renderFrameDelayLeaf(const FrameDelayParams& p, Frame& out, int width, int height) {
+	frameRingClear(p.ringSlotId, p.clearCounter);
+	const int frames = std::clamp(p.frames, 1, kFrameDelayMaxFrames);
+	// The newest `frames` ticks plus the one being stored now.
+	frameRingSetCapacity(p.ringSlotId, frames + 1);
+	if (frameRingReadAtLeastAge(p.ringSlotId, p.frameCounter, frames, delayPrev)) {
+		const bool stored32 = !delayPrev.rgbaF.empty() && delayPrev.rgba.empty();
+		if (stored32 && passFloat) {
+			// A picture stored as floats comes back as floats: the delay passes it on with nothing rounded.
+			out.format = FrameFormat::F32;
+			static_cast<std::vector<unsigned char>&>(out).clear();
+			if (delayPrev.width == width && delayPrev.height == height) out.f.swap(delayPrev.rgbaF);
+			else resampleIntoF(delayPrev.rgbaF, delayPrev.width, delayPrev.height, out.f, width, height);
+			return;
+		}
+		if (stored32) {
+			delayPrev.rgba.resize(delayPrev.rgbaF.size());
+			floatToBytes(delayPrev.rgbaF.data(), delayPrev.rgba.data(), delayPrev.rgbaF.size());
+		}
+		if (delayPrev.width == width && delayPrev.height == height) out.swap(delayPrev.rgba);
+		else resampleInto(delayPrev.rgba, delayPrev.width, delayPrev.height, out, width, height);
+		return;
+	}
+	// Nothing that old is stored yet (start, a clear, or a source that has only just appeared): black.
+	out.assign(static_cast<size_t>(width) * static_cast<size_t>(height) * 4u, 0);
+	for (size_t i = 3; i < out.size(); i += 4u) {
+		out[i] = 255;
+	}
+}
+
+void VideoGraphRenderer::drawDelaySources(int width, int height) {
+	const bool outerMemoize = memoizeRoots;
+	const int outerDeepest = deepest;
+	memoizeRoots = true;
+	// The list may grow while it is worked through: a source can hold other delays.
+	while (delayJobNext < delayJobCount) {
+		const DelayJob job = delayJobs[static_cast<size_t>(delayJobNext++)];
+		const FrameDelayParams& p = job.params;
+		frameRingClear(p.ringSlotId, p.clearCounter);
+		// A float store only while the module's whole ring stays within the budget (frame_ring.hpp).
+		const bool floatFits = frameDelayFloatStoreFits(p.frames, width, height);
+		frameRingSetByteFallback(p.ringSlotId, passFloat && !floatFits);
+		// One store per tick per delay: another pass, size or renderer may have stored this tick's picture already.
+		if (frameRingIsStored(p.ringSlotId, p.frameCounter)) {
+			continue;
+		}
+		const int source = job.sourceBusId;
+		if (source >= 0 && source <= kVideoBusCount && memoPass[static_cast<size_t>(source)] == passId && !onStack[static_cast<size_t>(source)]) {
+			// The pass has already drawn the source (it is a root, or something reached it). Store that picture.
+			const Frame& done = memo[static_cast<size_t>(source)];
+			if (done.isFloat() && floatFits) {
+				// The delay keeps the picture as floats too (full precision): rounding it to a byte at every store
+				// would stop a decaying loop at a grey it cannot leave.
+				frameRingPushFloatOnly(p.ringSlotId, p.frameCounter, done.f, width, height);
+			}
+			else if (done.isFloat()) {
+				// Over the memory budget: store the picture rounded half up.
+				done.copyBytesTo(delayBytes);
+				frameRingPush(p.ringSlotId, p.frameCounter, delayBytes, width, height);
+			}
+			else {
+				frameRingPush(p.ringSlotId, p.frameCounter, done, width, height);
+			}
+			continue;
+		}
+		deepest = 0;
+		if (renderNode(source, width, height, 0, delaySource) == Status::Ok) {
+			if (delaySource.isFloat() && floatFits) frameRingPushFloatOnly(p.ringSlotId, p.frameCounter, delaySource.f, width, height);
+			else if (delaySource.isFloat()) {
+				delaySource.copyBytesTo(delayBytes);
+				frameRingPush(p.ringSlotId, p.frameCounter, delayBytes, width, height);
+			}
+			else frameRingPush(p.ringSlotId, p.frameCounter, delaySource, width, height);
+		}
+	}
+	memoizeRoots = outerMemoize;
+	deepest = outerDeepest;
+}
+
+void VideoGraphRenderer::resampleInto(const std::vector<unsigned char>& src, int srcWidth, int srcHeight, Frame& out, int width, int height) {
 	prepare(out, width, height);
 	for (int y = 0; y < height; ++y) {
 		const float sourceY = height > 1 ? (static_cast<float>(y) / static_cast<float>(height - 1)) * static_cast<float>(srcHeight - 1) : 0.f;
@@ -217,6 +517,35 @@ void VideoGraphRenderer::resampleInto(const Frame& src, int srcWidth, int srcHei
 	}
 }
 
+void VideoGraphRenderer::resampleIntoF(const std::vector<float>& src, int srcWidth, int srcHeight, std::vector<float>& out, int width, int height) {
+	out.resize(static_cast<size_t>(width) * static_cast<size_t>(height) * 4u);
+	for (int y = 0; y < height; ++y) {
+		const float sourceY = height > 1 ? (static_cast<float>(y) / static_cast<float>(height - 1)) * static_cast<float>(srcHeight - 1) : 0.f;
+		for (int x = 0; x < width; ++x) {
+			const float sourceX = width > 1 ? (static_cast<float>(x) / static_cast<float>(width - 1)) * static_cast<float>(srcWidth - 1) : 0.f;
+			const size_t index = (static_cast<size_t>(y) * static_cast<size_t>(width) + static_cast<size_t>(x)) * 4u;
+			sampleBilinearF(src, srcWidth, srcHeight, sourceX, sourceY, &out[index]);
+		}
+	}
+}
+
+// The beam layer's output: the tone-mapped energy plus glow (in `glow`) as bytes, or as floats in full precision.
+void VideoGraphRenderer::toneMapOutput(const crt::EnergyField& energy, float k, Frame& out, int width, int height) {
+	if (passFloat) {
+		out.beginF32(static_cast<size_t>(width) * static_cast<size_t>(height) * 4u);
+		crt::toneMapF(energy, glow.data(), k, out.f.data());
+		return;
+	}
+	prepare(out, width, height);
+	crt::toneMap(energy, glow.data(), k, out.data());
+}
+
+// Starts the picture a converted node produces: a float frame while the pass is in full precision, else bytes.
+void VideoGraphRenderer::beginOutput(Frame& out, size_t count) const {
+	if (passFloat) out.beginF32(count);
+	else out.beginU8(count);
+}
+
 void VideoGraphRenderer::prepare(Frame& frame, int width, int height) {
 	const size_t byteCount = static_cast<size_t>(width) * static_cast<size_t>(height) * 4u;
 	if (frame.size() != byteCount) {
@@ -224,9 +553,9 @@ void VideoGraphRenderer::prepare(Frame& frame, int width, int height) {
 	}
 }
 
-void VideoGraphRenderer::renderColorLabFrame(Frame& source, Frame& out, int width, int height, const ColorLabParams& params) {
+void VideoGraphRenderer::renderColorLabFrame(Frame& source, Frame& out, int width, int height, const ColorLabParams& params, const float* modLuma) {
 	const size_t byteCount = static_cast<size_t>(width) * static_cast<size_t>(height) * 4u;
-	prepare(out, width, height);
+	beginOutput(out, byteCount);
 	const float mix = clamp01(params.mix);
 	const float hueShift = params.hue;
 	const float sat = std::clamp(params.saturation, 0.f, 2.f);
@@ -235,104 +564,134 @@ void VideoGraphRenderer::renderColorLabFrame(Frame& source, Frame& out, int widt
 	const float posterize = clamp01(params.posterize);
 	const float solarize = clamp01(params.solarize);
 	const int steps = std::clamp(static_cast<int>(2.f + posterize * 30.f), 2, 32);
-	for (size_t i = 0; i < byteCount; i += 4u) {
-		float r = source[i + 0] / 255.f;
-		float g = source[i + 1] / 255.f;
-		float b = source[i + 2] / 255.f;
-		if (params.channelMode == 1) std::swap(r, g);
-		else if (params.channelMode == 2) { float t = r; r = g; g = b; b = t; }
-		else if (params.channelMode == 3) { float t = r; r = b; b = g; g = t; }
-		float h = 0.f, sv = 0.f, v = 0.f;
-		rgbToHsv(r, g, b, h, sv, v);
-		h = fract(h + hueShift);
-		sv = clamp01(sv * sat);
-		v = clamp01(v * bright);
-		unsigned char rr = 0, gg = 0, bb = 0;
-		hsvToRgb(h, sv, v, rr, gg, bb);
-		r = rr / 255.f; g = gg / 255.f; b = bb / 255.f;
-		r = clamp01((r - 0.5f) * contrast + 0.5f);
-		g = clamp01((g - 0.5f) * contrast + 0.5f);
-		b = clamp01((b - 0.5f) * contrast + 0.5f);
-		if (posterize > 0.0001f) {
-			r = std::round(r * static_cast<float>(steps - 1)) / static_cast<float>(steps - 1);
-			g = std::round(g * static_cast<float>(steps - 1)) / static_cast<float>(steps - 1);
-			b = std::round(b * static_cast<float>(steps - 1)) / static_cast<float>(steps - 1);
-		}
-		if (solarize > 0.0001f) {
-			auto solar = [&](float c) { return c * (1.f - solarize) + (c > 0.5f ? 1.f - c : c) * solarize; };
-			r = clamp01(solar(r)); g = clamp01(solar(g)); b = clamp01(solar(b));
-		}
-		if (params.invert) { r = 1.f - r; g = 1.f - g; b = 1.f - b; }
-		out[i + 0] = static_cast<unsigned char>(std::clamp(source[i + 0] * (1.f - mix) + r * 255.f * mix, 0.f, 255.f));
-		out[i + 1] = static_cast<unsigned char>(std::clamp(source[i + 1] * (1.f - mix) + g * 255.f * mix, 0.f, 255.f));
-		out[i + 2] = static_cast<unsigned char>(std::clamp(source[i + 2] * (1.f - mix) + b * 255.f * mix, 0.f, 255.f));
-		out[i + 3] = 255;
-	}
+	withSource(source, [&](auto src) {
+		withDest<StoreRule::Truncate>(out, [&](auto dst) {
+			// In a float picture the colour is not cut to a byte between the HSV step and the contrast step.
+			constexpr bool toFloat = std::is_same<decltype(dst), FloatDest>::value;
+			for (size_t i = 0; i < byteCount; i += 4u) {
+				float r = src[i + 0] / 255.f;
+				float g = src[i + 1] / 255.f;
+				float b = src[i + 2] / 255.f;
+				if (params.channelMode == 1) std::swap(r, g);
+				else if (params.channelMode == 2) { float t = r; r = g; g = b; b = t; }
+				else if (params.channelMode == 3) { float t = r; r = b; b = g; g = t; }
+				float h = 0.f, sv = 0.f, v = 0.f;
+				rgbToHsv(r, g, b, h, sv, v);
+				// MOD IN: the picture shifts the hue, half a turn either way at full amount.
+				h = modLuma != nullptr ? fract(h + hueShift + params.modAmount * (modLuma[i / 4u] - 0.5f)) : fract(h + hueShift);
+				sv = clamp01(sv * sat);
+				v = clamp01(v * bright);
+				if (toFloat) {
+					float rr = 0.f, gg = 0.f, bb = 0.f;
+					hsvToRgb255(h, sv, v, rr, gg, bb);
+					r = rr / 255.f; g = gg / 255.f; b = bb / 255.f;
+				}
+				else {
+					unsigned char rr = 0, gg = 0, bb = 0;
+					hsvToRgb(h, sv, v, rr, gg, bb);
+					r = rr / 255.f; g = gg / 255.f; b = bb / 255.f;
+				}
+				r = clamp01((r - 0.5f) * contrast + 0.5f);
+				g = clamp01((g - 0.5f) * contrast + 0.5f);
+				b = clamp01((b - 0.5f) * contrast + 0.5f);
+				if (posterize > 0.0001f) {
+					r = std::round(r * static_cast<float>(steps - 1)) / static_cast<float>(steps - 1);
+					g = std::round(g * static_cast<float>(steps - 1)) / static_cast<float>(steps - 1);
+					b = std::round(b * static_cast<float>(steps - 1)) / static_cast<float>(steps - 1);
+				}
+				if (solarize > 0.0001f) {
+					auto solar = [&](float c) { return c * (1.f - solarize) + (c > 0.5f ? 1.f - c : c) * solarize; };
+					r = clamp01(solar(r)); g = clamp01(solar(g)); b = clamp01(solar(b));
+				}
+				if (params.invert) { r = 1.f - r; g = 1.f - g; b = 1.f - b; }
+				dst.put(i + 0, src[i + 0] * (1.f - mix) + r * 255.f * mix);
+				dst.put(i + 1, src[i + 1] * (1.f - mix) + g * 255.f * mix);
+				dst.put(i + 2, src[i + 2] * (1.f - mix) + b * 255.f * mix);
+				dst.put(i + 3, 255.f);
+			}
+		});
+	});
 }
 
-void VideoGraphRenderer::renderKeyerFrame(Frame& source, Frame& out, int width, int height, const KeyerParams& params) {
+void VideoGraphRenderer::renderKeyerFrame(Frame& source, Frame& out, int width, int height, const KeyerParams& params, const float* modLuma) {
 	const size_t byteCount = static_cast<size_t>(width) * static_cast<size_t>(height) * 4u;
-	prepare(out, width, height);
+	beginOutput(out, byteCount);
 	const float threshold = clamp01(params.threshold);
 	const float softness = std::clamp(params.softness, 0.001f, 1.f);
 	const float gain = std::clamp(params.gain, 0.f, 2.f);
 	const float mix = clamp01(params.mix);
 	unsigned char kr = 0, kg = 0, kb = 0;
 	hsvToRgb(params.hue, 0.9f, 1.f, kr, kg, kb);
-	for (size_t i = 0; i < byteCount; i += 4u) {
-		const float l = clamp01((source[i + 0] * 0.2126f + source[i + 1] * 0.7152f + source[i + 2] * 0.0722f) / 255.f);
-		float matte = clamp01((l - threshold + softness * 0.5f) / softness) * gain;
-		matte = clamp01(matte);
-		if (params.invert) matte = 1.f - matte;
-		float r = matte, g = matte, b = matte;
-		if (params.mode == 1) { r = kr / 255.f * matte; g = kg / 255.f * matte; b = kb / 255.f * matte; }
-		else if (params.mode == 2) { r = source[i + 0] / 255.f * matte; g = source[i + 1] / 255.f * matte; b = source[i + 2] / 255.f * matte; }
-		out[i + 0] = static_cast<unsigned char>(std::clamp(source[i + 0] * (1.f - mix) + r * 255.f * mix, 0.f, 255.f));
-		out[i + 1] = static_cast<unsigned char>(std::clamp(source[i + 1] * (1.f - mix) + g * 255.f * mix, 0.f, 255.f));
-		out[i + 2] = static_cast<unsigned char>(std::clamp(source[i + 2] * (1.f - mix) + b * 255.f * mix, 0.f, 255.f));
-		out[i + 3] = static_cast<unsigned char>(std::clamp(matte * 255.f, 0.f, 255.f));
-	}
+	withSource(source, [&](auto src) {
+		withDest<StoreRule::Truncate>(out, [&](auto dst) {
+			for (size_t i = 0; i < byteCount; i += 4u) {
+				const float l = clamp01((src[i + 0] * 0.2126f + src[i + 1] * 0.7152f + src[i + 2] * 0.0722f) / 255.f);
+				// MOD IN: the picture moves the threshold, so the key opens at a different brightness in different places.
+				const float thresholdHere = modLuma != nullptr ? clamp01(threshold + params.modAmount * 2.f * (modLuma[i / 4u] - 0.5f)) : threshold;
+				float matte = clamp01((l - thresholdHere + softness * 0.5f) / softness) * gain;
+				matte = clamp01(matte);
+				if (params.invert) matte = 1.f - matte;
+				float r = matte, g = matte, b = matte;
+				if (params.mode == 1) { r = kr / 255.f * matte; g = kg / 255.f * matte; b = kb / 255.f * matte; }
+				else if (params.mode == 2) { r = src[i + 0] / 255.f * matte; g = src[i + 1] / 255.f * matte; b = src[i + 2] / 255.f * matte; }
+				dst.put(i + 0, src[i + 0] * (1.f - mix) + r * 255.f * mix);
+				dst.put(i + 1, src[i + 1] * (1.f - mix) + g * 255.f * mix);
+				dst.put(i + 2, src[i + 2] * (1.f - mix) + b * 255.f * mix);
+				dst.put(i + 3, matte * 255.f);
+			}
+		});
+	});
 }
 
 void VideoGraphRenderer::renderBusMixerFrame(const Frame& a, const Frame& b, const Frame* matte, Frame& out, int width, int height, const BusMixerParams& params) {
 	const size_t byteCount = static_cast<size_t>(width) * static_cast<size_t>(height) * 4u;
-	prepare(out, width, height);
+	beginOutput(out, byteCount);
 	const float baseMix = clamp01(params.mix);
 	const float matteAmount = clamp01(params.matteAmount);
 	const int mode = std::clamp(params.mode, 0, 6);
-	const bool hasMatte = matte != nullptr && matte->size() == byteCount;
-	for (size_t i = 0; i < byteCount; i += 4u) {
-		// Factor is how much of B shows through. Matte mode (6) keys on the MAT BUS luma.
-		// Without a MAT BUS, Matte mode falls back to the MIX knob.
-		float factor = baseMix;
-		if (hasMatte) {
-			float m = ((*matte)[i + 0] * 0.2126f + (*matte)[i + 1] * 0.7152f + (*matte)[i + 2] * 0.0722f) / 255.f;
-			if (params.invertMatte) m = 1.f - m;
-			if (mode == 6) {
-				factor = clamp01(m);
+	const bool hasMatte = matte != nullptr && matte->count() == byteCount;
+	auto run = [&](auto srcA, auto srcB, auto srcM) {
+		withDest<StoreRule::Truncate>(out, [&](auto dst) {
+			for (size_t i = 0; i < byteCount; i += 4u) {
+				// Factor is how much of B shows through. Matte mode (6) keys on the MAT BUS luma.
+				// Without a MAT BUS, Matte mode falls back to the MIX knob.
+				float factor = baseMix;
+				if (hasMatte) {
+					float m = (srcM[i + 0] * 0.2126f + srcM[i + 1] * 0.7152f + srcM[i + 2] * 0.0722f) / 255.f;
+					if (params.invertMatte) m = 1.f - m;
+					if (mode == 6) {
+						factor = clamp01(m);
+					}
+					else if (matteAmount > 0.0001f) {
+						factor = clamp01(baseMix * (1.f - matteAmount) + m * matteAmount);
+					}
+				}
+				for (int c = 0; c < 3; ++c) {
+					const float av = srcA[i + c] / 255.f;
+					const float bv = srcB[i + c] / 255.f;
+					float v = bv;
+					if (mode == 1) v = clamp01(av + bv);
+					else if (mode == 2) v = av * bv;
+					else if (mode == 3) v = 1.f - (1.f - av) * (1.f - bv);
+					else if (mode == 4) v = std::abs(av - bv);
+					else if (mode == 5) v = std::max(av, bv);
+					dst.put(i + c, (av * (1.f - factor) + v * factor) * 255.f);
+				}
+				dst.put(i + 3, 255.f);
 			}
-			else if (matteAmount > 0.0001f) {
-				factor = clamp01(baseMix * (1.f - matteAmount) + m * matteAmount);
-			}
-		}
-		for (int c = 0; c < 3; ++c) {
-			const float av = a[i + c] / 255.f;
-			const float bv = b[i + c] / 255.f;
-			float v = bv;
-			if (mode == 1) v = clamp01(av + bv);
-			else if (mode == 2) v = av * bv;
-			else if (mode == 3) v = 1.f - (1.f - av) * (1.f - bv);
-			else if (mode == 4) v = std::abs(av - bv);
-			else if (mode == 5) v = std::max(av, bv);
-			out[i + c] = static_cast<unsigned char>(std::clamp((av * (1.f - factor) + v * factor) * 255.f, 0.f, 255.f));
-		}
-		out[i + 3] = 255;
+		});
+	};
+	if (!a.isFloat() && !b.isFloat() && (!hasMatte || !matte->isFloat())) {
+		run(ByteSource{a.data()}, ByteSource{b.data()}, ByteSource{hasMatte ? matte->data() : nullptr});
+	}
+	else {
+		run(mixedSourceOf(a), mixedSourceOf(b), hasMatte ? mixedSourceOf(*matte) : MixedSource{nullptr, nullptr});
 	}
 }
 
 void VideoGraphRenderer::renderWaveShaperFrame(Frame& source, Frame& out, int width, int height, const WaveShaperParams& params) {
 	const size_t byteCount = static_cast<size_t>(width) * static_cast<size_t>(height) * 4u;
-	prepare(out, width, height);
+	beginOutput(out, byteCount);
 	const float drive = std::clamp(params.drive, 0.f, 4.f);
 	const float bias = std::clamp(params.bias, -1.f, 1.f);
 	const float fold = clamp01(params.fold);
@@ -349,19 +708,23 @@ void VideoGraphRenderer::renderWaveShaperFrame(Frame& source, Frame& out, int wi
 		if (quantize > 0.0001f) v = std::round(v * static_cast<float>(steps - 1)) / static_cast<float>(steps - 1);
 		return clamp01(v);
 	};
-	for (size_t i = 0; i < byteCount; i += 4u) {
-		if (params.mode == 1) {
-			const float l = shape((source[i + 0] * 0.2126f + source[i + 1] * 0.7152f + source[i + 2] * 0.0722f) / 255.f);
-			for (int c = 0; c < 3; ++c) out[i + c] = static_cast<unsigned char>(std::clamp(source[i + c] * (1.f - mix) + l * 255.f * mix, 0.f, 255.f));
-		}
-		else {
-			for (int c = 0; c < 3; ++c) {
-				const float v = shape(source[i + c] / 255.f);
-				out[i + c] = static_cast<unsigned char>(std::clamp(source[i + c] * (1.f - mix) + v * 255.f * mix, 0.f, 255.f));
+	withSource(source, [&](auto src) {
+		withDest<StoreRule::Truncate>(out, [&](auto dst) {
+			for (size_t i = 0; i < byteCount; i += 4u) {
+				if (params.mode == 1) {
+					const float l = shape((src[i + 0] * 0.2126f + src[i + 1] * 0.7152f + src[i + 2] * 0.0722f) / 255.f);
+					for (int c = 0; c < 3; ++c) dst.put(i + c, src[i + c] * (1.f - mix) + l * 255.f * mix);
+				}
+				else {
+					for (int c = 0; c < 3; ++c) {
+						const float v = shape(src[i + c] / 255.f);
+						dst.put(i + c, src[i + c] * (1.f - mix) + v * 255.f * mix);
+					}
+				}
+				dst.put(i + 3, 255.f);
 			}
-		}
-		out[i + 3] = 255;
-	}
+		});
+	});
 }
 
 void VideoGraphRenderer::renderFreezeFrame(Frame& source, Frame& out, int width, int height, const FreezeFrameParams& params) {
@@ -371,31 +734,60 @@ void VideoGraphRenderer::renderFreezeFrame(Frame& source, Frame& out, int width,
 		freezeFrameClear(params.freezeSlotId, params.captureCounter);
 	}
 	if (params.captureCounter != 0) {
-		freezeFrameCaptureIfNew(params.freezeSlotId, params.captureCounter, source, width, height);
+		if (source.isFloat()) {
+			// Full precision: a float picture is held as float32, not rounded (16 bytes a pixel; a byte picture is
+			// already exact and is held as bytes).
+			freezeFrameCaptureFloatIfNew(params.freezeSlotId, params.captureCounter, source.f, width, height);
+		}
+		else {
+			freezeFrameCaptureIfNew(params.freezeSlotId, params.captureCounter, source, width, height);
+		}
 	}
 
 	const float hold = clamp01(params.hold);
 	const float blend = clamp01(params.blend);
 	const float amount = clamp01(hold * blend);
-	if (amount <= 0.0001f || !freezeFrameRead(params.freezeSlotId, frozenData) || frozenData.rgba.empty()) {
+	if (amount <= 0.0001f || !freezeFrameRead(params.freezeSlotId, frozenData)) {
 		out.swap(source);
 		return;
 	}
-
-	const Frame* frozenFrame = &frozenData.rgba;
+	// The held picture is bytes, or floats when it was captured in full precision. A byte pass that meets a float
+	// one (the setting was just switched off) rounds it half up.
+	if (!passFloat && frozenData.rgba.empty() && !frozenData.rgbaF.empty()) {
+		frozenData.rgba.resize(frozenData.rgbaF.size());
+		floatToBytes(frozenData.rgbaF.data(), frozenData.rgba.data(), frozenData.rgbaF.size());
+		std::vector<float>().swap(frozenData.rgbaF);
+	}
+	const bool frozenIsFloat = !frozenData.rgbaF.empty();
+	const std::vector<unsigned char>* frozenFrame = &frozenData.rgba;
+	const std::vector<float>* frozenFrameF = &frozenData.rgbaF;
 	if (frozenData.width != width || frozenData.height != height) {
-		resampleInto(frozenData.rgba, frozenData.width, frozenData.height, frozenResampled, width, height);
-		frozenFrame = &frozenResampled;
+		if (frozenIsFloat) {
+			resampleIntoF(frozenData.rgbaF, frozenData.width, frozenData.height, frozenResampledF, width, height);
+			frozenFrameF = &frozenResampledF;
+		}
+		else {
+			resampleInto(frozenData.rgba, frozenData.width, frozenData.height, frozenResampled, width, height);
+			frozenFrame = &frozenResampled;
+		}
 	}
 
 	const size_t byteCount = static_cast<size_t>(width) * static_cast<size_t>(height) * 4u;
-	prepare(out, width, height);
-	for (size_t i = 0; i < byteCount; i += 4u) {
-		out[i + 0] = static_cast<unsigned char>(std::clamp(source[i + 0] * (1.f - amount) + (*frozenFrame)[i + 0] * amount, 0.f, 255.f));
-		out[i + 1] = static_cast<unsigned char>(std::clamp(source[i + 1] * (1.f - amount) + (*frozenFrame)[i + 1] * amount, 0.f, 255.f));
-		out[i + 2] = static_cast<unsigned char>(std::clamp(source[i + 2] * (1.f - amount) + (*frozenFrame)[i + 2] * amount, 0.f, 255.f));
-		out[i + 3] = 255;
-	}
+	beginOutput(out, byteCount);
+	auto mix = [&](auto frozen) {
+		withSource(source, [&](auto src) {
+			withDest<StoreRule::Truncate>(out, [&](auto dst) {
+				for (size_t i = 0; i < byteCount; i += 4u) {
+					dst.put(i + 0, src[i + 0] * (1.f - amount) + frozen[i + 0] * amount);
+					dst.put(i + 1, src[i + 1] * (1.f - amount) + frozen[i + 1] * amount);
+					dst.put(i + 2, src[i + 2] * (1.f - amount) + frozen[i + 2] * amount);
+					dst.put(i + 3, 255.f);
+				}
+			});
+		});
+	};
+	if (frozenIsFloat) mix(FloatSource{frozenFrameF->data()});
+	else mix(ByteSource{frozenFrame->data()});
 }
 
 bool VideoGraphRenderer::renderScopeTraceFrame(int busId, int width, int height, int scopeTraceSlotId, const ScopeTraceParams& params, Frame& out) {
@@ -406,9 +798,10 @@ bool VideoGraphRenderer::renderScopeTraceFrame(int busId, int width, int height,
 	if (!bs.energy.matches(width, height)) {
 		bs.energy.resize(width, height);
 		bs.display.clear();
+		bs.display.f.clear();
 		bs.hasBeam = false;
 	}
-	if (bs.pass == passId && !bs.display.empty()) {
+	if (bs.pass == passId && bs.display.hasPixels()) {
 		out = bs.display;
 		return true;
 	}
@@ -436,9 +829,8 @@ bool VideoGraphRenderer::renderScopeTraceFrame(int busId, int width, int height,
 	}
 
 	// Compose: tone-mapped phosphor plus glow, then the graticule on top (not persistent).
-	prepare(out, width, height);
 	glow.compute(bs.energy, std::clamp(params.bloom, 0.f, 2.f));
-	crt::toneMap(bs.energy, glow.data(), kScopeToneK, out.data());
+	toneMapOutput(bs.energy, kScopeToneK, out, width, height);
 
 	const int gridLines = 4;
 	for (int line = 1; line < gridLines; ++line) {
@@ -723,9 +1115,10 @@ void VideoGraphRenderer::renderDeflectionYokeFrame(int busId, Frame& source, Fra
 	if (!bs.energy.matches(width, height)) {
 		bs.energy.resize(width, height);
 		bs.display.clear();
+		bs.display.f.clear();
 		bs.hasBeam = false;
 	}
-	if (bs.pass == passId && !bs.display.empty()) {
+	if (bs.pass == passId && bs.display.hasPixels()) {
 		out = bs.display;
 		return;
 	}
@@ -819,7 +1212,35 @@ void VideoGraphRenderer::renderDeflectionYokeFrame(int busId, Frame& source, Fra
 	// Colour of each scanline and cell: the average of the source rows its band covers, with the
 	// flips applied. A raster with more lines than rows samples one row per line.
 	wobbleColour.resize(static_cast<size_t>(N) * static_cast<size_t>(W) * 3u);  // every entry is written below
-	{
+	if (source.isFloat()) {
+		// Full precision: the same average over a float picture, summed in float (the level is not cut to a byte).
+		std::vector<float> sums(static_cast<size_t>(W) * 3u);
+		for (int k = 0; k < N; ++k) {
+			const int band = params.flipV ? N - 1 - k : k;
+			const int y0 = std::min(height - 1, band * height / N);
+			const int y1 = std::max(y0 + 1, std::min(height, (band + 1) * height / N));
+			std::fill(sums.begin(), sums.end(), 0.f);
+			for (int y = y0; y < y1; ++y) {
+				const float* row = &source.f[static_cast<size_t>(y) * static_cast<size_t>(W) * 4u];
+				for (int x = 0; x < W; ++x) {
+					float* s = &sums[static_cast<size_t>(x) * 3u];
+					s[0] += row[x * 4 + 0];
+					s[1] += row[x * 4 + 1];
+					s[2] += row[x * 4 + 2];
+				}
+			}
+			const float inv = 1.f / (255.f * static_cast<float>(y1 - y0));
+			float* dst = wobbleColour.data() + static_cast<size_t>(k) * static_cast<size_t>(W) * 3u;
+			for (int x = 0; x < W; ++x) {
+				const int sx = params.flipH ? W - 1 - x : x;
+				const float* s = &sums[static_cast<size_t>(sx) * 3u];
+				dst[x * 3 + 0] = s[0] * inv;
+				dst[x * 3 + 1] = s[1] * inv;
+				dst[x * 3 + 2] = s[2] * inv;
+			}
+		}
+	}
+	else {
 		std::vector<unsigned int> sums(static_cast<size_t>(W) * 3u);
 		for (int k = 0; k < N; ++k) {
 			const int band = params.flipV ? N - 1 - k : k;
@@ -1081,8 +1502,7 @@ void VideoGraphRenderer::renderDeflectionYokeFrame(int busId, Frame& source, Fra
 	// Glow and tone map: energy plus glow, through 1 - exp(-k E).
 	bs.hasBeam = true;
 	glow.compute(energy, std::clamp(finiteOr(params.glow, 0.f), 0.f, 2.f));
-	prepare(out, width, height);
-	crt::toneMap(energy, glow.data(), kWobbleToneK, out.data());
+	toneMapOutput(energy, kWobbleToneK, out, width, height);
 	bs.display = out;
 }
 
@@ -1104,7 +1524,7 @@ constexpr float kScanProcessorPhosphorB = 0.72f;
 
 }  // namespace
 
-void VideoGraphRenderer::renderScanProcessorFrame(int busId, Frame& source, Frame& out, int width, int height, const ScanProcessorParams& params) {
+void VideoGraphRenderer::renderScanProcessorFrame(int busId, Frame& source, Frame* liftSource, Frame& out, int width, int height, const ScanProcessorParams& params) {
 	// Model (see docs/architecture.md, "Scan Processor"). Each scanline is one continuous beam stroke across the
 	// source. For a point at ramp r along line k (line ramp L = (k + 0.5) / N):
 	//   x = hPos + hWidth (r + DEFLECT X)
@@ -1118,9 +1538,10 @@ void VideoGraphRenderer::renderScanProcessorFrame(int busId, Frame& source, Fram
 	if (!bs.energy.matches(width, height)) {
 		bs.energy.resize(width, height);
 		bs.display.clear();
+		bs.display.f.clear();
 		bs.hasBeam = false;
 	}
-	if (bs.pass == passId && !bs.display.empty()) {
+	if (bs.pass == passId && bs.display.hasPixels()) {
 		out = bs.display;
 		return;
 	}
@@ -1152,53 +1573,65 @@ void VideoGraphRenderer::renderScanProcessorFrame(int busId, Frame& source, Fram
 	scanProcessorBounds.resize(static_cast<size_t>(lines));
 	const float lineSec = static_cast<float>(crt::lineSeconds());
 	const float bandH = static_cast<float>(height) / static_cast<float>(lines);
-	const unsigned char* pixels = source.data();
+	// LIFT IN picture, or null: then the main picture supplies the lift as well as the brightness and colour.
+	// Either picture may be bytes or floats (0..255 units); the pixel readers below follow its format.
+	const VideoFrame& pixels = source;
+	const VideoFrame* liftPixels = (liftSource && liftSource->count() == source.count()) ? liftSource : nullptr;
 
 	// Phase 1: points for each line. Each thread keeps its own row buffer.
 	parallelRanges(lines, threads, [&](int kBegin, int kEnd) {
 		std::vector<float> row(static_cast<size_t>(width) * 4u);  // R, G, B, luma per source column
-		for (int k = kBegin; k < kEnd; ++k) {
-			// Source row for this line: an area average over its band, or bilinear when lines outnumber rows.
-			if (bandH >= 1.f) {
-				const int y0 = std::min(height - 1, static_cast<int>(std::floor(static_cast<float>(k) * bandH)));
-				const int y1 = std::clamp(static_cast<int>(std::floor(static_cast<float>(k + 1) * bandH)), y0 + 1, height);
-				std::fill(row.begin(), row.end(), 0.f);
-				for (int y = y0; y < y1; ++y) {
-					const unsigned char* line = pixels + static_cast<size_t>(y) * static_cast<size_t>(width) * 4u;
-					for (int x = 0; x < width; ++x) {
-						float* d = &row[static_cast<size_t>(x) * 4u];
-						d[0] += line[x * 4 + 0];
-						d[1] += line[x * 4 + 1];
-						d[2] += line[x * 4 + 2];
-					}
-				}
-				const float inv = 1.f / (255.f * static_cast<float>(y1 - y0));
+		std::vector<float> liftRow(liftPixels ? static_cast<size_t>(width) * 4u : 0u);  // the LIFT IN picture, when patched
+		// Fills one row buffer (R, G, B, luma) for line k from a picture.
+		const auto fillRow = [&](const VideoFrame& frame, std::vector<float>& row, int k) {
+		withSource(frame, [&](auto px) {
+		// Source row for this line: an area average over its band, or bilinear when lines outnumber rows.
+		if (bandH >= 1.f) {
+			const int y0 = std::min(height - 1, static_cast<int>(std::floor(static_cast<float>(k) * bandH)));
+			const int y1 = std::clamp(static_cast<int>(std::floor(static_cast<float>(k + 1) * bandH)), y0 + 1, height);
+			std::fill(row.begin(), row.end(), 0.f);
+			for (int y = y0; y < y1; ++y) {
+				const size_t line = static_cast<size_t>(y) * static_cast<size_t>(width) * 4u;
 				for (int x = 0; x < width; ++x) {
 					float* d = &row[static_cast<size_t>(x) * 4u];
-					d[0] *= inv;
-					d[1] *= inv;
-					d[2] *= inv;
+					d[0] += px[line + static_cast<size_t>(x) * 4u + 0u];
+					d[1] += px[line + static_cast<size_t>(x) * 4u + 1u];
+					d[2] += px[line + static_cast<size_t>(x) * 4u + 2u];
 				}
 			}
-			else {
-				const float fy = std::clamp((static_cast<float>(k) + 0.5f) * bandH - 0.5f, 0.f, static_cast<float>(height - 1));
-				const int ya = static_cast<int>(fy);
-				const int yb = std::min(ya + 1, height - 1);
-				const float fr = fy - static_cast<float>(ya);
-				const unsigned char* la = pixels + static_cast<size_t>(ya) * static_cast<size_t>(width) * 4u;
-				const unsigned char* lb = pixels + static_cast<size_t>(yb) * static_cast<size_t>(width) * 4u;
-				for (int x = 0; x < width; ++x) {
-					float* d = &row[static_cast<size_t>(x) * 4u];
-					for (int c = 0; c < 3; ++c) {
-						d[c] = ((la[x * 4 + c] * (1.f - fr) + lb[x * 4 + c] * fr)) / 255.f;
-					}
-				}
-			}
+			const float inv = 1.f / (255.f * static_cast<float>(y1 - y0));
 			for (int x = 0; x < width; ++x) {
 				float* d = &row[static_cast<size_t>(x) * 4u];
-				d[3] = 0.2126f * d[0] + 0.7152f * d[1] + 0.0722f * d[2];
+				d[0] *= inv;
+				d[1] *= inv;
+				d[2] *= inv;
 			}
-
+		}
+		else {
+			const float fy = std::clamp((static_cast<float>(k) + 0.5f) * bandH - 0.5f, 0.f, static_cast<float>(height - 1));
+			const int ya = static_cast<int>(fy);
+			const int yb = std::min(ya + 1, height - 1);
+			const float fr = fy - static_cast<float>(ya);
+			const size_t la = static_cast<size_t>(ya) * static_cast<size_t>(width) * 4u;
+			const size_t lb = static_cast<size_t>(yb) * static_cast<size_t>(width) * 4u;
+			for (int x = 0; x < width; ++x) {
+				float* d = &row[static_cast<size_t>(x) * 4u];
+				for (int c = 0; c < 3; ++c) {
+					d[c] = ((px[la + static_cast<size_t>(x) * 4u + static_cast<size_t>(c)] * (1.f - fr) + px[lb + static_cast<size_t>(x) * 4u + static_cast<size_t>(c)] * fr)) / 255.f;
+				}
+			}
+		}
+		for (int x = 0; x < width; ++x) {
+			float* d = &row[static_cast<size_t>(x) * 4u];
+			d[3] = 0.2126f * d[0] + 0.7152f * d[1] + 0.0722f * d[2];
+		}
+		});
+		};
+		for (int k = kBegin; k < kEnd; ++k) {
+			fillRow(pixels, row, k);
+			if (liftPixels) {
+				fillRow(*liftPixels, liftRow, k);
+			}
 			const float L = (static_cast<float>(k) + 0.5f) / static_cast<float>(lines);
 			ScanProcessorPoint* pts = &scanProcessorPoints[static_cast<size_t>(k) * static_cast<size_t>(P)];
 			float lo = std::numeric_limits<float>::max();
@@ -1216,6 +1649,13 @@ void VideoGraphRenderer::renderScanProcessorFrame(int busId, Frame& source, Fram
 				for (int c = 0; c < 4; ++c) {
 					v[c] = a[c] + (b[c] - a[c]) * fr;
 				}
+				// The lift comes from the LIFT IN picture when there is one; brightness and colour stay with v.
+				float lift = v[3];
+				if (liftPixels) {
+					const float* la = &liftRow[static_cast<size_t>(i0) * 4u];
+					const float* lb = &liftRow[static_cast<size_t>(i1) * 4u];
+					lift = la[3] + (lb[3] - la[3]) * fr;
+				}
 
 				float dx = 0.f;
 				float dy = 0.f;
@@ -1230,7 +1670,7 @@ void VideoGraphRenderer::renderScanProcessorFrame(int busId, Frame& source, Fram
 				}
 
 				const float xn = hPos + hWidth * (r + dx);
-				const float yn = vPos + vHeight * (L + dy) - lumaGain * v[3];
+				const float yn = vPos + vHeight * (L + dy) - lumaGain * lift;
 				ScanProcessorPoint& p = pts[s];
 				p.x = xn * fsw;
 				p.y = yn * fsh;
@@ -1306,8 +1746,7 @@ void VideoGraphRenderer::renderScanProcessorFrame(int busId, Frame& source, Fram
 
 	bs.hasBeam = true;
 	glow.compute(bs.energy, std::clamp(params.glow, 0.f, 2.f));
-	prepare(out, width, height);
-	crt::toneMap(bs.energy, glow.data(), kScanProcessorToneK, out.data());
+	toneMapOutput(bs.energy, kScanProcessorToneK, out, width, height);
 	bs.display = out;
 }
 
@@ -1318,12 +1757,34 @@ void VideoGraphRenderer::renderLineFieldFrame(Frame& source, Frame& out, int wid
 		out.swap(source);
 		return;
 	}
-	prepare(out, width, height);
-
-	std::fill(out.begin(), out.end(), 0);
-	for (size_t i = 3; i < out.size(); i += 4u) {
-		out[i] = 255;
+	// Full precision: a float source is read as floats and the lines are drawn into a float picture (the line colours
+	// are not cut to bytes, and the blends are not rounded). A byte source with the setting on is read the same way.
+	const bool useFloat = passFloat || source.isFloat();
+	if (useFloat) {
+		source.ensureF32();
+		out.beginF32(byteCount);
+		std::fill(out.f.begin(), out.f.end(), 0.f);
+		for (size_t i = 3; i < out.f.size(); i += 4u) {
+			out.f[i] = 255.f;
+		}
 	}
+	else {
+		prepare(out, width, height);
+
+		std::fill(out.begin(), out.end(), 0);
+		for (size_t i = 3; i < out.size(); i += 4u) {
+			out[i] = 255;
+		}
+	}
+	const float* sf = useFloat ? source.f.data() : nullptr;
+	// The same luma as lumaAt (clamped, Rec. 709), from either plane.
+	auto lumaOf = [&](int x, int y) -> float {
+		if (!sf) return lumaAt(source, width, height, x, y);
+		if (x < 0 || y < 0 || x >= width || y >= height) return 0.f;
+		const size_t index = (static_cast<size_t>(y) * static_cast<size_t>(width) + static_cast<size_t>(x)) * 4u;
+		return clamp01(sf[index + 0] / 255.f * 0.2126f + sf[index + 1] / 255.f * 0.7152f + sf[index + 2] / 255.f * 0.0722f);
+	};
+	auto sv = [&](size_t i) -> float { return sf ? sf[i] : static_cast<float>(source[i]); };
 
 	const float depth = clamp01(params.depth) * 1.25f;
 	const float xTilt = std::clamp(params.xTilt, -1.f, 1.f) * 0.95f;
@@ -1350,13 +1811,13 @@ void VideoGraphRenderer::renderLineFieldFrame(Frame& source, Frame& out, int wid
 		bool hasPrevious = false;
 		float previousX = 0.f;
 		float previousY = 0.f;
-		unsigned char previousR = 0;
-		unsigned char previousG = 0;
-		unsigned char previousB = 0;
+		float previousR = 0.f;
+		float previousG = 0.f;
+		float previousB = 0.f;
 
 		for (int srcX = 0; srcX < width; srcX += sampleStep) {
 			const size_t srcIndex = (static_cast<size_t>(srcY) * static_cast<size_t>(width) + static_cast<size_t>(srcX)) * 4u;
-			float luma = lumaAt(source, width, height, srcX, srcY);
+			float luma = lumaOf(srcX, srcY);
 			if (params.invert) {
 				luma = 1.f - luma;
 			}
@@ -1377,9 +1838,14 @@ void VideoGraphRenderer::renderLineFieldFrame(Frame& source, Frame& out, int wid
 			const float screenY = (y3 * imageScale * persp * 0.5f + 0.5f) * static_cast<float>(height - 1);
 
 			const float shade = clamp01((0.25f + luma * 0.95f) * gain);
-			const unsigned char r = static_cast<unsigned char>(std::clamp((source[srcIndex + 0] * 0.40f + 255.f * 0.60f) * shade, 0.f, 255.f));
-			const unsigned char g = static_cast<unsigned char>(std::clamp((source[srcIndex + 1] * 0.40f + 255.f * 0.60f) * shade, 0.f, 255.f));
-			const unsigned char b = static_cast<unsigned char>(std::clamp((source[srcIndex + 2] * 0.40f + 255.f * 0.60f) * shade, 0.f, 255.f));
+			// A byte picture's line colour is cut to a byte as it always was; a float picture's is not.
+			auto lineColour = [&](size_t i) {
+				const float v = std::clamp((sv(i) * 0.40f + 255.f * 0.60f) * shade, 0.f, 255.f);
+				return sf ? v : static_cast<float>(static_cast<unsigned char>(v));
+			};
+			const float r = lineColour(srcIndex + 0);
+			const float g = lineColour(srcIndex + 1);
+			const float b = lineColour(srcIndex + 2);
 
 			if (hasPrevious) {
 				drawLine(out, width, height, previousX, previousY, screenX, screenY, previousR, previousG, previousB, 1.f, thickness);
@@ -1393,7 +1859,15 @@ void VideoGraphRenderer::renderLineFieldFrame(Frame& source, Frame& out, int wid
 		}
 	}
 
-	if (mix < 0.999f) {
+	if (mix < 0.999f && sf) {
+		for (size_t i = 0; i < byteCount; i += 4u) {
+			for (size_t ch = 0; ch < 3u; ++ch) {
+				out.f[i + ch] = std::clamp(sf[i + ch] * (1.f - mix) + out.f[i + ch] * mix, 0.f, 255.f);
+			}
+			out.f[i + 3] = 255.f;
+		}
+	}
+	else if (mix < 0.999f) {
 		for (size_t i = 0; i < byteCount; i += 4u) {
 			out[i + 0] = static_cast<unsigned char>(std::clamp(source[i + 0] * (1.f - mix) + out[i + 0] * mix, 0.f, 255.f));
 			out[i + 1] = static_cast<unsigned char>(std::clamp(source[i + 1] * (1.f - mix) + out[i + 1] * mix, 0.f, 255.f));
@@ -1403,7 +1877,7 @@ void VideoGraphRenderer::renderLineFieldFrame(Frame& source, Frame& out, int wid
 	}
 }
 
-void VideoGraphRenderer::drawLine(Frame& dst, int width, int height, float x0, float y0, float x1, float y1, unsigned char r, unsigned char g, unsigned char b, float alpha, int thickness) {
+void VideoGraphRenderer::drawLine(Frame& dst, int width, int height, float x0, float y0, float x1, float y1, float r, float g, float b, float alpha, int thickness) {
 	const float dx = x1 - x0;
 	const float dy = y1 - y0;
 	const int steps = std::max(1, static_cast<int>(std::ceil(std::max(std::abs(dx), std::abs(dy)))));
@@ -1420,12 +1894,20 @@ void VideoGraphRenderer::drawLine(Frame& dst, int width, int height, float x0, f
 	}
 }
 
-void VideoGraphRenderer::plotLinePixel(Frame& dst, int width, int height, int x, int y, unsigned char r, unsigned char g, unsigned char b, float alpha) {
+void VideoGraphRenderer::plotLinePixel(Frame& dst, int width, int height, int x, int y, float r, float g, float b, float alpha) {
 	if (x < 0 || y < 0 || x >= width || y >= height || alpha <= 0.f) {
 		return;
 	}
 	const float a = clamp01(alpha);
 	const size_t index = (static_cast<size_t>(y) * static_cast<size_t>(width) + static_cast<size_t>(x)) * 4u;
+	if (dst.isFloat()) {
+		// A float picture takes the blend unrounded.
+		dst.f[index + 0] = std::clamp(dst.f[index + 0] * (1.f - a) + r * a, 0.f, 255.f);
+		dst.f[index + 1] = std::clamp(dst.f[index + 1] * (1.f - a) + g * a, 0.f, 255.f);
+		dst.f[index + 2] = std::clamp(dst.f[index + 2] * (1.f - a) + b * a, 0.f, 255.f);
+		dst.f[index + 3] = 255.f;
+		return;
+	}
 	dst[index + 0] = static_cast<unsigned char>(std::clamp(dst[index + 0] * (1.f - a) + r * a, 0.f, 255.f));
 	dst[index + 1] = static_cast<unsigned char>(std::clamp(dst[index + 1] * (1.f - a) + g * a, 0.f, 255.f));
 	dst[index + 2] = static_cast<unsigned char>(std::clamp(dst[index + 2] * (1.f - a) + b * a, 0.f, 255.f));
@@ -1440,7 +1922,7 @@ float VideoGraphRenderer::fract(float value) {
 	return value - std::floor(value);
 }
 
-float VideoGraphRenderer::lumaAt(const Frame& frame, int width, int height, int x, int y) {
+float VideoGraphRenderer::lumaAt(const std::vector<unsigned char>& frame, int width, int height, int x, int y) {
 	if (frame.empty() || x < 0 || y < 0 || x >= width || y >= height) {
 		return 0.f;
 	}
@@ -1452,6 +1934,15 @@ float VideoGraphRenderer::lumaAt(const Frame& frame, int width, int height, int 
 }
 
 void VideoGraphRenderer::hsvToRgb(float h, float s, float v, unsigned char& r, unsigned char& g, unsigned char& b) {
+	float rf = 0.f, gf = 0.f, bf = 0.f;
+	hsvToRgb255(h, s, v, rf, gf, bf);
+	r = static_cast<unsigned char>(rf);
+	g = static_cast<unsigned char>(gf);
+	b = static_cast<unsigned char>(bf);
+}
+
+// The colour in 0..255 units, clamped, not yet a byte. hsvToRgb() truncates this, as it always did.
+void VideoGraphRenderer::hsvToRgb255(float h, float s, float v, float& r, float& g, float& b) {
 	h = fract(h);
 	s = clamp01(s);
 	v = clamp01(v);
@@ -1486,9 +1977,9 @@ void VideoGraphRenderer::hsvToRgb(float h, float s, float v, unsigned char& r, u
 		bf = x;
 	}
 	const float m = v - c;
-	r = static_cast<unsigned char>(std::clamp((rf + m) * 255.f, 0.f, 255.f));
-	g = static_cast<unsigned char>(std::clamp((gf + m) * 255.f, 0.f, 255.f));
-	b = static_cast<unsigned char>(std::clamp((bf + m) * 255.f, 0.f, 255.f));
+	r = std::clamp((rf + m) * 255.f, 0.f, 255.f);
+	g = std::clamp((gf + m) * 255.f, 0.f, 255.f);
+	b = std::clamp((bf + m) * 255.f, 0.f, 255.f);
 }
 
 void VideoGraphRenderer::rgbToHsv(float r, float g, float b, float& h, float& s, float& v) {
@@ -1507,7 +1998,7 @@ void VideoGraphRenderer::rgbToHsv(float r, float g, float b, float& h, float& s,
 // Bilinear lookup of all four RGBA channels at once. Positions are in source pixels; the four
 // neighbours are read once and blended, so a DeflectionYoke pixel costs one lookup, not three.
 // Positions outside the frame return black.
-void VideoGraphRenderer::sampleBilinear(const Frame& frame, int width, int height, float x, float y, unsigned char* out) {
+void VideoGraphRenderer::sampleBilinear(const std::vector<unsigned char>& frame, int width, int height, float x, float y, unsigned char* out) {
 	if (frame.empty() || x < 0.f || y < 0.f || x > static_cast<float>(width - 1) || y > static_cast<float>(height - 1)) {
 		out[0] = out[1] = out[2] = out[3] = 0;
 		return;
@@ -1537,19 +2028,56 @@ void VideoGraphRenderer::sampleBilinear(const Frame& frame, int width, int heigh
 	}
 }
 
-void VideoGraphRenderer::renderColorizerFrame(Frame& source, Frame& out, int width, int height, const ColorizerParams& params) {
-	prepare(out, width, height);
+// sampleBilinear on a float picture: the same four neighbours and weights, but the result is not rounded or clamped
+// to a byte. Outside the frame it returns black.
+void VideoGraphRenderer::sampleBilinearF(const std::vector<float>& frame, int width, int height, float x, float y, float* out) {
+	if (frame.empty() || x < 0.f || y < 0.f || x > static_cast<float>(width - 1) || y > static_cast<float>(height - 1)) {
+		out[0] = out[1] = out[2] = out[3] = 0.f;
+		return;
+	}
+	const int x0 = std::clamp(static_cast<int>(std::floor(x)), 0, width - 1);
+	const int y0 = std::clamp(static_cast<int>(std::floor(y)), 0, height - 1);
+	const int x1 = std::clamp(x0 + 1, 0, width - 1);
+	const int y1 = std::clamp(y0 + 1, 0, height - 1);
+	const float tx = x - static_cast<float>(x0);
+	const float ty = y - static_cast<float>(y0);
+	const float w00 = (1.f - tx) * (1.f - ty);
+	const float w10 = tx * (1.f - ty);
+	const float w01 = (1.f - tx) * ty;
+	const float w11 = tx * ty;
+	const size_t row0 = static_cast<size_t>(y0) * static_cast<size_t>(width);
+	const size_t row1 = static_cast<size_t>(y1) * static_cast<size_t>(width);
+	const size_t i00 = (row0 + static_cast<size_t>(x0)) * 4u;
+	const size_t i10 = (row0 + static_cast<size_t>(x1)) * 4u;
+	const size_t i01 = (row1 + static_cast<size_t>(x0)) * 4u;
+	const size_t i11 = (row1 + static_cast<size_t>(x1)) * 4u;
+	for (size_t c = 0; c < 4u; ++c) {
+		out[c] = frame[i00 + c] * w00 + frame[i10 + c] * w10 + frame[i01 + c] * w01 + frame[i11 + c] * w11;
+	}
+}
+
+// The Colorizer's gradient, one colour for each of the 256 luma values. The Video Mixer's GRADIENT colouring calls
+// this too, so the two cannot drift apart. Each stop has a hue, a level and its own saturation; the Colorizer gives
+// every stop the same saturation, so its table is what it always was.
+void VideoGraphRenderer::gradientTable(const float hueIn[4], const float levelIn[4], const float satIn[4], int bandsIn, float offsetIn, GradientTable& table) {
+	GradientTableF exact;
+	gradientTableF(hueIn, levelIn, satIn, bandsIn, offsetIn, exact);
+	for (int n = 0; n < 256; ++n) {
+		for (int c = 0; c < 3; ++c) table[n][c] = static_cast<unsigned char>(exact[n][c]);
+	}
+}
+
+void VideoGraphRenderer::gradientTableF(const float hueIn[4], const float levelIn[4], const float satIn[4], int bandsIn, float offsetIn, GradientTableF& table) {
 	// Hue interpolation and HSV conversion happen once per luma value, not per pixel.
-	std::array<std::array<unsigned char, 3>, 256> table;
-	float hue[4], level[4], delta[3];
+	float hue[4], level[4], sat[4], delta[3];
 	for (int i = 0; i < 4; ++i) {
-		hue[i] = fract(params.hue[i]);
-		level[i] = clamp01(params.level[i]);
+		hue[i] = fract(hueIn[i]);
+		level[i] = clamp01(levelIn[i]);
+		sat[i] = clamp01(satIn[i]);
 	}
 	for (int i = 0; i < 3; ++i) delta[i] = fract(hue[i + 1] - hue[i] + 0.5f) - 0.5f;
-	const float saturation = clamp01(params.saturation);
-	const int bands = std::clamp(params.bands, 0, 8);
-	const float offset = fract(params.offset);
+	const int bands = std::clamp(bandsIn, 0, 8);
+	const float offset = fract(offsetIn);
 	for (int n = 0; n < 256; ++n) {
 		// Luma runs from 0 to 1 inclusive. Only what the offset pushes past 1 wraps back to the bottom;
 		// fract() would also send an exact 1 (grey 255 at offset 0) to 0, so white took black's colour.
@@ -1559,44 +2087,141 @@ void VideoGraphRenderer::renderColorizerFrame(Frame& source, Frame& out, int wid
 		if (bands >= 2) l = (std::min(std::floor(l * bands), static_cast<float>(bands - 1)) + 0.5f) / bands;
 		const int i = std::min(2, static_cast<int>(l * 3.f));
 		const float t = l * 3.f - i;
-		hsvToRgb(fract(hue[i] + delta[i] * t), saturation, level[i] + (level[i + 1] - level[i]) * t,
+		hsvToRgb255(fract(hue[i] + delta[i] * t), sat[i] + (sat[i + 1] - sat[i]) * t, level[i] + (level[i + 1] - level[i]) * t,
 			table[n][0], table[n][1], table[n][2]);
 	}
+}
+
+void VideoGraphRenderer::renderColorizerFrame(Frame& source, Frame& out, int width, int height, const ColorizerParams& params) {
+	const size_t byteCount = static_cast<size_t>(width) * static_cast<size_t>(height) * 4u;
+	beginOutput(out, byteCount);
+	GradientTableF table;
+	const float saturation = clamp01(params.saturation);
+	const float sat[4] = {saturation, saturation, saturation, saturation};
+	gradientTableF(params.hue, params.level, sat, params.bands, params.offset, table);
+	// A float picture is coloured by the gradient at the exact luma (the two nearest entries blended) so the output
+	// has no steps; with BANDS the gradient is steps by design and stays a lookup of the nearest entry.
+	const bool smooth = params.bands < 2;
 	const int threads = height >= 480 ? 4 : 1;
-	parallelRanges(height, threads, [&](int begin, int end) {
-		for (int y = begin; y < end; ++y) {
-			for (int x = 0; x < width; ++x) {
-				const size_t i = (static_cast<size_t>(y) * width + x) * 4u;
-				const int luma = std::clamp(static_cast<int>(std::lround(source[i] * 0.2126f + source[i + 1] * 0.7152f + source[i + 2] * 0.0722f)), 0, 255);
-				out[i] = table[luma][0];
-				out[i + 1] = table[luma][1];
-				out[i + 2] = table[luma][2];
-				out[i + 3] = source[i + 3];
-			}
-		}
+	withSource(source, [&](auto src) {
+		withDest<StoreRule::Truncate>(out, [&](auto dst) {
+			constexpr bool toFloat = std::is_same<decltype(dst), FloatDest>::value;
+			parallelRanges(height, threads, [&](int begin, int end) {
+				for (int y = begin; y < end; ++y) {
+					for (int x = 0; x < width; ++x) {
+						const size_t i = (static_cast<size_t>(y) * width + x) * 4u;
+						const float lumaValue = src[i] * 0.2126f + src[i + 1] * 0.7152f + src[i + 2] * 0.0722f;
+						if (toFloat && smooth) {
+							const float l = std::clamp(lumaValue, 0.f, 255.f);
+							const int lo = std::min(static_cast<int>(l), 255);
+							const int hi = std::min(lo + 1, 255);
+							const float t = l - static_cast<float>(lo);
+							dst.put(i, table[lo][0] + (table[hi][0] - table[lo][0]) * t);
+							dst.put(i + 1, table[lo][1] + (table[hi][1] - table[lo][1]) * t);
+							dst.put(i + 2, table[lo][2] + (table[hi][2] - table[lo][2]) * t);
+						}
+						else {
+							const int luma = std::clamp(static_cast<int>(std::lround(lumaValue)), 0, 255);
+							dst.put(i, table[luma][0]);
+							dst.put(i + 1, table[luma][1]);
+							dst.put(i + 2, table[luma][2]);
+						}
+						dst.put(i + 3, src[i + 3]);
+					}
+				}
+			});
+		});
 	});
 }
 
+// With the fade option on, a stored level below this (in 0..255 units, so 1/1024 of one grey level) is stored as 0.
+// It is a thousand times finer than the 8-bit step, so no picture can show it (the 8-bit output rounds anything
+// under half a level to 0), and about thirty orders of magnitude above the smallest normal float, so a decaying
+// trail ends at exact zero long before it could become a denormal.
+constexpr float kFeedbackFadeSnapLevel = 1.f / 1024.f;
+
+// Reads Feedback's newest stored picture into feedbackPrev, in the plane the pass needs. Full precision stores
+// float-only entries (no byte plane); a byte pass that meets one rounds it half up, and a float pass that meets a byte
+// entry widens it. With the setting off no entry is ever float-only, so the byte pass is unchanged.
+bool VideoGraphRenderer::readFeedbackHistory(int slotId) {
+	if (!frameRingRead(slotId, 0, feedbackPrev)) return false;
+	if (passFloat) {
+		if (feedbackPrev.rgbaF.empty()) feedbackPrev.rgbaF.assign(feedbackPrev.rgba.begin(), feedbackPrev.rgba.end());
+	}
+	else if (feedbackPrev.rgba.empty() && !feedbackPrev.rgbaF.empty()) {
+		feedbackPrev.rgba.resize(feedbackPrev.rgbaF.size());
+		floatToBytes(feedbackPrev.rgbaF.data(), feedbackPrev.rgba.data(), feedbackPrev.rgbaF.size());
+	}
+	return true;
+}
+
+// The stored picture as this node's output (another renderer already stored this tick's picture).
+void VideoGraphRenderer::feedbackHistoryAsOutput(Frame& out, int width, int height) {
+	if (passFloat) {
+		out.beginF32(static_cast<size_t>(width) * static_cast<size_t>(height) * 4u);
+		if (feedbackPrev.width == width && feedbackPrev.height == height) out.f = feedbackPrev.rgbaF;
+		else resampleIntoF(feedbackPrev.rgbaF, feedbackPrev.width, feedbackPrev.height, out.f, width, height);
+		return;
+	}
+	if (feedbackPrev.width == width && feedbackPrev.height == height) static_cast<std::vector<unsigned char>&>(out) = feedbackPrev.rgba;
+	else resampleInto(feedbackPrev.rgba, feedbackPrev.width, feedbackPrev.height, out, width, height);
+}
+
+// Feedback. With the plugin setting "Full precision between modules" on, the node reads a float source, mixes in
+// float, writes a float picture and keeps a float-only history (as if "Fade trails fully to black" were on, but with
+// no byte plane); that setting overrides the module option for the pass. With the plugin setting off, the module
+// option means what it always did.
 void VideoGraphRenderer::renderFeedbackFrame(Frame& src, Frame& out, int width, int height, const FeedbackParams& p) {
 	frameRingClear(p.ringSlotId, p.clearCounter);
+	if (passFloat) src.ensureF32();
 	if (frameRingIsStored(p.ringSlotId, p.frameCounter)) {
-		if (!frameRingRead(p.ringSlotId, 0, feedbackPrev)) {
+		if (!readFeedbackHistory(p.ringSlotId)) {
 			out.swap(src);
 			return;
 		}
-		if (feedbackPrev.width == width && feedbackPrev.height == height) out = feedbackPrev.rgba;
-		else resampleInto(feedbackPrev.rgba, feedbackPrev.width, feedbackPrev.height, out, width, height);
+		feedbackHistoryAsOutput(out, width, height);
 		return;
 	}
-	if (!frameRingRead(p.ringSlotId, 0, feedbackPrev)) {
+	const bool fade = p.fadeToBlack != 0 || passFloat;
+	if (!fade) {
+		// The float planes belong to the fade option; give their memory back when it is off.
+		if (!feedbackPrevF.empty()) std::vector<float>().swap(feedbackPrevF);
+		if (!feedbackResampledF.empty()) std::vector<float>().swap(feedbackResampledF);
+		if (!feedbackOutF.empty()) std::vector<float>().swap(feedbackOutF);
+		if (!feedbackPrev.rgbaF.empty()) std::vector<float>().swap(feedbackPrev.rgbaF);
+	}
+	if (!readFeedbackHistory(p.ringSlotId)) {
 		out.swap(src);
-		frameRingPush(p.ringSlotId, p.frameCounter, out, width, height);
+		if (passFloat) {
+			frameRingPushFloatOnly(p.ringSlotId, p.frameCounter, out.f, width, height);
+		}
+		else if (fade) {
+			feedbackOutF.assign(out.begin(), out.end());
+			frameRingPushFloat(p.ringSlotId, p.frameCounter, out, feedbackOutF, width, height);
+		}
+		else frameRingPush(p.ringSlotId, p.frameCounter, out, width, height);
 		return;
 	}
-	const Frame* prev = &feedbackPrev.rgba;
-	if (feedbackPrev.width != width || feedbackPrev.height != height) {
-		resampleInto(feedbackPrev.rgba, feedbackPrev.width, feedbackPrev.height, feedbackResampled, width, height);
-		prev = &feedbackResampled;
+	const std::vector<unsigned char>* prev = nullptr;
+	const std::vector<float>* prevF = nullptr;
+	const bool sameSize = feedbackPrev.width == width && feedbackPrev.height == height;
+	if (fade) {
+		// The history is the float plane. A frame stored without one (the option was just switched on, or another
+		// writer stored it) is read as its 8-bit picture.
+		if (!passFloat && feedbackPrev.rgbaF.size() != feedbackPrev.rgba.size()) feedbackPrev.rgbaF.assign(feedbackPrev.rgba.begin(), feedbackPrev.rgba.end());
+		prevF = &feedbackPrev.rgbaF;
+		if (!sameSize) {
+			resampleIntoF(feedbackPrev.rgbaF, feedbackPrev.width, feedbackPrev.height, feedbackResampledF, width, height);
+			prevF = &feedbackResampledF;
+		}
+		if (!passFloat) feedbackOutF.resize(static_cast<size_t>(width) * static_cast<size_t>(height) * 4u);
+	}
+	else {
+		prev = &feedbackPrev.rgba;
+		if (!sameSize) {
+			resampleInto(feedbackPrev.rgba, feedbackPrev.width, feedbackPrev.height, feedbackResampled, width, height);
+			prev = &feedbackResampled;
+		}
 	}
 	const InverseMap map = makeInverseMap(width, height, p.zoom, p.rotate, p.offsetX, p.offsetY,
 		static_cast<InverseMapEdge>(p.edge));
@@ -1611,14 +2236,36 @@ void VideoGraphRenderer::renderFeedbackFrame(Frame& src, Frame& out, int width, 
 	const float gain = std::clamp(p.gain, 0.f, 1.2f);
 	const float blend = std::min(gain, 1.f);
 	const float key = clamp01(p.key);
-	prepare(out, width, height);
+	if (passFloat) out.beginF32(static_cast<size_t>(width) * static_cast<size_t>(height) * 4u);
+	else prepare(out, width, height);
+	const float* srcF = passFloat ? src.f.data() : nullptr;
+	float* outF = passFloat ? out.f.data() : nullptr;
 	const int threads = std::clamp(static_cast<int>(std::thread::hardware_concurrency()), 1, 8);
+	// The pixel loop is compiled twice, so the byte loop has no float tests in it (full precision is `kF`).
+	auto pixels = [&](auto tag) {
+	constexpr bool kF = decltype(tag)::value;
 	parallelRanges(height, threads, [&](int begin, int end) {
 		for (int y = begin; y < end; ++y) {
 			for (int x = 0; x < width; ++x) {
 				float sx = 0.f, sy = 0.f;
 				unsigned char rgba[4] {};
-				if (inverseMapSource(map, width, height, static_cast<float>(x), static_cast<float>(y), sx, sy)) {
+				float px[4] {};
+				if (fade) {
+					if (inverseMapSource(map, width, height, static_cast<float>(x), static_cast<float>(y), sx, sy)) {
+						if (p.edge == static_cast<int>(InverseMapEdge::Wrap) && (sx > width - 1 || sy > height - 1)) {
+							const int x0 = static_cast<int>(sx), y0 = static_cast<int>(sy);
+							const int x1 = (x0 + 1) % width, y1 = (y0 + 1) % height;
+							const float tx = sx - x0, ty = sy - y0;
+							for (int ch = 0; ch < 4; ++ch) {
+								const float a = (*prevF)[(static_cast<size_t>(y0)*width+x0)*4+ch] * (1.f-tx) + (*prevF)[(static_cast<size_t>(y0)*width+x1)*4+ch] * tx;
+								const float b = (*prevF)[(static_cast<size_t>(y1)*width+x0)*4+ch] * (1.f-tx) + (*prevF)[(static_cast<size_t>(y1)*width+x1)*4+ch] * tx;
+								px[ch] = std::clamp(a*(1.f-ty)+b*ty, 0.f, 255.f);
+							}
+						}
+						else sampleBilinearF(*prevF, width, height, sx, sy, px);
+					}
+				}
+				else if (inverseMapSource(map, width, height, static_cast<float>(x), static_cast<float>(y), sx, sy)) {
 					if (p.edge == static_cast<int>(InverseMapEdge::Wrap) && (sx > width - 1 || sy > height - 1)) {
 						// Interpolate across the wrap seam instead of sampling outside the frame.
 						const int x0 = static_cast<int>(sx), y0 = static_cast<int>(sy);
@@ -1632,9 +2279,12 @@ void VideoGraphRenderer::renderFeedbackFrame(Frame& src, Frame& out, int width, 
 					}
 					else sampleBilinear(*prev, width, height, sx, sy, rgba);
 				}
+				if (!fade) {
+					for (int ch = 0; ch < 4; ++ch) px[ch] = rgba[ch];
+				}
 				float fb[3];
 				for (int ch = 0; ch < 3; ++ch) {
-					fb[ch] = clamp01((hue[ch][0]*rgba[0] + hue[ch][1]*rgba[1] + hue[ch][2]*rgba[2]) / 255.f);
+					fb[ch] = clamp01((hue[ch][0]*px[0] + hue[ch][1]*px[1] + hue[ch][2]*px[2]) / 255.f);
 				}
 				if (key > 0.001f) {
 					const float luma = fb[0]*0.2126f + fb[1]*0.7152f + fb[2]*0.0722f;
@@ -1645,18 +2295,37 @@ void VideoGraphRenderer::renderFeedbackFrame(Frame& src, Frame& out, int width, 
 				}
 				const size_t i = (static_cast<size_t>(y)*width+x)*4u;
 				for (int ch = 0; ch < 3; ++ch) {
-					const float input = src[i+ch] / 255.f;
+					const float input = (kF ? srcF[i+ch] : static_cast<float>(src[i+ch])) / 255.f;
 					const float v = p.mode == 1 ? input*(1.f-blend) + fb[ch]*blend : input + gain*fb[ch];
-					out[i+ch] = static_cast<unsigned char>(clamp01(v)*255.f + 0.5f);
+					const float level = clamp01(v)*255.f;
+					if constexpr (kF) {
+						// Full precision: the picture is the float level, snapped like the history.
+						outF[i+ch] = level < kFeedbackFadeSnapLevel ? 0.f : level;
+						continue;
+					}
+					out[i+ch] = static_cast<unsigned char>(level + 0.5f);
+					// The float history keeps the unrounded level, and snaps a vanishing one to exactly 0, so a
+					// trail ends cleanly and never becomes a denormal.
+					if (fade) feedbackOutF[i+ch] = level < kFeedbackFadeSnapLevel ? 0.f : level;
+				}
+				if constexpr (kF) {
+					outF[i+3] = 255.f;
+					continue;
 				}
 				out[i+3] = 255;
+				if (fade) feedbackOutF[i+3] = 255.f;
 			}
 		}
 	});
-	if (!frameRingPush(p.ringSlotId, p.frameCounter, out, width, height) && frameRingRead(p.ringSlotId, 0, feedbackPrev)) {
+	};
+	if (passFloat) pixels(std::true_type{});
+	else pixels(std::false_type{});
+	const bool stored = passFloat ? frameRingPushFloatOnly(p.ringSlotId, p.frameCounter, out.f, width, height)
+		: fade ? frameRingPushFloat(p.ringSlotId, p.frameCounter, out, feedbackOutF, width, height)
+		: frameRingPush(p.ringSlotId, p.frameCounter, out, width, height);
+	if (!stored && readFeedbackHistory(p.ringSlotId)) {
 		// A concurrent renderer may have won the write while this pass was being computed.
-		if (feedbackPrev.width == width && feedbackPrev.height == height) out = feedbackPrev.rgba;
-		else resampleInto(feedbackPrev.rgba, feedbackPrev.width, feedbackPrev.height, out, width, height);
+		feedbackHistoryAsOutput(out, width, height);
 	}
 }
 
@@ -1665,7 +2334,7 @@ void VideoGraphRenderer::renderFeedbackFrame(Frame& src, Frame& out, int width, 
 void VideoGraphRenderer::renderFocusFrame(Frame& src, Frame& out, int width, int height, const FocusParams& params) {
 	namespace ff = focus_filter;
 	const size_t pixels = static_cast<size_t>(width) * static_cast<size_t>(height);
-	if (src.size() != pixels * 4u || width < 1 || height < 1) {
+	if (src.count() != pixels * 4u || width < 1 || height < 1) {
 		out.swap(src);
 		return;
 	}
@@ -1682,7 +2351,11 @@ void VideoGraphRenderer::renderFocusFrame(Frame& src, Frame& out, int width, int
 		out.swap(src);
 		return;
 	}
-	prepare(out, width, height);
+	// Full precision: the planes are float already, so the final cut to a byte is skipped and the picture is handed on
+	// as floats. The input is read from whichever plane holds it.
+	const bool floatOut = passFloat || src.isFloat();
+	if (floatOut) out.beginF32(pixels * 4u);
+	else prepare(out, width, height);
 
 	// Scratch, sized only when the picture size changes. C is needed only for SHARP's blurred copy.
 	const size_t planeCount = pixels;
@@ -1718,8 +2391,9 @@ void VideoGraphRenderer::renderFocusFrame(Frame& src, Frame& out, int width, int
 	float* rowB[3] = {focusRowB.data(), focusRowB.data() + width, focusRowB.data() + 2 * static_cast<size_t>(width)};
 	const float* inA[3] = {rowA[0], rowA[1], rowA[2]};
 	const float* inB[3] = {rowB[0], rowB[1], rowB[2]};
+	withSource(src, [&](auto rd) {
 	for (int y = 0; y < height; ++y) {
-		const unsigned char* row = src.data() + static_cast<size_t>(y) * width * 4u;
+		const size_t rowBase = static_cast<size_t>(y) * width * 4u;
 		for (int c = 0; c < 3; ++c) {
 			if (doConverge && c != 1) {
 				const float shift = c == 0 ? -shiftPx : shiftPx;
@@ -1728,12 +2402,12 @@ void VideoGraphRenderer::renderFocusFrame(Frame& src, Frame& out, int width, int
 					const int i0 = static_cast<int>(at);
 					const int i1 = std::min(i0 + 1, width - 1);
 					const float f = at - static_cast<float>(i0);
-					rowA[c][x] = row[i0 * 4 + c] * (1.f - f) + row[i1 * 4 + c] * f;
+					rowA[c][x] = rd[rowBase + i0 * 4 + c] * (1.f - f) + rd[rowBase + i1 * 4 + c] * f;
 				}
 			}
 			else {
 				for (int x = 0; x < width; ++x) {
-					rowA[c][x] = row[x * 4 + c];
+					rowA[c][x] = rd[rowBase + x * 4 + c];
 				}
 			}
 		}
@@ -1749,6 +2423,7 @@ void VideoGraphRenderer::renderFocusFrame(Frame& src, Frame& out, int width, int
 			std::copy(rowA[c], rowA[c] + width, A + c * planeCount + static_cast<size_t>(y) * width);
 		}
 	}
+	});
 
 	// 2. FOCUS's up and down passes need whole planes.
 	if (doFocus) {
@@ -1775,37 +2450,43 @@ void VideoGraphRenderer::renderFocusFrame(Frame& src, Frame& out, int width, int
 		}
 	}
 
-	// 4. Mix with the untouched source and write bytes.
+	// 4. Mix with the untouched source and write bytes (or floats, with the setting on).
 	const float amount = sharp * ff::kSharpMaxAmount;
-	for (int y = 0; y < height; ++y) {
-		const size_t base = static_cast<size_t>(y) * width;
-		const unsigned char* in = src.data() + base * 4u;
-		unsigned char* dst = out.data() + base * 4u;
-		for (int ch = 0; ch < 3; ++ch) {
-			const float* a = A + ch * planeCount + base;
-			const float* d = doSharp ? C + ch * planeCount + base : nullptr;
-			for (int x = 0; x < width; ++x) {
-				float v = a[x];
-				if (d) v += amount * (v - d[x]);
-				const float dry = in[x * 4 + ch];
-				v = dry + (v - dry) * mix;
-				dst[x * 4 + ch] = static_cast<unsigned char>(std::clamp(v + 0.5f, 0.f, 255.f));
+	withSource(src, [&](auto in) {
+		withDest<StoreRule::RoundHalfUp>(out, [&](auto dst) {
+			for (int y = 0; y < height; ++y) {
+				const size_t base = static_cast<size_t>(y) * width;
+				for (int ch = 0; ch < 3; ++ch) {
+					const float* a = A + ch * planeCount + base;
+					const float* d = doSharp ? C + ch * planeCount + base : nullptr;
+					for (int x = 0; x < width; ++x) {
+						float v = a[x];
+						if (d) v += amount * (v - d[x]);
+						const float dry = in[base * 4u + x * 4 + ch];
+						v = dry + (v - dry) * mix;
+						dst.put(base * 4u + x * 4 + ch, v);
+					}
+				}
+				for (int x = 0; x < width; ++x) {
+					dst.put(base * 4u + x * 4 + 3, 255.f);
+				}
 			}
-		}
-		for (int x = 0; x < width; ++x) {
-			dst[x * 4 + 3] = 255;
-		}
-	}
+		});
+	});
 }
 
 void VideoGraphRenderer::renderRotatorFrame(Frame& src, Frame& out, int width, int height, const RotatorParams& p) {
 	const int folds = std::clamp(p.folds, 1, 12);
 	const bool identity = std::abs(p.angle) < 1e-7f && std::abs(p.zoom - 1.f) < 1e-7f && p.offsetX == 0.f
 		&& p.offsetY == 0.f && folds == 1;
-	if (identity || src.empty()) {
+	if (identity || !src.hasPixels()) {
 		out.swap(src);
 		return;
 	}
+	// Full precision: sample the float picture and write floats, nothing rounded between passes. A byte source is
+	// widened first (it is this node's own scratch copy).
+	const bool useFloat = passFloat || src.isFloat();
+	if (useFloat) src.ensureF32();
 	static constexpr InverseMapEdge kEdges[4] = {InverseMapEdge::Black, InverseMapEdge::Clamp, InverseMapEdge::Wrap, InverseMapEdge::Mirror};
 	const InverseMapEdge edge = kEdges[std::clamp(p.edge, 0, 3)];
 	InverseMap map = makeInverseMap(width, height, std::clamp(p.zoom, 0.05f, 20.f), p.angle, p.offsetX, p.offsetY, edge);
@@ -1826,8 +2507,47 @@ void VideoGraphRenderer::renderRotatorFrame(Frame& src, Frame& out, int width, i
 	const float foldX = map.centreX + map.offsetX;
 	const float foldY = map.centreY + map.offsetY;
 	const float wedge = 2.f * kPi / static_cast<float>(folds);
-	prepare(out, width, height);
 	const int threads = std::clamp(static_cast<int>(std::thread::hardware_concurrency()), 1, 8);
+	if (useFloat) {
+		out.beginF32(static_cast<size_t>(width) * static_cast<size_t>(height) * 4u);
+		float* dst = out.f.data();
+		parallelRanges(height, threads, [&](int begin, int end) {
+			for (int y = begin; y < end; ++y) {
+				for (int x = 0; x < width; ++x) {
+					float px = static_cast<float>(x), py = static_cast<float>(y);
+					if (folds > 1) {
+						const float dx = px - foldX, dy = py - foldY;
+						const float r = std::sqrt(dx * dx + dy * dy);
+						float a = std::atan2(dy, dx);
+						a -= std::floor(a / wedge) * wedge;
+						if (a > wedge * 0.5f) a = wedge - a;
+						px = foldX + r * std::cos(a);
+						py = foldY + r * std::sin(a);
+					}
+					float sx = 0.f, sy = 0.f;
+					float rgba[4] = {0.f, 0.f, 0.f, 255.f};
+					if (inverseMapSource(map, width, height, px, py, sx, sy)) {
+						if (edge == InverseMapEdge::Wrap && (sx > width - 1 || sy > height - 1)) {
+							const int x0 = static_cast<int>(sx), y0 = static_cast<int>(sy);
+							const int x1 = (x0 + 1) % width, y1 = (y0 + 1) % height;
+							const float tx = sx - x0, ty = sy - y0;
+							for (int ch = 0; ch < 4; ++ch) {
+								const float a = src.f[(static_cast<size_t>(y0) * width + x0) * 4 + ch] * (1.f - tx) + src.f[(static_cast<size_t>(y0) * width + x1) * 4 + ch] * tx;
+								const float b = src.f[(static_cast<size_t>(y1) * width + x0) * 4 + ch] * (1.f - tx) + src.f[(static_cast<size_t>(y1) * width + x1) * 4 + ch] * tx;
+								rgba[ch] = std::clamp(a * (1.f - ty) + b * ty, 0.f, 255.f);
+							}
+						}
+						else sampleBilinearF(src.f, width, height, sx, sy, rgba);
+					}
+					const size_t i = (static_cast<size_t>(y) * width + x) * 4u;
+					dst[i] = rgba[0]; dst[i + 1] = rgba[1]; dst[i + 2] = rgba[2];
+					dst[i + 3] = 255.f;
+				}
+			}
+		});
+		return;
+	}
+	prepare(out, width, height);
 	parallelRanges(height, threads, [&](int begin, int end) {
 		for (int y = begin; y < end; ++y) {
 			for (int x = 0; x < width; ++x) {
@@ -1868,6 +2588,48 @@ void VideoGraphRenderer::renderRotatorFrame(Frame& src, Frame& out, int width, i
 
 VideoGraphRenderer::Status VideoGraphRenderer::renderVideoMixerNode(const VideoMixerParams& p, int width, int height, int depth, Frame& out) {
 	const size_t byteCount = static_cast<size_t>(width) * static_cast<size_t>(height) * 4u;
+	if (p.mode == 3) {
+		// ALL reads every patched picture at a non-zero LEVEL (slots 0 to 3), the key (slot 4) and the matte (slot 5).
+		// FADER, the next picture and the pattern are not read.
+		const Frame* picture[4] = {nullptr, nullptr, nullptr, nullptr};
+		for (int i = 0; i < 4; ++i) {
+			if (p.inputBus[i] <= 0 || !(p.level[i] > 0.f)) {
+				continue;
+			}
+			Frame& slot = scratch(depth, i);
+			const Status status = renderNode(p.inputBus[i], width, height, depth + 1, slot);
+			if (status == Status::Cycle) {
+				return Status::Cycle;
+			}
+			if (status == Status::Ok && slot.count() == byteCount) {
+				picture[i] = &slot;
+			}
+		}
+		const Frame* keyFrame = nullptr;
+		const Frame* matteFrame = nullptr;
+		if (p.keyOn && p.keyBus > 0) {
+			Frame& slot = scratch(depth, 4);
+			const Status status = renderNode(p.keyBus, width, height, depth + 1, slot);
+			if (status == Status::Cycle) {
+				return Status::Cycle;
+			}
+			if (status == Status::Ok && slot.count() == byteCount) {
+				keyFrame = &slot;
+			}
+		}
+		if (p.keyOn && p.matteBus > 0) {
+			Frame& slot = scratch(depth, 5);
+			const Status status = renderNode(p.matteBus, width, height, depth + 1, slot);
+			if (status == Status::Cycle) {
+				return Status::Cycle;
+			}
+			if (status == Status::Ok && slot.count() == byteCount) {
+				matteFrame = &slot;
+			}
+		}
+		renderVideoMixerFrame(nullptr, nullptr, nullptr, keyFrame, matteFrame, out, width, height, p, picture);
+		return Status::Ok;
+	}
 	const int airIndex = std::clamp(p.onAir, 0, 3);
 	const int nextIndex = std::clamp(p.next, 0, 3);
 	const float fader = clamp01(p.fader);
@@ -1899,7 +2661,7 @@ VideoGraphRenderer::Status VideoGraphRenderer::renderVideoMixerNode(const VideoM
 			return Status::Cycle;
 		}
 		// An absent or empty picture reads as black (and an empty matte as "nothing in MATTE").
-		if (status == Status::Ok && slot.size() == byteCount) {
+		if (status == Status::Ok && slot.count() == byteCount) {
 			frame[role] = &slot;
 		}
 	}
@@ -1907,10 +2669,10 @@ VideoGraphRenderer::Status VideoGraphRenderer::renderVideoMixerNode(const VideoM
 	return Status::Ok;
 }
 
-void VideoGraphRenderer::renderVideoMixerFrame(const Frame* onAir, const Frame* next, const Frame* pattern, const Frame* key, const Frame* matte, Frame& out, int width, int height, const VideoMixerParams& p) {
+void VideoGraphRenderer::renderVideoMixerFrame(const Frame* onAir, const Frame* next, const Frame* pattern, const Frame* key, const Frame* matte, Frame& out, int width, int height, const VideoMixerParams& p, const Frame* const* pictures) {
 	// Per pixel, in this order: colour each of the two pictures, mix them, lay the key over the mix, fade to black.
 	// See docs/architecture.md, "Video Mixer", for the maths of each stage.
-	prepare(out, width, height);
+	beginOutput(out, static_cast<size_t>(width) * static_cast<size_t>(height) * 4u);
 	const int airIndex = std::clamp(p.onAir, 0, 3);
 	const int nextIndex = std::clamp(p.next, 0, 3);
 	const float fader = clamp01(p.fader);
@@ -1923,10 +2685,29 @@ void VideoGraphRenderer::renderVideoMixerFrame(const Frame* onAir, const Frame* 
 	// as SAT falls. Black stays black, white becomes the full tint, and at SAT 0 the tint is white (plain grey).
 	struct Tint {
 		bool on = false;
+		bool gradient = false;
 		float r = 1.f, g = 1.f, b = 1.f;
+		GradientTable table;
+		GradientTableF tableF;
 	};
 	auto tintOf = [&](int index) {
 		Tint tint;
+		if (p.gradientOn[index]) {
+			// Black, the input's hue, the hue one SPAN further round, then white. Levels follow luma, so at SAT 0
+			// the picture is its plain grey; SAT scales the three coloured stops and white keeps none.
+			const float hue = p.hue[index];
+			const float step = std::clamp(p.span, 0.f, 0.5f);
+			const float hues[4] = {hue, hue, hue + step, hue + 2.f * step};
+			const float levels[4] = {0.f, 1.f / 3.f, 2.f / 3.f, 1.f};
+			const float sats[4] = {sat, sat, sat, 0.f};
+			gradientTableF(hues, levels, sats, 0, 0.f, tint.tableF);
+			for (int n = 0; n < 256; ++n) {
+				for (int c = 0; c < 3; ++c) tint.table[n][c] = static_cast<unsigned char>(tint.tableF[n][c]);
+			}
+			tint.on = true;
+			tint.gradient = true;
+			return tint;
+		}
 		if (!p.colorOn[index]) {
 			return tint;
 		}
@@ -1940,6 +2721,118 @@ void VideoGraphRenderer::renderVideoMixerFrame(const Frame* onAir, const Frame* 
 	};
 	const Tint airTint = tintOf(airIndex);
 	const Tint nextTint = tintOf(nextIndex);
+
+	// ALL (mode 3): every picture that is patched and has a LEVEL above 0 is coloured as above, scaled by its LEVEL,
+	// and added to the others. The sum is clamped at white, or divided by the number of patched pictures when
+	// AVERAGE is set. The key and black then work as in the other modes; FADER does not reach this.
+	if (p.mode == 3) {
+		const Tint tints[4] = {tintOf(0), tintOf(1), tintOf(2), tintOf(3)};
+		int connected = 0;
+		for (int i = 0; i < 4; ++i) {
+			connected += p.inputBus[i] > 0 ? 1 : 0;
+		}
+		const float scale = (p.average && connected > 0) ? 1.f / static_cast<float>(connected) : 1.f;
+		const Frame* matteSource = matte != nullptr ? matte : key;
+		const bool flatFill = p.keyFill == 1;
+		const bool keyActive = p.keyOn && matteSource != nullptr && (flatFill || key != nullptr);
+		const float keyThresh = clamp01(p.keyThresh);
+		const float keySoft = std::clamp(p.keySoft, 0.001f, 1.f);
+		unsigned char flatR = 0, flatG = 0, flatB = 0;
+		hsvToRgb(p.keyHue, 0.9f, 1.f, flatR, flatG, flatB);
+		const float flat[3] = {flatR / 255.f, flatG / 255.f, flatB / 255.f};
+		const float black = clamp01(p.black);
+		const bool toFloat = out.isFloat();
+
+		bool has[4] = {false, false, false, false};
+		MixedSource in[4] = {MixedSource{nullptr, nullptr}, MixedSource{nullptr, nullptr}, MixedSource{nullptr, nullptr}, MixedSource{nullptr, nullptr}};
+		for (int i = 0; i < 4; ++i) {
+			has[i] = pictures != nullptr && pictures[i] != nullptr && p.level[i] > 0.f;
+			if (has[i]) {
+				in[i] = mixedSourceOf(*pictures[i]);
+			}
+		}
+		const MixedSource keyR = key != nullptr ? mixedSourceOf(*key) : MixedSource{nullptr, nullptr};
+		const MixedSource matteR = matteSource != nullptr ? mixedSourceOf(*matteSource) : MixedSource{nullptr, nullptr};
+		auto grey = [](const MixedSource& r, size_t j) {
+			return (r[j + 0] * 0.2126f + r[j + 1] * 0.7152f + r[j + 2] * 0.0722f) * (1.f / 255.f);
+		};
+		// The same reading as the other modes: a gradient at the exact grey on a float picture, from its table on a byte one.
+		auto load = [&](const MixedSource& r, size_t j, const Tint& tint, float* rgb) {
+			if (tint.gradient) {
+				if (toFloat) {
+					const float l = std::clamp(grey(r, j) * 255.f, 0.f, 255.f);
+					const int lo = std::min(static_cast<int>(l), 255);
+					const int hi = std::min(lo + 1, 255);
+					const float t = l - static_cast<float>(lo);
+					rgb[0] = (tint.tableF[lo][0] + (tint.tableF[hi][0] - tint.tableF[lo][0]) * t) * (1.f / 255.f);
+					rgb[1] = (tint.tableF[lo][1] + (tint.tableF[hi][1] - tint.tableF[lo][1]) * t) * (1.f / 255.f);
+					rgb[2] = (tint.tableF[lo][2] + (tint.tableF[hi][2] - tint.tableF[lo][2]) * t) * (1.f / 255.f);
+				}
+				else {
+					const int luma = std::clamp(static_cast<int>(std::lround(grey(r, j) * 255.f)), 0, 255);
+					rgb[0] = tint.table[luma][0] * (1.f / 255.f);
+					rgb[1] = tint.table[luma][1] * (1.f / 255.f);
+					rgb[2] = tint.table[luma][2] * (1.f / 255.f);
+				}
+			}
+			else if (tint.on) {
+				const float l = grey(r, j);
+				rgb[0] = l * tint.r;
+				rgb[1] = l * tint.g;
+				rgb[2] = l * tint.b;
+			}
+			else {
+				rgb[0] = r[j + 0] * (1.f / 255.f);
+				rgb[1] = r[j + 1] * (1.f / 255.f);
+				rgb[2] = r[j + 2] * (1.f / 255.f);
+			}
+		};
+
+		withDest<StoreRule::RoundHalfUp>(out, [&](auto dst) {
+			const int threads = std::clamp(static_cast<int>(std::thread::hardware_concurrency()), 1, 8);
+			parallelRanges(height, threads, [&](int begin, int end) {
+				for (int y = begin; y < end; ++y) {
+					for (int x = 0; x < width; ++x) {
+						const size_t i = (static_cast<size_t>(y) * static_cast<size_t>(width) + static_cast<size_t>(x)) * 4u;
+						float v[3] = {0.f, 0.f, 0.f};
+						for (int k = 0; k < 4; ++k) {
+							if (!has[k]) {
+								continue;
+							}
+							float rgb[3];
+							load(in[k], i, tints[k], rgb);
+							for (int c = 0; c < 3; ++c) {
+								v[c] += rgb[c] * p.level[k];
+							}
+						}
+						for (int c = 0; c < 3; ++c) {
+							v[c] = clamp01(v[c] * scale);
+						}
+						if (keyActive) {
+							float m = clamp01((grey(matteR, i) - keyThresh + keySoft * 0.5f) / keySoft);
+							if (p.keyInvert) {
+								m = 1.f - m;
+							}
+							for (int c = 0; c < 3; ++c) {
+								const float fill = flatFill ? flat[c] : keyR[i + static_cast<size_t>(c)] * (1.f / 255.f);
+								v[c] = v[c] * (1.f - m) + fill * m;
+							}
+						}
+						if (black > 0.f) {
+							for (int c = 0; c < 3; ++c) {
+								v[c] *= 1.f - black;
+							}
+						}
+						for (int c = 0; c < 3; ++c) {
+							dst.putBiased(i + static_cast<size_t>(c), v[c] * 255.f + 0.5f);
+						}
+						dst.put(i + 3u, 255.f);
+					}
+				}
+			});
+		});
+		return;
+	}
 
 	// Transition. A wipe's threshold runs from just above white (nothing has arrived) to just below black (all
 	// of it has), with SOFT as the width of the edge in grey levels.
@@ -1959,75 +2852,110 @@ void VideoGraphRenderer::renderVideoMixerFrame(const Frame* onAir, const Frame* 
 	hsvToRgb(p.keyHue, 0.9f, 1.f, flatR, flatG, flatB);
 	const float flat[3] = {flatR / 255.f, flatG / 255.f, flatB / 255.f};
 
-	const unsigned char* airData = onAir != nullptr ? onAir->data() : nullptr;
-	const unsigned char* nextData = next != nullptr ? next->data() : nullptr;
-	const unsigned char* patternData = pattern != nullptr ? pattern->data() : nullptr;
-	const unsigned char* keyData = key != nullptr ? key->data() : nullptr;
-	const unsigned char* matteData = matteSource != nullptr ? matteSource->data() : nullptr;
-	const bool showAir = airData != nullptr && fader < 1.f;
-	const bool showNext = nextData != nullptr && fader > 0.f;
+	const bool showAir = onAir != nullptr && fader < 1.f;
+	const bool showNext = next != nullptr && fader > 0.f;
+	const bool havePattern = pattern != nullptr;
+	const bool haveNext = next != nullptr;
 
-	auto grey = [](const unsigned char* px) {
-		return (px[0] * 0.2126f + px[1] * 0.7152f + px[2] * 0.0722f) * (1.f / 255.f);
-	};
-	auto load = [&](const unsigned char* px, const Tint& tint, float* rgb) {
-		if (tint.on) {
-			const float l = grey(px);
-			rgb[0] = l * tint.r;
-			rgb[1] = l * tint.g;
-			rgb[2] = l * tint.b;
-		}
-		else {
-			rgb[0] = px[0] * (1.f / 255.f);
-			rgb[1] = px[1] * (1.f / 255.f);
-			rgb[2] = px[2] * (1.f / 255.f);
-		}
-	};
-
-	const int threads = std::clamp(static_cast<int>(std::thread::hardware_concurrency()), 1, 8);
-	parallelRanges(height, threads, [&](int begin, int end) {
-		for (int y = begin; y < end; ++y) {
-			for (int x = 0; x < width; ++x) {
-				const size_t i = (static_cast<size_t>(y) * static_cast<size_t>(width) + static_cast<size_t>(x)) * 4u;
-				float a[3] = {0.f, 0.f, 0.f};
-				float n[3] = {0.f, 0.f, 0.f};
-				if (showAir) load(airData + i, airTint, a);
-				if (showNext) load(nextData + i, nextTint, n);
-				float v[3];
-				if (fader <= 0.f) {
-					v[0] = a[0]; v[1] = a[1]; v[2] = a[2];
-				}
-				else if (fader >= 1.f) {
-					v[0] = n[0]; v[1] = n[1]; v[2] = n[2];
-				}
-				else if (mode == 0) {
-					for (int c = 0; c < 3; ++c) v[c] = a[c] * (1.f - fader) + n[c] * fader;
-				}
-				else if (mode == 1) {
-					for (int c = 0; c < 3; ++c) v[c] = std::min(1.f, a[c] * addAir + n[c] * addNext);
-				}
-				else {
-					// With no PATTERN the next picture's own greys, before it is coloured, shape the wipe.
-					const float l = patternData != nullptr ? grey(patternData + i) : (nextData != nullptr ? grey(nextData + i) : 0.f);
-					const float m = clamp01((l - edge) * invSoft + 0.5f);
-					for (int c = 0; c < 3; ++c) v[c] = a[c] * (1.f - m) + n[c] * m;
-				}
-				if (keyActive) {
-					float m = clamp01((grey(matteData + i) - keyThresh + keySoft * 0.5f) / keySoft);
-					if (p.keyInvert) m = 1.f - m;
-					for (int c = 0; c < 3; ++c) {
-						const float fill = flatFill ? flat[c] : keyData[i + static_cast<size_t>(c)] * (1.f / 255.f);
-						v[c] = v[c] * (1.f - m) + fill * m;
+	// One reader per input, one function for the whole loop. When every picture is bytes the readers are plain
+	// pointers (the loop it always was); otherwise each read checks its picture's format.
+	auto run = [&](auto airR, auto nextR, auto patternR, auto keyR, auto matteR) {
+		withDest<StoreRule::RoundHalfUp>(out, [&](auto dst) {
+			constexpr bool toFloat = std::is_same<decltype(dst), FloatDest>::value;
+			auto grey = [](const auto& r, size_t j) {
+				return (r[j + 0] * 0.2126f + r[j + 1] * 0.7152f + r[j + 2] * 0.0722f) * (1.f / 255.f);
+			};
+			auto load = [&](const auto& r, size_t j, const Tint& tint, float* rgb) {
+				if (tint.gradient) {
+					if (toFloat) {
+						// The gradient at the exact grey, the two nearest entries blended, so there are no steps.
+						const float l = std::clamp(grey(r, j) * 255.f, 0.f, 255.f);
+						const int lo = std::min(static_cast<int>(l), 255);
+						const int hi = std::min(lo + 1, 255);
+						const float t = l - static_cast<float>(lo);
+						rgb[0] = (tint.tableF[lo][0] + (tint.tableF[hi][0] - tint.tableF[lo][0]) * t) * (1.f / 255.f);
+						rgb[1] = (tint.tableF[lo][1] + (tint.tableF[hi][1] - tint.tableF[lo][1]) * t) * (1.f / 255.f);
+						rgb[2] = (tint.tableF[lo][2] + (tint.tableF[hi][2] - tint.tableF[lo][2]) * t) * (1.f / 255.f);
+					}
+					else {
+						const int luma = std::clamp(static_cast<int>(std::lround(grey(r, j) * 255.f)), 0, 255);
+						rgb[0] = tint.table[luma][0] * (1.f / 255.f);
+						rgb[1] = tint.table[luma][1] * (1.f / 255.f);
+						rgb[2] = tint.table[luma][2] * (1.f / 255.f);
 					}
 				}
-				if (black > 0.f) {
-					for (int c = 0; c < 3; ++c) v[c] *= 1.f - black;
+				else if (tint.on) {
+					const float l = grey(r, j);
+					rgb[0] = l * tint.r;
+					rgb[1] = l * tint.g;
+					rgb[2] = l * tint.b;
 				}
-				for (int c = 0; c < 3; ++c) {
-					out[i + static_cast<size_t>(c)] = static_cast<unsigned char>(std::clamp(v[c] * 255.f + 0.5f, 0.f, 255.f));
+				else {
+					rgb[0] = r[j + 0] * (1.f / 255.f);
+					rgb[1] = r[j + 1] * (1.f / 255.f);
+					rgb[2] = r[j + 2] * (1.f / 255.f);
 				}
-				out[i + 3u] = 255;
-			}
-		}
-	});
+			};
+
+			const int threads = std::clamp(static_cast<int>(std::thread::hardware_concurrency()), 1, 8);
+			parallelRanges(height, threads, [&](int begin, int end) {
+				for (int y = begin; y < end; ++y) {
+					for (int x = 0; x < width; ++x) {
+						const size_t i = (static_cast<size_t>(y) * static_cast<size_t>(width) + static_cast<size_t>(x)) * 4u;
+						float a[3] = {0.f, 0.f, 0.f};
+						float n[3] = {0.f, 0.f, 0.f};
+						if (showAir) load(airR, i, airTint, a);
+						if (showNext) load(nextR, i, nextTint, n);
+						float v[3];
+						if (fader <= 0.f) {
+							v[0] = a[0]; v[1] = a[1]; v[2] = a[2];
+						}
+						else if (fader >= 1.f) {
+							v[0] = n[0]; v[1] = n[1]; v[2] = n[2];
+						}
+						else if (mode == 0) {
+							for (int c = 0; c < 3; ++c) v[c] = a[c] * (1.f - fader) + n[c] * fader;
+						}
+						else if (mode == 1) {
+							for (int c = 0; c < 3; ++c) v[c] = std::min(1.f, a[c] * addAir + n[c] * addNext);
+						}
+						else {
+							// With no PATTERN the next picture's own greys, before it is coloured, shape the wipe.
+							const float l = havePattern ? grey(patternR, i) : (haveNext ? grey(nextR, i) : 0.f);
+							const float m = clamp01((l - edge) * invSoft + 0.5f);
+							for (int c = 0; c < 3; ++c) v[c] = a[c] * (1.f - m) + n[c] * m;
+						}
+						if (keyActive) {
+							float m = clamp01((grey(matteR, i) - keyThresh + keySoft * 0.5f) / keySoft);
+							if (p.keyInvert) m = 1.f - m;
+							for (int c = 0; c < 3; ++c) {
+								const float fill = flatFill ? flat[c] : keyR[i + static_cast<size_t>(c)] * (1.f / 255.f);
+								v[c] = v[c] * (1.f - m) + fill * m;
+							}
+						}
+						if (black > 0.f) {
+							for (int c = 0; c < 3; ++c) v[c] *= 1.f - black;
+						}
+						for (int c = 0; c < 3; ++c) {
+							dst.putBiased(i + static_cast<size_t>(c), v[c] * 255.f + 0.5f);
+						}
+						dst.put(i + 3u, 255.f);
+					}
+				}
+			});
+		});
+	};
+	const Frame* all[5] = {onAir, next, pattern, key, matteSource};
+	bool allBytes = true;
+	for (const Frame* f : all) {
+		if (f != nullptr && f->isFloat()) allBytes = false;
+	}
+	auto bytesOf = [](const Frame* f) { return ByteSource{f != nullptr ? f->data() : nullptr}; };
+	auto mixedOf = [](const Frame* f) { return f != nullptr ? mixedSourceOf(*f) : MixedSource{nullptr, nullptr}; };
+	if (allBytes) {
+		run(bytesOf(onAir), bytesOf(next), bytesOf(pattern), bytesOf(key), bytesOf(matteSource));
+	}
+	else {
+		run(mixedOf(onAir), mixedOf(next), mixedOf(pattern), mixedOf(key), mixedOf(matteSource));
+	}
 }

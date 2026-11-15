@@ -36,6 +36,9 @@ struct VideoMixer : Module {
 		KEY_HUE_PARAM,
 		FILL_PARAM,
 		BLACK_PARAM,
+		SPAN_PARAM,
+		LEVEL_PARAM,                  // A to D, appended so older patches load unchanged
+		ALL_PARAM = LEVEL_PARAM + 4,  // the ALL button: every patched picture live at its LEVEL
 		PARAMS_LEN
 	};
 	enum InputId {
@@ -53,6 +56,7 @@ struct VideoMixer : Module {
 		BLACK_INPUT,
 		THRESH_INPUT,
 		KEY_ON_INPUT,
+		SPAN_INPUT,
 		INPUTS_LEN
 	};
 	enum OutputId {
@@ -70,13 +74,17 @@ struct VideoMixer : Module {
 		KEY_ON_LIGHT,
 		KEY_INVERT_LIGHT,
 		SIGNAL_LIGHT,
+		COLOR_STATE_LIGHT,  // A to D, three lights each (red, green, blue): off, hue (white), gradient (amber)
+		ALL_LIGHT = COLOR_STATE_LIGHT + 12,  // the ALL button
 		LIGHTS_LEN
 	};
 
 	VideoBusOwner videoBus;
 	VideoMixerState state;
 	dsp::SchmittTrigger cutTrigger, autoTrigger, nextTrigger;
+	int colorStates[kVideoMixerInputs] = {0, 0, 0, 0};
 	dsp::BooleanTrigger cutButton, autoButton, nextButton;
+	bool allAverages = false;  // ALL mode divides by the number of patched pictures instead of adding them
 
 	VideoMixer() {
 		config(PARAMS_LEN, INPUTS_LEN, OUTPUTS_LEN, LIGHTS_LEN);
@@ -86,7 +94,7 @@ struct VideoMixer : Module {
 		for (int i = 0; i < kVideoMixerInputs; ++i) {
 			const std::string name = std::string("Video in ") + names[i];
 			configParam(HUE_PARAM + i, 0.f, 1.f, hues[i], name + " hue", "°", 0.f, 360.f);
-			configSwitch(COLOR_PARAM + i, 0.f, 1.f, 0.f, name + " color", {"Off", "On"});
+			configSwitch(COLOR_PARAM + i, 0.f, 2.f, 0.f, name + " color: click to step Off, Hue (one color), Gradient (several colors)", {"Off", "Hue", "Gradient"});
 			configInput(PICTURE_INPUT + i, name + " (video bus token)");
 			configOutput(LIVE_OUTPUT + i, name + " live")->description = "10 V while this input is the picture going out";
 			// One two-color light shows both states, and Rack reads its hover text from the first of the pair, so both
@@ -95,8 +103,10 @@ struct VideoMixer : Module {
 				LightInfo* info = configLight(PICTURE_LIGHT + 2 * i + c, name + " status");
 				info->description = "Red means live. Green means next.";
 			}
-			configLight(COLOR_LIGHT + i, name + " color on");
+			for (int c = 0; c < 3; ++c) configLight(COLOR_STATE_LIGHT + 3 * i + c, name + " color: off, white for Hue, amber for Gradient");
+			configParam(LEVEL_PARAM + i, 0.f, 1.f, 1.f, name + " level. Level while ALL is on", "%", 0.f, 100.f);
 		}
+		configSwitch(ALL_PARAM, 0.f, 1.f, 0.f, "All: every patched picture is live at its LEVEL. Mode, fader, cut, auto and next do nothing while this is on.", {"Off", "On"});
 		configParam(SAT_PARAM, 0.f, 1.f, 1.f, "Saturation of every colored picture", "%", 0.f, 100.f);
 		configButton(NEXT_PARAM, "Next: step to the following picture");
 		configParam(FADER_PARAM, 0.f, 1.f, 0.f, "Fader", "%", 0.f, 100.f);
@@ -110,6 +120,7 @@ struct VideoMixer : Module {
 		configParam(KEY_THRESH_PARAM, 0.f, 1.f, 0.5f, "Key threshold", "%", 0.f, 100.f);
 		configParam(KEY_SOFT_PARAM, 0.f, 1.f, 0.12f, "Key edge softness", "%", 0.f, 100.f);
 		configSwitch(KEY_INVERT_PARAM, 0.f, 1.f, 0.f, "Key invert (cut where the matte is dark)", {"Off", "On"});
+		configParam(SPAN_PARAM, 0.f, 1.f, 0.f, "Gradient span: how far round the colors each Gradient input steps from its own hue", "°", 0.f, 360.f * kVideoMixerSpanTurns);
 		configParam(KEY_HUE_PARAM, 0.f, 1.f, 0.33f, "Key flat color hue", "°", 0.f, 360.f);
 		configSwitch(FILL_PARAM, 0.f, 1.f, 1.f, "Key fill", {"Flat color", "Key picture"});
 		configParam(BLACK_PARAM, 0.f, 1.f, 0.f, "Fade to black", "%", 0.f, 100.f);
@@ -124,6 +135,7 @@ struct VideoMixer : Module {
 		configInput(NEXT_CV_INPUT, "Next CV (0 to 10 V picks A to D in four equal bands)");
 		configInput(SAT_INPUT, "Saturation CV (10 V is full range)");
 		configInput(SHIFT_INPUT, "Hue shift CV (10 V is once round the colors)");
+		configInput(SPAN_INPUT, "Gradient span CV (10 V is full range)");
 		configInput(BLACK_INPUT, "Fade to black CV (10 V is full range)");
 		configInput(THRESH_INPUT, "Key threshold CV (10 V is full range)");
 		configInput(KEY_ON_INPUT, "Key on gate");
@@ -135,6 +147,7 @@ struct VideoMixer : Module {
 		configLight(KEY_ON_LIGHT, "Key layer on");
 		configLight(KEY_INVERT_LIGHT, "Key invert on");
 		configLight(SIGNAL_LIGHT, "Signal");
+		configLight(ALL_LIGHT, "All on");
 	}
 
 	void onReset() override { state.reset(); }
@@ -186,16 +199,24 @@ struct VideoMixer : Module {
 
 		const float shift = inputs[SHIFT_INPUT].getVoltage();
 		for (int i = 0; i < kVideoMixerInputs; ++i) {
-			p.colorOn[i] = params[COLOR_PARAM + i].getValue() > 0.5f;
+			const int colorState = static_cast<int>(clamp(std::round(params[COLOR_PARAM + i].getValue()), 0.f, 2.f));
+			colorStates[i] = colorState;
+			p.colorOn[i] = colorState == 1;
+			p.gradientOn[i] = colorState == 2;
 			p.hue[i] = videoMixerShiftedHue(params[HUE_PARAM + i].getValue(), shift);
 		}
 		p.onAir = state.onAir;
 		p.next = state.next;
 		p.fader = state.mix;
-		p.mode = static_cast<int>(clamp(std::round(params[MODE_PARAM].getValue()), 0.f, 2.f));
+		// ALL overrides MODE: while its button is on, the mode is 3 and the switch does nothing to the picture.
+		const bool allMode = params[ALL_PARAM].getValue() > 0.5f;
+		p.mode = allMode ? 3 : static_cast<int>(clamp(std::round(params[MODE_PARAM].getValue()), 0.f, 2.f));
+		for (int i = 0; i < kVideoMixerInputs; ++i) p.level[i] = params[LEVEL_PARAM + i].getValue();
+		p.average = allAverages;
 		p.soft = params[SOFT_PARAM].getValue();
 		p.black = cv(BLACK_PARAM, BLACK_INPUT, 0.f, 1.f);
 		p.sat = cv(SAT_PARAM, SAT_INPUT, 0.f, 1.f);
+		p.span = cv(SPAN_PARAM, SPAN_INPUT, 0.f, 1.f) * kVideoMixerSpanTurns;
 		p.keyOn = params[KEY_ON_PARAM].getValue() > 0.5f || inputs[KEY_ON_INPUT].getVoltage() >= 1.f;
 		p.keyThresh = cv(KEY_THRESH_PARAM, THRESH_INPUT, 0.f, 1.f);
 		p.keySoft = params[KEY_SOFT_PARAM].getValue();
@@ -210,11 +231,18 @@ struct VideoMixer : Module {
 		else videoBusClear(outBus);
 		outputs[VIDEO_BUS_OUTPUT].setVoltage(videoBus.voltage());
 
+		// In ALL every patched picture is live, so every connected light is red and every LIVE gate is up.
 		for (int i = 0; i < kVideoMixerInputs; ++i) {
-			outputs[LIVE_OUTPUT + i].setVoltage(i == state.onAir ? 10.f : 0.f);
-			lights[PICTURE_LIGHT + 2 * i].setBrightnessSmooth(i == state.next && i != state.onAir ? 1.f : 0.f, args.sampleTime);
-			lights[PICTURE_LIGHT + 2 * i + 1].setBrightnessSmooth(i == state.onAir ? 1.f : 0.f, args.sampleTime);
-			lights[COLOR_LIGHT + i].setBrightness(p.colorOn[i] ? 1.f : 0.f);
+			const bool connected = (patched >> i) & 1u;
+			const bool live = allMode ? connected : i == state.onAir;
+			outputs[LIVE_OUTPUT + i].setVoltage(live ? 10.f : 0.f);
+			lights[PICTURE_LIGHT + 2 * i].setBrightnessSmooth(!allMode && i == state.next && i != state.onAir ? 1.f : 0.f, args.sampleTime);
+			lights[PICTURE_LIGHT + 2 * i + 1].setBrightnessSmooth(live ? 1.f : 0.f, args.sampleTime);
+			const float hueLight = colorStates[i] == 1 ? 1.f : 0.f;
+			const float gradientLight = colorStates[i] == 2 ? 1.f : 0.f;
+			lights[COLOR_STATE_LIGHT + 3 * i].setBrightness(hueLight + gradientLight);
+			lights[COLOR_STATE_LIGHT + 3 * i + 1].setBrightness(hueLight + 0.55f * gradientLight);
+			lights[COLOR_STATE_LIGHT + 3 * i + 2].setBrightness(hueLight);
 		}
 		lights[CUT_LIGHT].setBrightnessSmooth(cut ? 1.f : 0.f, args.sampleTime, 10.f);
 		lights[AUTO_LIGHT].setBrightnessSmooth(state.taking ? 1.f : 0.f, args.sampleTime, 10.f);
@@ -222,6 +250,7 @@ struct VideoMixer : Module {
 		lights[ADVANCE_LIGHT].setBrightness(in.advance ? 1.f : 0.f);
 		lights[KEY_ON_LIGHT].setBrightness(p.keyOn ? 1.f : 0.f);
 		lights[KEY_INVERT_LIGHT].setBrightness(p.keyInvert ? 1.f : 0.f);
+		lights[ALL_LIGHT].setBrightness(allMode ? 1.f : 0.f);
 		lights[SIGNAL_LIGHT].setBrightnessSmooth(active ? 1.f : 0.f, args.sampleTime);
 	}
 
@@ -232,6 +261,7 @@ struct VideoMixer : Module {
 		json_object_set_new(rootJ, "next", json_integer(state.next));
 		json_object_set_new(rootJ, "flipped", json_boolean(state.flipped));
 		json_object_set_new(rootJ, "armed", json_boolean(state.armed));
+		json_object_set_new(rootJ, "allAverages", json_boolean(allAverages));
 		return rootJ;
 	}
 	void dataFromJson(json_t* rootJ) override {
@@ -244,6 +274,7 @@ struct VideoMixer : Module {
 		}
 		if (json_t* j = json_object_get(rootJ, "flipped")) state.flipped = json_is_true(j);
 		if (json_t* j = json_object_get(rootJ, "armed")) state.armed = json_is_true(j);
+		if (json_t* j = json_object_get(rootJ, "allAverages")) allAverages = json_is_true(j);
 	}
 };
 
@@ -275,6 +306,7 @@ struct VideoMixerZoneTitle : TransparentWidget {
 struct VideoMixerWidget : ModuleWidget {
 	using PushButton = VCVLightButton<MediumSimpleLight<WhiteLight>>;
 	using LatchButton = VCVLightLatch<MediumSimpleLight<WhiteLight>>;
+	using ColorButton = VCVLightLatch<MediumSimpleLight<RedGreenBlueLight>>;
 
 	static constexpr float W = 152.4f;   // 30 HP
 
@@ -335,18 +367,21 @@ struct VideoMixerWidget : ModuleWidget {
 			addJack(module, Vec(C[i], 30.f), names[i], VideoMixer::PICTURE_INPUT + i);
 			addChild(createLightCentered<SmallLight<GreenRedLight>>(mm2px(Vec(C[i] + 5.2f, 26.2f)), module, VideoMixer::PICTURE_LIGHT + 2 * i));
 			addKnob(module, Vec(C[i], 43.f), hueNames[i], VideoMixer::HUE_PARAM + i);
-			addLatch(module, Vec(C[i], 56.f), "COLOR", VideoMixer::COLOR_PARAM + i, VideoMixer::COLOR_LIGHT + i);
+			addKnobLabel(this, Vec(C[i], 56.f), "COLOR", R_BUTTON);
+			addParam(createLightParamCentered<ColorButton>(mm2px(Vec(C[i], 56.f)), module, VideoMixer::COLOR_PARAM + i, VideoMixer::COLOR_STATE_LIGHT + 3 * i));
+			addKnob(module, Vec(C[i], 67.5f), "LEVEL", VideoMixer::LEVEL_PARAM + i);
 		}
-		addChild(createPanelRule(zoneLeft, C[3] + 4.f, 65.5f));
-		const Vec sat(C[0], 76.f);
+		const Vec sat(C[0], 81.f);
 		addKnobLabel(this, sat, "SAT");
 		addParam(createParamCentered<RoundBlackKnob>(mm2px(sat), module, VideoMixer::SAT_PARAM));
-		addJack(module, Vec(C[1], 76.f), "SAT CV", VideoMixer::SAT_INPUT);
-		addJack(module, Vec(C[2], 76.f), "SHIFT", VideoMixer::SHIFT_INPUT);
-		addChild(createPanelRule(zoneLeft, C[3] + 4.f, 86.f));
-		addPush(module, Vec(C[0], 96.f), "NEXT", VideoMixer::NEXT_PARAM, VideoMixer::NEXT_LIGHT);
-		addJack(module, Vec(C[1], 96.f), "TRIG", VideoMixer::NEXT_INPUT);
-		addJack(module, Vec(C[2], 96.f), "NEXT CV", VideoMixer::NEXT_CV_INPUT);
+		addJack(module, Vec(C[1], 81.f), "SAT CV", VideoMixer::SAT_INPUT);
+		addKnob(module, Vec(C[2], 81.f), "SPAN", VideoMixer::SPAN_PARAM);
+		addJack(module, Vec(C[3], 81.f), "SPAN CV", VideoMixer::SPAN_INPUT);
+		addChild(createPanelRule(zoneLeft, C[3] + 4.f, 90.f));
+		addPush(module, Vec(C[0], 101.f), "NEXT", VideoMixer::NEXT_PARAM, VideoMixer::NEXT_LIGHT);
+		addJack(module, Vec(C[1], 101.f), "TRIG", VideoMixer::NEXT_INPUT);
+		addJack(module, Vec(C[2], 101.f), "NEXT CV", VideoMixer::NEXT_CV_INPUT);
+		addJack(module, Vec(C[3], 101.f), "SHIFT", VideoMixer::SHIFT_INPUT);
 
 		// Transition. The MODE lever is a three-position switch: WIPE up, ADD in the middle, DISSOLVE down.
 		const Vec mode(C[4], 31.f);
@@ -355,6 +390,8 @@ struct VideoMixerWidget : ModuleWidget {
 		for (int j = 0; j < 3; ++j)
 			addChild(createPanelTextAt(Vec(mode.x + TOGGLE_WORD_DX_MM, mode.y + (j - 1) * LINE_PITCH_MM), modeWords[j], NOTE_MM, NVG_ALIGN_LEFT));
 		addParam(createParamCentered<CKSSThree>(mm2px(mode), module, VideoMixer::MODE_PARAM));
+		// ALL: a lit latch under the MODE switch, left of the FADER label and above the CV jack.
+		addLatch(module, Vec(C[4], 44.5f), "ALL", VideoMixer::ALL_PARAM, VideoMixer::ALL_LIGHT);
 		addJack(module, Vec(C[6], 31.f), "PATTERN", VideoMixer::PATTERN_INPUT);
 		addKnob(module, Vec(C[7], 31.f), "SOFT", VideoMixer::SOFT_PARAM);
 
@@ -388,13 +425,24 @@ struct VideoMixerWidget : ModuleWidget {
 		addJack(module, Vec(C[9], 96.f), "CV", VideoMixer::BLACK_INPUT);
 
 		// Output: one live gate for each picture, the signal light, and the bus.
-		addZoneTitle(zoneLeft, W - 4.f, 105.f, "OUTPUT");
+		addZoneTitle(zoneLeft, W - 4.f, 108.f, "OUTPUT");
 		for (int i = 0; i < kVideoMixerInputs; ++i)
-			addPlatedOutput<PJ301MPort>(this, Vec(C[i], 118.f), "LIVE", module, VideoMixer::LIVE_OUTPUT + i, 10.4f);
-		const Vec sig(C[9], 118.f);
+			addPlatedOutput<PJ301MPort>(this, Vec(C[i], 120.f), "LIVE", module, VideoMixer::LIVE_OUTPUT + i, 10.4f);
+		const Vec sig(C[9], 120.f);
 		addJackLabel(this, sig, "SIG", 1.5f);
 		addChild(createLightCentered<MediumLight<GreenLight>>(mm2px(sig), module, VideoMixer::SIGNAL_LIGHT));
-		addPlatedOutput<PJ301MPort>(this, Vec(C[10], 118.f), "BUS", module, VideoMixer::VIDEO_BUS_OUTPUT);
+		addPlatedOutput<PJ301MPort>(this, Vec(C[10], 120.f), "BUS", module, VideoMixer::VIDEO_BUS_OUTPUT);
+	}
+
+	void appendContextMenu(ui::Menu* menu) override {
+		VideoMixer* mixer = dynamic_cast<VideoMixer*>(module);
+		if (!mixer) return;
+		menu->addChild(new MenuSeparator);
+		menu->addChild(createCheckMenuItem("ALL mode averages instead of adds", "", [=]() {
+			return mixer->allAverages;
+		}, [=]() {
+			mixer->allAverages = !mixer->allAverages;
+		}));
 	}
 };
 

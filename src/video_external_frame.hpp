@@ -20,3 +20,5 @@ void videoExternalFramePublish(int frameId, const unsigned char* rgba, int width
 // Copies the latest frame into frame, reusing its capacity. False when no frame is held.
 bool videoExternalFrameRead(int frameId, ExternalVideoFrame& frame);
 void videoExternalFrameClear(int frameId);
+// The size of the latest frame, without copying it. False when no frame is held.
+bool videoExternalFrameSize(int frameId, int& width, int& height);

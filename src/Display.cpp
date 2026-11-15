@@ -5,7 +5,7 @@
 #include "display_select.hpp"
 #include "panel_style.hpp"
 #include "video_bus.hpp"
-#include "video_graph_renderer.hpp"
+#include "render_service.hpp"
 
 #include <osdialog.h>
 
@@ -695,16 +695,37 @@ struct DisplayBezelWidget : Widget {
 
 struct DisplayFrameWidget : TransparentWidget {
 	Display* module = nullptr;
-	std::unique_ptr<VideoGraphRenderer> renderer;
 	int nvgImage = 0;
 	int imageWidth = 0;
 	int imageHeight = 0;
 
-	DisplayFrameWidget() {
-		renderer = std::make_unique<VideoGraphRenderer>();
+	DisplayFrameWidget() = default;
+	~DisplayFrameWidget() override {
+		renderService().forget(this);
 	}
 
-	~DisplayFrameWidget() override = default;
+	// Runs every UI frame from the module widget's step(), drawn or not. Registers the bus with the render service,
+	// which draws it when no draw() does, and passes each new picture to SHOT and REC. So SHOT and REC work with the
+	// Display scrolled out of view. With the plugin setting "Keep video running when hidden" off, nothing happens
+	// here and draw() feeds SHOT and REC as before.
+	void serviceStep() {
+		if (!module) {
+			return;
+		}
+		int width = 0;
+		int height = 0;
+		renderSize(width, height);
+		const RenderService::Taken taken = renderService().touch(this, module->snapshotBusId(), width, height);
+		if (!taken.fresh) {
+			return;
+		}
+		if (taken.signal && taken.pixels->size() == static_cast<size_t>(width) * static_cast<size_t>(height) * 4u) {
+			module->onFrame(taken.pixels->data(), width, height);
+		}
+		else if (!taken.signal) {
+			module->onNoSignal();
+		}
+	}
 
 	// Device pixels per Rack pixel: zoom times the window's pixel ratio (the larger of the two, so a
 	// HiDPI display is not counted twice).
@@ -750,9 +771,27 @@ struct DisplayFrameWidget : TransparentWidget {
 		int width = 0;
 		int height = 0;
 		renderSize(width, height);
-		const std::vector<unsigned char>& rgba = renderer->renderBus(module->snapshotBusId(), width, height);
-		if (!renderer->hasSignal()) {
-			module->onNoSignal();
+		const RenderService::Result picture = renderService().frame(this, module->snapshotBusId(), width, height);
+		const std::vector<unsigned char>& rgba = *picture.pixels;
+		// With "Keep video running when hidden" on, or with "Render video on its own thread" on, serviceStep() already
+		// passed this picture to SHOT and REC.
+		const bool drawFeeds = !renderService().feedsFromStep();
+		if (picture.pending) {
+			// Render thread, first request for this bus and size: its picture is not finished yet. Draw the last
+			// picture if there is one at this size, otherwise the dark screen, and no label: this is not NO VIDEO.
+			if (nvgImage && width == imageWidth && height == imageHeight) {
+				NVGpaint paint = nvgImagePattern(args.vg, 0.f, 0.f, box.size.x, box.size.y, 0.f, nvgImage, 1.f);
+				picturePath(args);
+				nvgFillPaint(args.vg, paint);
+				nvgFill(args.vg);
+			}
+			drawFrame(args);
+			return;
+		}
+		if (!picture.signal) {
+			if (drawFeeds) {
+				module->onNoSignal();
+			}
 			drawLabel(args, "NO VIDEO");
 			drawFrame(args);
 			return;
@@ -760,9 +799,11 @@ struct DisplayFrameWidget : TransparentWidget {
 
 		if (!rgba.empty() && rgba.size() == static_cast<size_t>(width) * static_cast<size_t>(height) * 4u) {
 			// The SHOT and REC buttons take their pictures here, from the renderer's buffer. Anything NanoVG
-			// draws afterwards (labels, the REC badge, the frame stroke) is not in them. The renderer keeps
-			// state between calls, so it is called once per draw and never from anywhere else.
-			module->onFrame(rgba.data(), width, height);
+			// draws afterwards (labels, the REC badge, the frame stroke) is not in them. The picture comes from the
+			// render service, which draws a bus once per UI frame however many consumers ask for it.
+			if (drawFeeds) {
+				module->onFrame(rgba.data(), width, height);
+			}
 			if (!nvgImage || width != imageWidth || height != imageHeight) {
 				if (nvgImage) {
 					nvgDeleteImage(args.vg, nvgImage);
@@ -771,7 +812,8 @@ struct DisplayFrameWidget : TransparentWidget {
 				imageWidth = width;
 				imageHeight = height;
 			}
-			else {
+			else if (picture.fresh) {
+				// Thread mode: a picture this widget has already uploaded is not uploaded again.
 				nvgUpdateImage(args.vg, nvgImage, rgba.data());
 			}
 		}
@@ -784,7 +826,7 @@ struct DisplayFrameWidget : TransparentWidget {
 		}
 
 		// The bus graph loops back on itself (or is too deep). The last good frame is shown.
-		if (renderer->hasCycle()) {
+		if (picture.cycle) {
 			drawLabel(args, "CYCLE");
 		}
 		drawFrame(args);
@@ -1087,6 +1129,9 @@ struct DisplayWidget : ModuleWidget {
 		if (displayModule) {
 			// Runs for every Display every UI frame, drawn or not: button presses, worker results, lights.
 			displayModule->uiTick();
+			if (screen) {
+				screen->serviceStep();
+			}
 			if (displayModule->panelHp != hp) {
 				applyPanelHp(displayModule->panelHp);
 			}
@@ -1122,6 +1167,23 @@ struct DisplayWidget : ModuleWidget {
 				}
 			}));
 		}
+		// A plugin-wide setting, saved with Rack's settings (plugin.cpp), not with the patch. On: the picture, its
+		// trails, Video Probe's CV and SHOT and REC keep running when no Display is drawn (scrolled away).
+		menu->addChild(createCheckMenuItem("Keep video running when hidden", "",
+			[]() { return renderService().hiddenRendering(); },
+			[]() { renderService().setHiddenRendering(!renderService().hiddenRendering()); }));
+		// Also plugin-wide, also saved with Rack's settings. On: the pictures are drawn on a thread of their own at a
+		// steady 60 a second, so a slow graph does not stall Rack's interface and a slow interface does not stall the
+		// video. Off (the default): they are drawn on Rack's interface thread.
+		menu->addChild(createCheckMenuItem("Render video on its own thread", "",
+			[]() { return renderService().threadMode(); },
+			[]() { renderService().setThreadMode(!renderService().threadMode()); }));
+		// Also plugin-wide and saved with Rack's settings. On: the converted modules pass each other float pictures and
+		// the picture is rounded to 8 bits only where it leaves the graph, so gains, gradients and loops keep their
+		// fine steps. Off (the default): every picture between modules is 8-bit, as before.
+		menu->addChild(createCheckMenuItem("Full precision between modules", "",
+			[]() { return renderService().fullPrecision(); },
+			[]() { renderService().setFullPrecision(!renderService().fullPrecision()); }));
 		menu->addChild(createSubmenuItem("Panel width", std::to_string(hp) + " HP", [this](ui::Menu* sub) {
 			for (int choice : kHpChoices) {
 				sub->addChild(createCheckMenuItem(std::to_string(choice) + " HP", "",

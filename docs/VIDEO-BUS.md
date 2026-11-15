@@ -124,14 +124,16 @@ scales your picture to the size each sink renders.
 | `readFrame` | The UI thread (as Display does, once per draw) or a worker thread. Not the audio thread. Calls are serialised inside VRU, so a second caller waits. |
 
 `readFrame` is a full CPU render of the whole chain behind that bus at the size you ask for. Ask for the
-size you will show, not more. The API keeps its own renderer, so stateful modules (feedback, beam
-trails) keep a trail for API readers that is separate from Display's. A read of a bus nobody else is
-drawing still renders.
+size you will show, not more. The read goes through VRU's shared render service. If a Display drew the
+same size in the same UI frame, you get that picture and nothing advances. Otherwise your read is its
+own step: feedback and beam trails advance once per call. A read of a bus nobody else is drawing still
+renders.
 
 ## Versioning, and what VRU promises to keep stable
 
-- `vruBusGetApi(1)` returns the version 1 table. Any other number returns null, so a client built for a
-  newer version fails cleanly against an older VRU (and `vruBusConnect()` returns null).
+- `vruBusGetApi(1)` returns the version 1 table, exactly as it always did. `vruBusGetApi(2)` returns the version 2
+  table (see "Version 2" below). Any other number returns null, so a client built for a newer version fails
+  cleanly against an older VRU (and `vruBusConnect()` returns null).
 - The table starts with `uint32_t version; uint32_t structSize;`. Future versions only append function
   pointers and raise `structSize`. A version 1 client keeps working against a newer VRU as long as VRU
   still serves version 1, which VRU intends to do for as long as 2.x patches load. Check `structSize`
@@ -151,6 +153,103 @@ What VRU does not promise:
   patch still works, but your plugin must not store an id.
 - A version field on the cable. There is none. The version lives in the C interface.
 - Anything on the private list below.
+
+## Version 2
+
+Version 2 is version 1 plus new entries at the end of the table. Nothing in version 1 was removed, reordered or
+changed. A client built against the old header keeps working against a VRU that serves version 2, and
+`vruBusGetApi(1)` still returns the same table, with `version` 1 and the same `structSize`.
+
+### What is added
+
+```c
+typedef struct VruBusApiV2 {
+    VruBusApiV1 v1;     // the version 1 table, same layout; its version field says 2 here
+    int (*readFrameF32)(int busId, int width, int height, float* rgba, size_t strideFloats);
+    int (*readFrameEx)(int busId, int width, int height, uint8_t* rgba, size_t strideBytes, VruBusReadInfo* info);
+    int (*readFrameF32Ex)(int busId, int width, int height, float* rgba, size_t strideFloats, VruBusReadInfo* info);
+    int (*getNativeSize)(int busId, VruBusNativeSize* out);
+} VruBusApiV2;
+```
+
+- **Float read.** `readFrameF32` reads a bus at the size you ask for into float RGBA: 4 floats per pixel, top
+  row first, `strideFloats` floats between rows (at least `width * 4`; this is a count of floats, not bytes). The
+  unit is 0 to 1. Alpha is on the same scale. Sizes, bus ids, status codes and the rule that an error leaves your
+  buffer untouched are the same as for `readFrame`. What a value is depends on the plugin setting "Full precision
+  between modules":
+  - **Setting off (the default).** Each value is exactly the 8-bit level divided by 255, so 0 is 0.0 and 255 is 1.0,
+    and a float read of a picture is the byte read of that picture divided by 255, value for value. 256 levels per
+    channel.
+  - **Setting on.** Each value is the picture before it was rounded to 8 bits, divided by 255, so it can fall between
+    two levels. The byte read of the same picture is the float read times 255, rounded half up. Example: Ramps into a
+    Color Lab at brightness 0.25 and then a Color Lab at brightness 2.0, read 2048 pixels wide: the byte read has
+    128 distinct levels and the float read about 2048 distinct values (with the setting off, the byte read has 63).
+  - **When the full precision is there.** VRU makes the float picture only for a bus and size that a float read has
+    asked for in the last 120 service ticks (and only with the setting on), so patches that never read floats pay
+    nothing. The first float read after a cold start can therefore be byte / 255: it is full precision only when it is
+    the read that draws the picture, which in the UI-driven mode is true when no Display, Syphon Out or Video Probe
+    drew that bus and size earlier in the same tick; with "Render video on its own thread" on it is not, because the
+    thread had already published its picture. The next tick's read is at full precision, and so are all later ones
+    while you keep reading. If you stop reading for 120 ticks the float pictures stop and their memory is freed. A
+    float read of anything that is 8-bit anyway (a video file, Syphon In, a picture you published) is byte / 255 in
+    both settings.
+  - **The 8-bit reads do not change.** `readFrame` and `readFrameEx`, and what Display, Syphon Out and Video Probe get,
+    are the rounded picture in both settings.
+- **The tick.** `readFrameEx` and `readFrameF32Ex` do the same reads and also report a tick through a
+  `VruBusReadInfo`. Set `structSize` to `sizeof(VruBusReadInfo)` and `sinceTick` to the tick your last read of the same
+  bus at the same size returned (0 for none). On return `tick` is the render service's tick serial and `isNew` is
+  1 when that is later than `sinceTick`. When nothing is new, VRU draws nothing and copies nothing, leaves your
+  buffer alone and returns `VRU_BUS_UNCHANGED` (2), so you can skip your own work. Set the flag
+  `VRU_BUS_READ_COPY_ALWAYS` to get the picture anyway. `VRU_BUS_UNCHANGED` is not an error: test `status < 0` for
+  failure.
+- **What the tick means.** It is an opaque 64-bit counter that never goes down while VRU stays loaded. It has no
+  promised rate and it is not a clock or a frame count. It tells you only that two reads were in the same service
+  tick or in different ones. A read that finds the bus gone returns `VRU_BUS_ERR_NO_SIGNAL`, not
+  `VRU_BUS_UNCHANGED`.
+- **Native size.** `getNativeSize` gives the width and height of the picture a source module publishes itself:
+  Video Player, Syphon In, and pictures you or another plugin publish with `publishFrame`. It returns
+  `VRU_BUS_OK` and fills in `VruBusNativeSize`. A generated or processed picture (Video Oscillator, Ramps, Shapes,
+  Scope Trace, any module that takes a bus in, even one fed by a source) has no native size: the call returns
+  `VRU_BUS_NO_NATIVE_SIZE` (1) with width and height 0. An empty bus, or a source that has published nothing yet,
+  returns `VRU_BUS_ERR_NO_SIGNAL`.
+
+Every new struct starts with `structSize` so that it can grow. VRU rejects a struct whose `structSize` is smaller than
+the one it was built with.
+
+### How to connect, and fall back to version 1
+
+`vru_bus_client.hpp` adds `vruBusConnectBest()`. It asks for version 2 and, when the installed VRU is older and
+refuses, takes version 1. It returns a small plain struct, `VruBusClient`, with the two table pointers and
+helpers that report what is there. It does not throw and does not allocate.
+
+```cpp
+VruBusClient vru = vruBusConnectBest();
+if (vru.connected()) {                     // v1 is set for any VRU
+    if (vru.hasFloatRead()) vru.v2->readFrameF32(id, w, h, floats, size_t(w) * 4);
+    else                    vru.v1->readFrame(id, w, h, bytes, size_t(w) * 4);
+}
+```
+
+`vruBusConnect()` is unchanged and still returns the version 1 table. `docs/vru_bus_v2_example.hpp` is a complete
+small client that connects, falls back and reads a float frame; `tests/vru_bus_client_test.cpp` builds and runs it on
+every `make test`, against the real table and against a stand-in that only knows version 1.
+
+### Threads
+
+The new reads follow the rule for `readFrame`: one thread at a time, from the UI thread or a worker thread of your
+own. They take the same lock inside VRU. Never call them from the audio thread, which means never from a module's
+`process()`.
+
+### Not promised
+
+Version 2 does not add, and VRU does not promise:
+
+- signal endpoints (CV, audio or gate from a picture, or into one);
+- typed resources of any kind, such as buffers other than a picture;
+- GPU handles or textures;
+- exact video timing, or any frame rate, and nothing about how often the tick rises;
+- sub-frame timestamps, or any link between a picture and audio time;
+- reads from an audio thread. Reads must not be made from `process()`.
 
 ## What stays private
 
@@ -282,7 +381,7 @@ Node types and how they connect:
 | Kind | Types | Source slot |
 | --- | --- | --- |
 | Generator | Generator (Video Oscillator), Ramps, Shapes, ScopeTrace, ExternalFrame (Syphon In, Video Player, outside sources) | none |
-| One-input processor | DeflectionYoke, LineField, ColorLab, Keyer, WaveShaper, FreezeFrame, ScanProcessor, Colorizer, Feedback, Rotator, Focus | `sourceBusId` |
+| One-input processor | DeflectionYoke, LineField, ColorLab, Keyer, WaveShaper, FreezeFrame, ScanProcessor, Colorizer, Feedback, Rotator, Focus, FrameDelay | `sourceBusId` (FrameDelay is a leaf of the render walk: it does not render its source, so a loop through it is not a cycle) |
 | Multi-input | BusMixer (A in `sourceBusId`; B and matte in its params), VideoMixer (seven buses in its params) | see params |
 
 ### Sketches against the real internals

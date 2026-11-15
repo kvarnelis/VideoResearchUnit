@@ -1,7 +1,7 @@
 {
   "slug": "VideoResearchUnit",
   "name": "Video Research Unit",
-  "version": "2.1.0",
+  "version": "2.3.0",
   "license": "GPL-3.0-or-later",
   "brand": "Video Research Unit",
   "author": "Kazys Varnelis",
@@ -222,6 +222,35 @@
       "slug": "Focus",
       "name": "VRU–24 Focus",
       "description": "Softens, smears, sharpens and misconverges a picture like an old tube: focus, smear, sharp, converge and mix, each with CV",
+      "tags": [
+        "Visual",
+        "Effect"
+      ]
+    },
+    {
+      "slug": "VectorOsc",
+      "name": "VRU–25 Vector Osc",
+      "description": "A pair of multi-voice oscillators for Scope Trace's X and Y inputs: frequency ratio, phase, detuned voices and a wave shape from sine to square, with a Z brightness output",
+      "tags": [
+        "Oscillator",
+        "Visual",
+        "Utility"
+      ]
+    },
+    {
+      "slug": "VideoProbe",
+      "name": "VRU–26 Video Probe",
+      "description": "Turns a picture into voltages: a read point you move with X and Y gives brightness and colour as CV or audio, plus average brightness, motion and a gate",
+      "tags": [
+        "Visual",
+        "Utility",
+        "Sampler"
+      ]
+    },
+    {
+      "slug": "FrameDelay",
+      "name": "VRU–27 Frame Delay",
+      "description": "Shows its input picture a set number of frames later, so a patch can loop a picture back on itself: trails, echoes and spiralling feedback through any chain of modules",
       "tags": [
         "Visual",
         "Effect"

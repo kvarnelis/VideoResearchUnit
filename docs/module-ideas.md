@@ -137,6 +137,8 @@ Size. S for Composite In, S for Scan Sync.
 
 ### 5. Light Meter
 
+Built, in a reduced form, as VRU–26 Video Probe (2026-11-13): a read point moved by X and Y with LUMA, R, G and B at every audio sample, a SIZE patch average, AVG, MOTION and GATE (docs/architecture.md, "Video Probe"). Not built: the brightness centroid as X and Y, and the scene-cut gate.
+
 What it does. The reverse bridge: a module that reads a bus and emits CV.
 Average brightness, red, green and blue means, a probe at a CV-positioned
 point or region, a motion amount from frame difference, the brightness
@@ -454,6 +456,9 @@ Color.
   colored input is plain grey.
 - SHIFT is one CV input that moves all four hues round the wheel together.
   10 V is once round, as on the Rotator's ANGLE.
+- Built after the first release: COLOR has a third state, Gradient. The input's
+  brightness runs through black, its hue, a hue one SPAN further round, and
+  white, using the Colorizer's gradient code. SPAN is one shared knob with CV.
 
 Why the color belongs inside. Ramps and Shapes draw in grey, and so does
 every matte. Colored at the mixer, four grey pictures make one picture in
@@ -711,6 +716,12 @@ needs it.
 
 Size. M. The pair with LOCK only at its two ends is a smaller first step.
 The hold in between, and the scan-time inputs, can follow.
+
+Built. Step one (the pair, LOCK as a switch) is built. The follow-on is built too, on branch
+`feat/video-osc-hold`: LOCK is a 0 to 1 hold with a CV jack for each oscillator, and IN A, IN B and the BEND
+CV are read at each pixel's scan time through the module's own signal ring. The hold's feel (the pull is
+`LOCK^2` per line) still has to be tuned by eye in Rack. The panel stayed 20 HP. See docs/architecture.md,
+"Bars and Rows".
 
 ## Naming
 

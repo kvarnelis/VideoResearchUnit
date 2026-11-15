@@ -2,8 +2,8 @@
 
 ## Names
 
-The plugin is Video Research Unit (VRU), version 2.1.0, with 24 modules. It was called RasterLab before
-2.8.0. Every module has a catalogue number, VRU–01 to VRU–24, and Rack's module browser shows
+The plugin is Video Research Unit (VRU), version 2.3.0, with 27 modules (VRU–01 to VRU–27). Version 2.3.0 adds these. Video Probe (VRU–26) turns a picture into CV, the first module to do that. The Scan Processor has a LIFT IN bus input. The Octoscillator has five presets. Frame Delay (VRU–27) holds a picture for a number of frames, and a picture can loop back through it. A picture that feeds several modules is drawn once per pass instead of once per module. Display, Syphon Out and Video Probe take their pictures from one shared render service, with two Display menu settings: "Keep video running when hidden" (on by default) and "Render video on its own thread" (off by default). Feedback has a "Fade trails fully to black" setting. The Display menu setting "Full precision between modules" (off by default) passes pictures between modules as floating point and rounds to 8 bits once, where a picture leaves the graph. Three modules take a picture as a modulation input: FM IN on the Video Oscillator, and MOD IN on Ramps, Keyer and Color Lab. The public bus API has version 2, with a float read, a tick, and the native size of a source. The offline tool vru-render-patch draws what a Display in a patch would show, without Rack. It was called RasterLab before
+2.8.0. Every module has a catalogue number, VRU–01 to VRU–27, and Rack's module browser shows
 `VRU–01 Deflection Yoke`. The table is in `AGENTS.md`. The plugin slug is `VideoResearchUnit`. Version 2.1.0 renamed two module slugs, Wobbulator to DeflectionYoke and RuttEtra to ScanProcessor; `scripts/migrate-slug.py` migrates patches saved with 2.0.0.
 
 This document names modules by their Rack names. The code names are `DeflectionYoke` for VRU–01 Deflection
@@ -254,9 +254,198 @@ This section describes the bus as it is after the stage 1 correctness pass. Code
   never overwrites a frame that a parent still needs.
 - Results are swapped, not copied. The only copies are the generator and
   external frame copies, plus the freeze read.
-- A generator reached twice in one pass (for example, A and B both from one
-  Video Oscillator) is rendered once per pass and reused. Its feedback state therefore
-  advances once per frame.
+- Shared taps: any bus reached twice in one pass (A and B of a Bus Mixer from
+  one source, a source that feeds a Keyer and also the Video Mixer the Keyer
+  feeds) is rendered once per pass, by bus id, and later taps copy that frame.
+  Before this, only generators and the beam nodes were reused, so each extra tap
+  re-rendered everything upstream and a diamond N levels deep cost 2^N renders.
+  The memo frames keep their capacity between passes. A reused bus remembers how
+  deep its subtree reaches, so the 16-level limit counts exactly as it did.
+  Stateful nodes advance once per pass: Feedback, Freeze Frame, Scope Trace and
+  the CRT beam nodes each ran once already (frame counter, capture counter,
+  per-pass beam guard), and now their whole subtree does too. Rotator, Focus and
+  the Video Mixer keep no renderer state. `busRenderCount()` is the debug
+  counter that tests/bus_test.cpp reads. `make bench` runs
+  tests/shared_taps_bench.cpp, which times a diamond graph. Each renderer has its
+  own memo, generator engines and beam trails. Display, Syphon Out, Video Probe
+  and the public API no longer own one; they ask the render service (next item).
+- Several roots in one pass: `beginPass()` starts a pass and `renderBusInPass(bus,
+  w, h, out)` renders one root into `out`. Every root of the pass is kept as a tap
+  too, so a later root that reads it copies it. `renderBus()` is `beginPass()` plus
+  `renderBusInPass()` and behaves as before.
+- Render service (`src/render_service.{hpp,cpp}`, `renderService()`): one
+  renderer per picture size, made on the first request for that size. A tick is
+  one UI frame. The first request for a bus at a size in a tick renders it in the
+  size's pass; a repeat request returns the same buffer with no render; another
+  bus joins the same pass, so generators, Feedback, Freeze Frame, Scope Trace and
+  the beam trails advance once per tick. Pictures are copied out of the renderer's
+  scratch into shared, immutable buffers (see "Ownership of pictures" below). A cycle, or a read the writer kept interrupting, holds
+  that bus's last good picture. A lone Display, Syphon Out or Video Probe gets the
+  same frames, pass for pass, as the private renderer gave it
+  (`testRenderServiceGate`). The tick source is one function pointer set in
+  `init()` (`uiFrameTick` in `src/plugin.cpp`, Rack's `getFrameTime()`); with none
+  set every request is a tick of its own. A size unused for 120 ticks is freed,
+  and no more than 6 sizes are kept (the least recently used go first; sizes used
+  in the current tick stay). A patch usually holds three: the Display height, the
+  Syphon Out size and the Probe's 320 x 240. One mutex covers every call.
+  The public API's `readFrame` calls `readCopy()`, which draws and copies the
+  picture into the caller's buffer while it holds the mutex, so a foreign thread
+  is safe and the valid-until-next-tick rule does not reach it. The tick rule for
+  an API read: if a UI consumer already asked for that size in the current tick,
+  the read gets that tick's shared picture and advances nothing; otherwise it is
+  a tick of its own for that size, a new pass, so trails and generators advance
+  once per call, as they did on the API's old private renderer. An API read
+  never evicts a size a UI consumer used in this or the last tick, and a client
+  that sweeps sizes recycles its own sizes inside the cap of 6. An API size
+  counts as used for the idle rule. Ownership of pictures: a finished picture is a
+  `shared_ptr<const Frame>`. In both modes `frame()` and `touch()` return it in
+  `Result::hold` and `Taken::hold`, and `pixels` points into it. The service
+  never writes into a buffer that anyone holds. Each render goes into a free
+  buffer from the size's pool, then the slot's pointer is swapped to it. A buffer
+  is on the pool's free list if and only if no one holds it. The service never
+  reads a `use_count()` to decide that. Each picture is a `shared_ptr` with a
+  deleter that puts the buffer back on the free list, under the pool's own mutex,
+  when the last holder lets go. Taking a buffer and returning one use that same
+  mutex, so a holder's last read of a buffer is ordered before the next render's
+  first write into it, and ThreadSanitizer sees that order. The float `precise`
+  plane belongs to its buffer and follows the same rule. The pool is shared state
+  (`RenderService::FramePool`). Every picture keeps it alive through its deleter
+  and through the allocator of its `shared_ptr` control block, so a picture may be
+  released after its size is evicted, after `clear()` or after the service itself
+  is destroyed, and the last one out frees the pool. At most four free buffers are
+  kept; a buffer returned beyond that is deleted. The control blocks are pooled
+  with the buffers, so a steady state allocates nothing. A picture stays valid and
+  unchanged for as long as the consumer keeps
+  its `Result` or `Taken`, across later ticks, across an API read at the same
+  size, across the size being evicted and across `clear()`. A consumer reads
+  `pixels` only while it holds that object (Display's `draw()` and
+  `serviceStep()`, Syphon Out's `drawFramebuffer()`, Video Probe's `draw()` and
+  `step()`, and `vru-render-patch` all do). Every renderer, its scratch and memo,
+  the tick bookkeeping and the size table are touched only under `mutex`, so an
+  API read on another thread is a whole pass or nothing to the UI thread.
+  Tests: `tests/render_pool_stress_test.cpp` (the pool under load, and lifetimes),
+  `tests/vru_bus_api_golden_test.cpp`
+  (pinned hashes of what `readFrame` returns), `tests/vru_bus_api_service_test.cpp`
+  (the tick rule, sizes, a two-thread stress, and the held-picture tests: a picture
+  held across API ticks, across a touch() hidden render and across eviction of its
+  size stays unchanged, and a UI thread that hashes every byte it holds twice sees
+  no change while another thread hammers `readCopy()`, in both modes; `make tsan`
+  runs it under ThreadSanitizer).
+- Keeping pictures running when nothing is drawn (stage 3). Rack calls
+  `draw()` only for a widget that is on screen, but `step()` for every widget
+  every UI frame (`Widget.hpp`: `visible` "disables rendering but allows
+  stepping"; `step()` "advances the module by one frame"; Display already
+  relied on this for its buttons). A consumer registers from `step()` with
+  `touch(owner, bus, w, h)`: Display (`DisplayFrameWidget::serviceStep`, called
+  from the module widget's `step()`), Video Probe (its frame widget's `step()`)
+  and Syphon Out (its render widget's `step()`, while publishing is on). A
+  registration lasts one tick and is renewed by the next `step()`; a consumer
+  that is deleted stops renewing and also calls `forget()` in its destructor.
+  The first service call of a new tick closes the old one, in
+  `advanceTick()` (`closeTick()`): every registered bus and size that no
+  `frame()` call drew in that tick is rendered in the size's pass of that tick,
+  after the drawn roots, so a drawn consumer gets the same frames as before
+  and trails, generators and Feedback advance once per tick whether or not
+  anything is drawn. `draw()` then only fetches the tick's picture. The hidden
+  render of tick N runs as tick N + 1 begins, so it sees the audio side a few
+  milliseconds later than a draw in tick N would. `touch()` also returns the
+  newest picture of the registered bus that the consumer has not taken (a stamp
+  per render says which), once: Video Probe analyses it and publishes its frame
+  to the audio thread from there, and Display passes it to SHOT and REC, so
+  both work with the module scrolled out of view. Syphon Out only registers; its
+  GL upload and Syphon publish stay in `drawFramebuffer()`, so nothing is
+  published while it is hidden. Cost: when no `frame()` call was made in the
+  tick that closes, hidden renders run at most 30 times a second
+  (`kHiddenMaxHz`, measured with the steady clock, or a test's time source;
+  a small slack keeps a 60 Hz UI at every other tick). When any consumer was
+  drawn, every registered bus renders every tick. The switch is the plugin-wide
+  setting "Keep video running when hidden" in the Display's right-click menu,
+  default on, stored in Rack's `settings.json` under the plugin's settings as
+  `keepRunningHidden` (`settingsToJson` in `src/plugin.cpp`); off, `touch()`
+  does nothing, Display and Probe feed from `draw()`, and the service behaves as
+  in stage 2. If Rack's window is minimised and Rack stops calling `step()`, the
+  plugin cannot render either: the tick is Rack's frame time, which only moves
+  when Rack runs its frame. The SDK headers do not say what Rack does then, and
+  it has not been checked. Tests in `tests/bus_test.cpp`:
+  `testHiddenConsumerCharacterization` (stage 2 behaviour, the jump),
+  `testHiddenKeepsRunning` (hash-equal to a consumer drawn on every tick; setting
+  off equals the characterization), `testHiddenDrawnConsumerUnchanged`,
+  `testHiddenCap`, `testHiddenProbeAndDisplayFeed`.
+- Render thread (stage 4). The plugin-wide setting "Render video on its own
+  thread" in the Display's right-click menu, stored in the plugin's settings as
+  `renderOnOwnThread`, default off, makes the service render on a thread it owns.
+  With it off, everything above is unchanged. The thread wakes at `kRenderHz`
+  (60 a second) on a steady clock; the next wake is `start + n / rate`, not the
+  end of the last tick plus a sleep, and a thread that has fallen more than four
+  periods behind restarts its schedule. Its QoS is user-initiated, never
+  real-time. One tick is `runTick()`: the live registrations are collected, each
+  distinct bus and size is rendered once, in one pass per size, by the same
+  `renderEntry()` the UI-driven path uses, and each finished picture is
+  published in a per-(bus, size) slot by sharing the size's buffer, with no copy. `runTickForTest()` runs that same body
+  synchronously with the clock from `setTimeSource()`, which is how the tests
+  and `vru-render-patch --thread-mode` drive thread mode without a thread.
+  - Two mutexes. `mutex` covers the renderers and is held for a whole render.
+    `pubMutex` covers the registrations and the published slots and is held only
+    to look something up or swap a pointer. `frame()`, `touch()` and `readCopy()`
+    in thread mode take `pubMutex` only, so they never wait for a render. Lock
+    order is `mutex`, then `pubMutex`.
+  - Frames. A published slot holds a `shared_ptr<const Frame>`. `Result::hold` and
+    `Taken::hold` keep the picture a consumer was given alive, so it stays valid
+    while the thread publishes newer ones. The published buffer is the size's own
+    pool buffer, the same one the UI-driven mode hands out, so a steady state
+    allocates nothing.
+    `Result::fresh` is false when this consumer already has the newest picture
+    (Display and Probe then skip the image upload). `Result::pending` is true
+    until the thread has finished the first picture for a bus and size: Display
+    keeps the last picture it had at that size, or the dark screen, and draws no
+    NO VIDEO label; Syphon Out and Video Probe keep what they had.
+  - Registrations. `touch()` and `frame(owner, ...)` register for
+    `kRegistrationSeconds` (2 s) and are renewed by the next call; `frame()` and
+    `readCopy()` without an owner register a bus and size anonymously. A
+    registration that is not renewed expires, and a picture nobody is registered
+    for is dropped. SHOT, REC and Video Probe are fed from `touch()` in `step()`,
+    as in stage 3, from the newest finished picture. Video Probe's triple buffer
+    therefore still has one writer, the UI thread's `step()`; the render thread
+    never writes it, and `draw()` does not write it in thread mode.
+  - The public API. In thread mode `readCopy()` copies the newest finished
+    picture for that bus and size and never renders on the caller's thread. A
+    size nobody has registered is registered by the read, and the read waits up
+    to `kFirstPictureWaitMs` (100 ms) for the thread's first picture of it, so a
+    lone API client still gets pictures; then the registration expires after
+    2 s. In thread mode an API read no longer advances a trail once per call;
+    the thread advances it once per tick. The tests that pin "once per call"
+    run with the mode off.
+  - Start and stop. The thread starts when a consumer registers, stops itself
+    when no registration has been live for `kIdleStopSeconds` (3 s), and starts
+    again for the next consumer. `setThreadMode(false)` stops and joins it
+    before it returns, so the UI-driven path owns the renderers again; switching
+    on needs no stop. `stopThread()` is idempotent and is called by the
+    service's destructor, by an `atexit` hook and by a library destructor,
+    because Rack has no teardown callback for plugins.
+  - Lifetime. The renderer reads only plugin-global stores that live in static
+    arrays and never move or free: the bus registry (a seqlock copy), the frame
+    ring, the Freeze Frame store, the external frame store (Video Player and
+    Syphon In frames) and the signal rings. The first four are guarded by a
+    mutex per store; the signal rings are atomics. Deleting a module releases
+    its slot ids; it does not free memory the renderer reads. A render in
+    flight when a module is deleted therefore reads either the old data or the
+    cleared slot, never freed memory. Two races remain, both harmless and both
+    present before stage 4: a Feedback render can push one frame into a ring
+    slot just after its module released it (the next module to claim the slot
+    clears it with a new clear counter), and a signal ring read just after
+    `reset()` can return a window of old samples.
+  - Tests. `tests/bus_test.cpp`: `testThreadEquivalence` (ten gate graphs, other
+    sizes, and two roots with beams, generators and Feedback: thread-mode
+    frames are hash-equal to UI-mode frames, tick for tick),
+    `testThreadSemantics`, `testThreadStartStop` (200 cycles, the idle stop, the
+    60 a second pace). `tests/vru_bus_api_service_test.cpp` (`make tsan` runs it
+    under ThreadSanitizer): the render thread at full rate under a UI thread, an
+    API thread and an audio-side thread that creates and deletes module stores
+    for six seconds, with a watchdog, and 200 start and stop cycles.
+  - `vru-render-patch --thread-mode` registers each Display's bus, runs one
+    synchronous thread tick, then reads the finished pictures. Its PNGs are
+    byte-identical to the default mode's for every patch in `patches/`, because
+    the tick that renders a picture is also the tick that reads it.
 - Memory grows with the depth of the chain in use, not with the number of
   modules.
 
@@ -268,6 +457,11 @@ This section describes the bus as it is after the stage 1 correctness pass. Code
   sets `hasCycle()`. Display draws a `CYCLE` label. If there is no good frame,
   the result is empty.
 - The modules also refuse to publish a processor whose input is its own output.
+- A modulation bus (FM IN, MOD IN) is one more edge in the walk, so a loop of modulations is a cycle too: see
+  "Picture as modulation".
+- A Frame Delay is the one way through: see "Frame Delay" below. A loop that goes through
+  one is not a cycle, and the delay does not count a level. A loop with no delay is the error
+  above, exactly as before (`tests/frame_delay_test.cpp` pins both, with hashes).
 
 ### Freeze Frame
 
@@ -352,6 +546,79 @@ same stored step, with the second resampling if its size differs. Frame copy
 and feedback computation run in the renderer. The slot and counters are not
 saved in patch JSON; a loaded patch starts with empty history.
 
+The history is the 8-bit output, so a trail with gain g below 1 and no input meets round(g x n) = n at about
+n = 0.5 / (1 - g) and stops falling there: grey 10 at 0.95, 25 at 0.98, 50 at 0.99. The module option
+"Fade trails fully to black" (`FeedbackParams::fadeToBlack`, JSON key `fadeTrailsToBlack`) fixes this. With it
+on, `renderFeedbackFrame` also keeps a float32 RGBA plane (0..255 units, `FrameRingFrame::rgbaF`, written by
+`frameRingPushFloat`) in the module's ring slot. It reads the previous frame from that plane, computes the same
+expression as before without rounding the resampled or interpolated history, stores the clamped unrounded result,
+and makes its 8-bit output by the same final rule (clamp to 0..1, x 255, + 0.5, truncate). A stored level under
+1/1024 of a grey level is stored as 0, so a trail ends at exact zero and cannot become a denormal. At gains
+0.95, 0.98 and 0.99 the 8-bit picture is black after 123, 310 and 622 ticks and the float history is zero after
+245, 619 and 1243 ticks. A different-size renderer resamples the float plane (`resampleIntoF`) when it takes the
+step; one that only reads the stored step resamples the 8-bit plane, which is the output. Frame Delay and Freeze
+Frame never touch the float plane. It costs width x height x 16 bytes per module while on (4.7 MiB at 640 x 480,
+23.7 MiB at 1440 x 1080), is freed at the next store after the option is switched off, on CLEAR and when the
+module is removed. A frame stored without a float plane (the option was just switched on) is read as its 8-bit
+picture. For the first four ticks after a bright frame the on and off pictures differ by at most one level.
+
+The option is on for a new module and after Initialize. `Feedback::fromJson` turns it off before loading, and
+`dataFromJson` turns it on only when the key is true, so every patch saved before the option loads with it off and
+draws byte for byte as before. A preset or patch whose data lacks the key also turns it off; a preset cannot be
+told from a patch at that point. `vru-render-patch` reads a saved Feedback with no data object as off as well.
+
+### Frame Delay (VRU–27)
+
+One bus in, one bus out: the input as it was FRAMES ticks ago, so a patch can loop a picture back on itself.
+`FrameDelay.cpp` owns the knob (1 to 30, snapped; 10 V of CV moves it across the range, scaled by the CV AMT
+trimmer), publishes a `FrameDelayParams` node (`ringSlotId`, `frameCounter`, `clearCounter`, `frames`; node type
+`FrameDelay`, source in `sourceBusId`) and nothing else. Ids: params FRAMES 0, CV AMT 1; inputs BUS IN 0, FRAMES
+CV 1; output BUS 0; light SIG 0. 7 HP (the smallest the header fits, as the Syphon modules).
+
+- **Leaf in the walk.** In `renderNodeBody` a FrameDelay node never calls `renderNode` on its source. It reads the
+  ring (`renderFrameDelayLeaf`) and returns, so it adds no level (memo height 0), and a loop through it never meets a
+  bus that is on the stack. `onStack` and `kMaxDepth` are untouched, so a loop with no delay is a cycle as ever.
+- **The source still has to be drawn every tick.** The first time a pass reaches a delay it queues a job (bus,
+  source, params; once per pass per delay, `delayQueued`). After a root has rendered, `drawDelaySources()` works
+  through the queue: for each job it clears the ring if the clear count changed, skips the job if the ring already
+  holds this tick's picture, otherwise takes the source from the pass's memo if the pass has drawn it (a root is kept
+  as a tap for this; `renderBus` keeps its root only when a delay was met) or draws it with `renderNode` at depth 0,
+  and pushes the result. A drawn source may reach other delays, which join the queue, so the loop runs until it is
+  empty. A bus is queued once, so it ends within `kVideoBusCount` jobs. The source subtree counts its own depth from
+  0; the delay is not a level. Done once per root, it works the same for `renderBus`, `renderBusInPass` and the
+  service's passes, whichever Display, Syphon Out, Video Probe or API read started them. A source that fails to
+  draw (a zero-delay loop inside it, or too deep) stores nothing and does not change the root's own status; the
+  delay then keeps showing older pictures, or black.
+- **The clock.** The delay is counted by the same counter Feedback uses: `process()` adds `args.sampleTime` and
+  steps `frameCounter` every 1/60 s of audio time. Not the service tick (a UI frame): that one is 60 Hz only when
+  Rack draws at 60 Hz, runs at 30 Hz for hidden pictures, does not exist for the API (every read is its own tick)
+  and differs by size renderer. The audio-time count is the same number for every Display, size, API read and for
+  `vru-render-patch`, so all of them see one delayed picture and one store per tick. Its cost is that the delay is
+  in time, not in screen frames: when the screen draws slower than 60 a second, counts are skipped, and when it
+  draws faster, two draws share a count.
+- **One store per tick.** `frameRingPush` is first-writer-wins for a count, and the job is skipped when
+  `frameRingIsStored` for that count, so two consumers, two sizes, two renderers and an API read together store
+  once. The ring's capacity is set to FRAMES + 1 by the renderer.
+- **Reading.** `frameRingReadAtLeastAge(slot, count, FRAMES)` gives the newest stored picture whose count is at least
+  FRAMES ticks older than this tick's count (modulo the 2^30 wrap), so skipped counts fall back to an older picture
+  and a repeated count gives the same picture. Nothing that old: black (alpha 255), not NO VIDEO, so a loop can start
+  from nothing. Raising FRAMES while running shows black for the extra ticks; lowering it is immediate.
+- **Size.** A stored picture keeps the size of the renderer that stored it first in that tick (first writer wins,
+  as Feedback). A consumer at another size resamples it bilinearly (`resampleInto`), so a smaller Display sees the
+  larger one's picture scaled down. If two sizes alternate in storing, the pictures alternate in sharpness; this is
+  a known limit.
+- **No source.** When the input bus is not active (or is the module's own bus), the module clears its bus, as
+  Feedback: downstream shows NO VIDEO, and the ring keeps its pictures, which come back when the source does.
+  An unpatched input reads bus 1, as for every processor.
+- **Reset.** `onReset` changes `clearCounter`; the renderer clears the ring once per count. A new patch has new
+  modules and empty rings. The ring is not saved in the patch.
+- **Memory.** Up to 31 pictures of the stored size per delay (6.2 MB each at 1440 x 1080).
+- Tests: `tests/frame_delay_test.cpp` (`make test`): the pinned cycle and depth rules, a loop that evolves with each
+  tick's delay output equal to the last tick's source (checked against the same loop built from an external frame, with no delay),
+  FRAMES 1 to 30, skipped and wrapped counts, one store per tick with two consumers, two sizes and an API read,
+  two delays in series, a source reached only through the delay, depth 15 and 17, and reset. Presets: Short Echo (3),
+  Slow Trail (12), Half Second (30).
+
 ### Bus Mixer
 
 - A = input bus, B = bus B, optional MAT BUS.
@@ -369,8 +636,8 @@ lever between them, a key layer over the result, and a fade to black last. Code:
 drive it), `VideoMixerParams` in `src/video_engine.hpp`, and `renderVideoMixerNode` and
 `renderVideoMixerFrame` in `src/video_graph_renderer.cpp`. The node type is
 `VideoBusNodeType::VideoMixer` (17), published by `videoBusPublishVideoMixer(busId, params)`; its
-`sourceBusId` is 0 because all seven sources are in the params. Slug `VideoMixer`, 24 params, 17 inputs,
-5 outputs and 19 lights. With no picture patched the module publishes nothing (`videoBusClear`).
+`sourceBusId` is 0 because all seven sources are in the params. Slug `VideoMixer`, 30 params, 18 inputs,
+5 outputs and 31 lights. With no picture patched the module publishes nothing (`videoBusClear`).
 
 - Pictures read. The node reads up to seven buses (A to D, PATTERN, KEY, MATTE) and draws at most five at
   once, in five roles that own scratch slots 0 to 4: live, next, pattern, key and matte. A role is
@@ -405,6 +672,14 @@ drive it), `VideoMixerParams` in `src/video_engine.hpp`, and `renderVideoMixerNo
   - Tint. With COLOR on, an input is read as its luma times `1 + (hue - 1) * SAT`, where `hue` is
     `hsv(HUE + SHIFT, 1, 1)` per channel. Black stays black, white becomes the full hue, and at SAT 0 the
     input is plain grey. With COLOR off the picture passes in its own colors and SAT leaves it alone.
+  - Gradient (COLOR param value 2; 0 and 1 are Off and Hue as before). The input is read as its luma, and a
+    256-entry table gives each luma a color, built by `VideoGraphRenderer::gradientTable`, the same function the
+    Colorizer uses for its own table. The four stops sit at luma 0, 1/3, 2/3 and 1 with levels equal to the luma:
+    black, `HUE`, `HUE + step`, and white. The first three have saturation SAT and the white stop has none, so white
+    stays white and at SAT 0 the picture is plain grey. `step` is SPAN (`VideoMixerParams::span`, in turns) and hue
+    takes the shortest way round between stops. SPAN is one knob with CV for all four inputs: `kVideoMixerSpanTurns`
+    (0.4 turn, 144 degrees) at full travel, CV 0.1 per volt. At SPAN 0 the table is one hue, black to white. SHIFT is
+    already in `hue`. Only the live and next inputs build a table, once per frame.
   - Transition. With f the lever, `a` the live pixel and `n` the next one, f = 0 gives `a` and f = 1
     gives `n`, byte for byte in every mode. DISSOLVE is `a(1-f) + n f`. ADD is
     `min(1, a min(1, 2(1-f)) + n min(1, 2f))`, so both are at full strength at f = 0.5 and their colors
@@ -420,6 +695,15 @@ drive it), `VideoMixerParams` in `src/video_engine.hpp`, and `renderVideoMixerNo
     transition and before BLACK, where a studio mixer has its downstream keyer, so cuts and wipes go on
     underneath it.
   - Black. `v(1 - BLACK)`, last of all.
+  - ALL (mode 3, set by the ALL latch, param 29, which overrides MODE; `VideoMixerParams::mode`, with `level[4]` and `average`). Every input with a bus and a LEVEL above 0 is
+    read, and its tint is the same one the other modes use. Its colour times its LEVEL is summed over the four inputs,
+    divided by the number of patched inputs when `average` is set, and clamped to 0..1. The key and black follow as
+    before. FADER, the next picture and PATTERN are not read. The renderer reads the four inputs into slots 0 to 3 and
+    KEY and MATTE into 4 and 5 (`renderVideoMixerNode`, `renderVideoMixerFrame`). `allAverages` is the module's
+    saved menu setting, absent from older patches (off). The MODE lever is unchanged. The ALL latch sits under
+    the MODE lever at (63.5, 44.5) mm, its label above it, clear of the DISSOLVE word and the FADER label. LEVEL
+    and ALL are appended after SPAN and the LEVEL knobs sit under each COLOR button; the panel rows below moved
+    down 5 mm (SAT row 81, NEXT row 101, OUTPUT 108, outputs 120). The module is still 30 HP.
 - Wipe edge cases. With no PATTERN a wipe sweeps the whole grey range of the next picture, so a dim next
   picture shows nothing until the edge reaches its levels. With next absent and no PATTERN, `l` is 0: the
   old picture holds until f passes 1/(1 + SOFT) (about 0.87 at the default SOFT 0.15) and then fades to
@@ -429,7 +713,10 @@ drive it), `VideoMixerParams` in `src/video_engine.hpp`, and `renderVideoMixerNo
   12.7 mm apart, with 3 mm more after the fourth and the eighth, make three zones, each with a title and a
   hairline: VIDEO IN, TRANSITION and KEY LAYER, with OUTPUT along the foot. VIDEO IN: for each of A to D a
   jack with its status light beside it, a HUE knob and a COLOR latch; below a rule, SAT, SAT CV and SHIFT;
-  below another, NEXT, its trigger jack and NEXT CV. TRANSITION: MODE (WIPE up, ADD in the middle,
+  below another, NEXT, its trigger jack, NEXT CV and SHIFT. The COLOR control is a button with a three-color
+  light: each click steps Off (dark), Hue (white), Gradient (amber). The SPAN knob and SPAN CV take the empty
+  fourth column of the SAT row (SAT, SAT CV, SPAN, SPAN CV), which moved SHIFT to the empty fourth column of the
+  NEXT row. Nothing grew; no label got smaller. TRANSITION: MODE (WIPE up, ADD in the middle,
   DISSOLVE down), PATTERN and SOFT along the top; the large FADER knob in the middle with CUT and AUTO,
   each with a trigger jack under it, to its right; FADER CV, ADVANCE and TIME along the foot. KEY LAYER:
   KEY, MATTE and KEY ON; THRESH, SOFT and GATE; THRESH CV, INV and KEY HUE; the FILL switch (KEY up, FLAT
@@ -438,6 +725,8 @@ drive it), `VideoMixerParams` in `src/video_engine.hpp`, and `renderVideoMixerNo
   widgets that measure their word when they draw, so the hairline starts a fixed gap after it. No two
   labels touch; the closest pair, PATTERN and SOFT, is about 2 mm apart. That was read off the rendered
   panel (the module-browser picture), not computed from the font's advance widths as the older panels were.
+- Gradient test: `testVideoMixerGradient` in `tests/bus_test.cpp` (Off and Hue unchanged in every mode, SPAN 0 black,
+  hue and white, and greys 0 to 169 equal to a Colorizer node with the same stops).
 - Not built, from the entry's "Later, if wanted": a SUM mode with a level for each input, a BORDER along
   the wipe's edge in the key's flat color, and a hue CV for each input.
   keys.
@@ -460,7 +749,7 @@ drive it), `VideoMixerParams` in `src/video_engine.hpp`, and `renderVideoMixerNo
 ### Ramps
 
 - Two grayscale layers use horizontal, vertical, radial or angular coordinates.
-  Each has frequency (0.25..16 cycles), wrapping phase and a wave morph from
+  Each has frequency (0.25..16 cycles), wrapping phase and a wave blend from
   ramp through triangle and sine to soft square.
 - MIX selects A, the average of A and B, centred A minus B, or A times B.
 - Parameters are sampled per frame. The bus and 128 x 84 panel preview both
@@ -474,9 +763,31 @@ drive it), `VideoMixerParams` in `src/video_engine.hpp`, and `renderVideoMixerNo
   by `renderPair()`.
 - RANGE BARS counts cycles per line (`n`); ROWS counts cycles per field (`n / 262.5` per line).
   FREQ reads `0.5 x 2^(knob + 0.4 per volt)` cycles, clamped to 0.25..512; A uses FREQUENCY, B FREQ_B.
-- LOCK locked starts every BARS line at phase 0 and runs ROWS on down the field (`cpl * (line + u)`).
-  Free starts from the phase latched at the top of the field. On BARS in an odd field the start is
-  half a line later (interlace). A free oscillator at a whole number of cycles per field holds still.
+- LOCK is a hold, 0 to 1 (a knob and a CV jack per oscillator, `lockA` and `lockB` in `VideoParams`; 10 V
+  on the jack is the whole range). Fully up (1) starts every BARS line at phase 0 and runs ROWS on down the
+  field (`cpl * (line + u)`). Fully down (0) starts from the phase latched at the top of the field; on BARS
+  in an odd field the start is half a line later (interlace), and a free oscillator at a whole number of
+  cycles per field holds still. The two ends take exactly the old code paths, so they draw what the old
+  two-position switch drew (`testPairLockEnds` holds hashes taken before the change). Saved patches keep
+  their ids: an old 0 is fully free, an old 1 fully locked.
+- Between the ends `fillLineStarts()` in `renderPair()` models a hold circuit. It keeps the error from the
+  locked phase, in cycles, between -0.5 and 0.5. On BARS each line adds the oscillator's drift (cycles per
+  line, wrapped) and then keeps only `1 - LOCK^2` of the error, so the oscillator is pulled part of the way
+  back at the start of every line. A drift the pull can balance settles to a steady error and the bars stand
+  upright; one it cannot balance makes the error jump a cycle now and then, and the bars tear into slanted
+  bands and slip. On ROWS the locked phase already runs down the field, so the only error is the field's
+  starting phase, kept `1 - LOCK^2` once per field. The square is a first guess for the feel and wants
+  tuning by eye in Rack.
+- Scan-time inputs. The Video Oscillator owns a signal ring (`signalRingAllocate()` in the constructor) and
+  pushes one sample per audio sample (`VideoOscSignalChannel` in `video_engine.hpp`): channel 0 IN A (volts
+  / 5), 1 IN B (volts / 5), 2 the BEND CV in cycles (0.4 per volt), 3 spare, always 0. `process()` does no
+  allocation and takes no lock. IN A and IN B move A's or B's phase by their value in cycles of that
+  oscillator (5 V is one cycle); the BEND CV is added to the BEND knob. The renderer reads the field-length
+  window with `signalRingReadFrame(slot, window, crt::fieldSeconds(240))` and takes each pixel's value at
+  its scan time `(line + u) / line rate`. Only when IN A, IN B or BEND CV has a cable does the module set
+  `scanInputs`; otherwise the ring is never read and the picture is bit for bit what it was. The LOCK CVs
+  are read once a frame with the other controls. The BEND knob is published alone; the CV no longer rides in
+  `bend`.
 - `PairClock` (no Rack dependency) is advanced once per audio sample in `process()` in every pattern,
   in doubles. At each field boundary it latches both phases (taken back to the exact boundary) and
   flips `fieldOdd`; the latched phases and parity travel in the published `VideoParams`.
@@ -484,7 +795,8 @@ drive it), `VideoMixerParams` in `src/video_engine.hpp`, and `renderVideoMixerNo
   phase footprint, and the level fades to mid grey as the footprint passes 0.3 to 0.5 of a cycle.
 - BEND adds `bend x b` cycles to A's phase (b is B's level); BEND CV is 0.4 cycles per volt.
   MIX (A, A+B, A-B, AxB) and SPREAD (hue moves by SPREAD x B's share) give the colour.
-- Parameters were added at the end of the lists, so older patches load unchanged. Patterns 0 to 5
+- Parameters and inputs were added at the end of the lists (inputs LOCK A CV, LOCK B CV, IN A, IN B, then FM IN
+  and the FM AMT parameter), so older patches load unchanged. FM IN is described in "Picture as modulation". Patterns 0 to 5
   render the same pixels as before. Tests: `testPair*` in `tests/bus_test.cpp`.
 
 ### Shapes
@@ -501,7 +813,7 @@ drive it), `VideoMixerParams` in `src/video_engine.hpp`, and `renderVideoMixerNo
 - `src/shapes_field.hpp` is the kernel (header only, no Rack types). Polygons, stars and rounded shapes are
   exact distances, found by folding the plane into one wedge of the shape. POINT pulls each side's middle in to
   0.38 of the corner radius. A fractional SIDES value blends the distances of the two neighbouring polygons
-  linearly, so the edge morphs smoothly but is not an exact distance between whole numbers of sides.
+  linearly, so the edge blends smoothly but is not an exact distance between whole numbers of sides.
   ASPECT other than 1 stretches the shape (ROUND is applied first, then the stretch), and a stretched shape is
   measured against its outline as a polyline, with round corners as chords within about 0.1 px of the curve.
 - COPIES places the copies on a ring of radius RING that turns with TURN. REPEAT tiles the whole composition on
@@ -721,6 +1033,184 @@ Tests: `tests/vru_bus_api_test.cpp` and `tests/vru_bus_dylib_test.cpp` (both run
   each pixel would still take its stamps in the same order, but it changes how the stroke is drawn. It
   has not been made or tried.
 
+## Picture as modulation
+
+A picture can modulate a control inside another module's frame. A module takes a second video bus, and the
+brightness of that picture, at each pixel, offsets one of the module's controls at that pixel. One oscillator's
+picture can then bend another's. The modules that take one are the Video Oscillator (FM IN), Ramps, Keyer and
+Color Lab (MOD IN). Each has one bus input and one amount control (-1 to 1, 0 at the centre, default 0), both
+added at the end of their enums, so old patches load unchanged.
+
+### The helper
+
+`VideoGraphRenderer::renderModulation(ownBusId, modBusId, amount, width, height, depth, slot, luma)` in
+`src/video_graph_renderer.cpp`. It does three things.
+
+- It draws the modulation bus through `renderNode()`, at the receiving module's size and one level below it. So the
+  picture goes through the usual shared taps (it is drawn once per pass however many inputs read it), counts in the
+  16 level limit and is caught by the cycle check. A generator is no longer always a leaf: a generator with a
+  modulation bus has that bus below it in the walk.
+- It reads the brightness of every pixel (Rec. 709 weights, the Keyer's) into one shared float buffer, 0 to 1.
+  A byte picture gives `value / 255`. A float picture (with "Full precision between modules" on) is read
+  unrounded.
+- It leaves `luma` null, and the module's existing code runs untouched, when there is no modulation: no bus (0), the
+  module's own bus, an amount of zero, a bus with no picture, or a picture of the wrong size. A loop is the only
+  error (`Status::Cycle`). The modules publish a modulation bus only when its bus is active and not their own.
+
+The buffer is shared by all nodes. It is filled after the nested draw has finished and used before the node
+returns, so nothing writes it in between.
+
+### The controls
+
+| Module | Control the picture offsets | Offset at a pixel, `luma` in 0 to 1 |
+| --- | --- | --- |
+| Video Oscillator, Bars and Rows, A on BARS | oscillator A's rate along each line | rate x `1 + amount x 1.5 x (luma - 0.5)`, summed along the line |
+| Video Oscillator, Bars and Rows, A on ROWS | the same, down each column | the same sum, one pixel row at a time, per column |
+| Video Oscillator, Oscillator pattern | the carrier's phase | `amount x 4 x (luma - 0.5)` half cycles, up to one carrier cycle either way |
+| Video Oscillator, test cards | nothing | ignored |
+| Ramps | layer A's phase | `amount x 2 x (luma - 0.5)` cycles |
+| Keyer | THRESH | `amount x 2 x (luma - 0.5)`, the threshold kept between 0 and 1 |
+| Color Lab | HUE | `amount x (luma - 0.5)` turns |
+
+Video Oscillator FM is true frequency modulation. In `renderPair()` the phase of A on a line is the running sum
+of its own cycles per pixel times `1 + amount x k x (luma - 0.5)`, with `k = kPairFmDepth = 1.5`, added to the
+phase it already had. At full amount and a full range picture the rate runs from 0.25 (black) to 1.75 (white)
+times A's own. Bright parts bunch the bars together and dark parts spread them (a negative amount does the
+reverse). On ROWS the sum runs down each column, one pixel row at a time, with the line's step
+`cplA x 240 / height`. With a left to right ramp on FM IN and A on bars, the bars of a line follow the chirp
+exactly: the number of bars in a third of the line is `cycles x (1/3 -/+ amount x 1.5 / 9)`, which makes the
+right third three times the left at full amount.
+
+### Limits
+
+- No time finer than a frame. The picture is drawn once per frame, so it offsets a control from pixel to pixel
+  within the frame, and from frame to frame, but never within a scan line's time.
+- A loop of modulations needs a Frame Delay and arrives one tick late. Oscillator 1 into oscillator 2's FM IN and
+  oscillator 2 into oscillator 1's FM IN is a cycle, as any loop is. Put a Frame Delay in one leg and it
+  renders; the delayed leg shows the picture from FRAMES ticks ago.
+- The modulating picture is drawn at the receiving module's size, not its own. Pictures whose look depends on
+  size (the Scope Trace beam, for one) are drawn at that size.
+- It is 8-bit unless "Full precision between modules" is on. In bytes the brightness has 256 levels and a picture
+  made by an earlier node is cut to a byte there. With the setting on, a smooth float ramp gives a smooth bend.
+  `tests/picture_mod_test.cpp` measures this: with a ramp going from 0 to 12.5 percent brightness, the bars are
+  0.005 px from the exact bend with a float ramp and 3.6 px with a byte ramp; on a float picture the same ramp
+  rounded to 1/255 steps sits 0.046 px from the exact bend and the unrounded ramp 0.002 px.
+- The Video Oscillator's own panel preview draws without the FM IN picture.
+
+### Tests
+
+`tests/picture_mod_test.cpp`, in `make test`. The pictures of the four modules with nothing patched are pinned by
+hash, in both precision modes, from the code as it was before the change. Then: amount zero with a cable, a cable to a
+bus with no picture and the module's own bus draw exactly the old picture; a picture of exactly 0.5 is no
+modulation (engine level, bytes and floats, all three patterns); the bar crossings on a line match the
+running-sum formula to 0.035 px (amount +1 and -1), with the bar counts in the left and right thirds; rows bunch
+towards the bright end; a second oscillator's picture bends the bars and the bend repeats with its period; loops
+are cycles for all four modules and a Frame Delay in one leg renders and changes every tick; a modulation bus
+that feeds other nodes is drawn once (`busRenderCount`, and through the render service); a modulation chain
+counts in the depth limit; the measured offsets of Ramps, Keyer and Color Lab; full precision.
+
+## Precision
+
+Full precision between modules is a plugin-wide setting, off by default. It is the Display right-click item
+"Full precision between modules", stored in Rack's settings as `fullPrecision` (`src/plugin.cpp`, next to
+`keepRunningHidden`). `RenderService::setFullPrecision()` holds it; each renderer reads it once, at `beginPass()`,
+so a pass is never half one and half the other, and it may be flipped at any time, render thread included.
+`vru-render-patch --precision` turns it on.
+
+Frame formats. A picture between nodes is a `VideoFrame` (`src/video_frame.hpp`), a `std::vector<unsigned char>`
+(RGBA, 8 bits) with a float plane beside it. `VideoFrame::format` says which plane holds the picture: `U8`, the
+bytes, as every frame was before; or `F32`, four floats a pixel in 0..255 units, so an integer level is exact and a
+conversion is a cast. A frame is never both: in `F32` format the byte vector is empty. Frames are pooled (the
+renderer's scratch frames and shared-tap memo keep their capacity), so a float frame is not allocated per picture.
+Each frame carries its own format, so pools need no key and a flip never makes a node read the wrong plane.
+
+Store rules. Each node's maths is float. A converted node ends with `dst.put(i, value)` where the destination is
+chosen once, outside the pixel loop (`withSource`, `withDest` in `video_frame.hpp`). Into a byte frame the value is
+stored by the node's own old rule, unchanged: truncate (Color Lab, Keyer, Bus Mixer, Wave Shaper, Freeze Frame, the
+oscillator generator), round half up (Video Mixer) or `lround` (Ramps, Shapes). Into a float frame it is stored
+clamped to 0..255 and not rounded. With the setting off no frame is ever `F32`, and the pictures are byte for byte
+what they were; the pinned hashes in `tests/bus_test.cpp`, `tests/vru_bus_api_golden_test.cpp`,
+`tests/frame_delay_test.cpp`, `tests/vru_bus_api_service_test.cpp` and `tests/feedback_fade_test.cpp`, and the
+rendered PNGs of every patch in `patches/`, are the gate for that. Values are still clamped to 0..1 inside each node.
+
+Where a picture is rounded. A float picture becomes 8-bit, by round half up, only where it leaves the graph: once
+per root in `renderBusInPass()` (straight into the service's pooled byte buffer, so every consumer of that root
+shares it), and in `renderBus()`. Everything the service hands out (Display, Syphon Out, Video Probe, SHOT, REC) and
+`readCopy()` for the public API is therefore still a byte frame, and `include/` did not change. A node that has not
+been converted is given bytes: the renderer rounds a float source (`ensureU8()`) before it calls the node.
+
+The float plane of a service picture. The public float read (`readFrameF32`, `include/vru_bus.h`) can carry the
+picture before it was rounded. `renderBusInPass()` takes a flag, `keepFloatPlane`: with the setting on and a float root
+picture, it rounds to bytes as always and also swaps the float plane into `VideoFrame::precise` of the service's
+slot (no copy). The bytes are the same either way, so Display, Syphon Out, Video Probe, the 8-bit API read, PNG and REC
+receive exactly the rounded picture. The service sets the flag only for a bus and size that a float read has asked for
+in the last `RenderService::kFloatKeepTicks` (120) ticks, with the setting on; every other render makes no plane, adds
+no memory and no work. The rule, in full, is in `src/render_service.hpp` ("The float plane"). A float read with no plane
+on its picture is `byte / 255`. The first float read after a cold start is full precision only when it is the read that
+renders the picture (UI-driven mode, nothing drew that bus and size earlier in the tick); a read that joins an earlier
+picture, or any first read in thread mode, is byte-derived, and the next tick's is full precision. When the asks lapse,
+the planes of a size's free pool buffers are freed at that size's next render. `tests/vru_bus_api_precision_test.cpp`
+checks it in both service modes (Ramps into Color Lab 0.25 and Color Lab 2.0: the byte read has 128 distinct levels with the
+setting on and 63 with it off, the float read about 2048); `floatPlaneStress` in `tests/vru_bus_api_service_test.cpp`
+runs float reads at full precision under ThreadSanitizer in both modes.
+
+Converted (float in, float out when the setting is on): Color Lab (no byte cut between its HSV step and its contrast
+step), Colorizer (the gradient is read at the exact luma, the two nearest table entries blended; with BANDS it is still
+a lookup of the nearest entry), Wave Shaper, Keyer, Bus Mixer, Video Mixer (Gradient colour reads the table the same
+way), Freeze Frame, Frame Delay, Ramps, Shapes, the Video Oscillator and Bars and Rows patterns, and, since stage 4,
+Rotator, Feedback, Deflection Yoke, Line Field, Focus and the output of the beam layer. The Video Oscillator's own
+feedback reads its last float picture. The Video Oscillator test patterns, which are exact bytes, stay bytes.
+
+Stage 4 details. Each of these keeps its geometry and filters exactly; only the element type of the samples and of the
+output changes, and with the setting off the code path is the old one.
+- Rotator samples its source with the bilinear weights it always used, not rounded, and writes floats (the wrap seam
+  blend too).
+- Feedback reads a float source, mixes in float and writes a float picture. History rule: with the plugin setting on,
+  the history is a float-only entry in the frame ring (16 bytes a pixel, no byte plane) for that render, whatever the
+  module option "Fade trails fully to black" says, and a trail always reaches black (levels under 1/1024 of a level are
+  stored as 0, as the option already did). With the plugin setting off, the module option keeps its meaning: off, the
+  8-bit history; on, the byte plane with a float plane beside it. A ring entry written by one setting and read by the
+  other is converted at the read (floats rounded half up, or bytes widened), so flipping the setting is safe.
+- Deflection Yoke and Line Field read a float picture (the Yoke sums the rows of each scanline band in float; the Line
+  Field's line colours and blends are not cut to bytes, so an overlapped pixel has no accumulated truncation).
+- Focus is already float inside (`focus_filter.hpp`); with the setting on it reads a float input and skips the final cut
+  to a byte.
+- The beam layer's output: `crt::toneMapF` evaluates the tone curve (the same table, interpolated) into a float picture
+  with no rounding. Scope Trace, Deflection Yoke and Scan Processor use it, and the Scope Trace graticule blends into
+  the float picture. `crt::EnergyField` was always float. Scan Processor's two inputs (the picture and LIFT IN) are
+  read through the frame helpers (`withSource`): with the setting on a float picture reaches the node as it is and the
+  lift is read unrounded, so a smooth float ramp on LIFT IN lifts the lines smoothly; with the setting off the node is
+  given bytes (`ensureU8`) exactly as before. `tests/precision_test.cpp`, "(f3)": a Ramps picture dimmed to 0.25 on LIFT IN
+  (64 levels as bytes, LUMA GAIN 1, 960 rows, 3.8 px per level) gives a line whose height along the columns strays from a
+  straight line by 0.80 px rms with the setting off and 0.12 px with it on; the largest step between samples two columns
+  apart is 2.30 px off and 1.00 px on (the slope alone is 0.75 px). The setting-on picture is pinned (built with
+  `-ffp-contract=off`).
+- Freeze Frame's store holds a float picture as float32 (`FreezeFrameData::rgbaF`, 16 bytes a pixel, 23.7 MiB at
+  1440 x 1080); a byte picture is held as bytes. A slot holds one or the other.
+- Frame Delay stores a float picture as float-only ring entries. Memory guard: a module's ring holds `frames + 1`
+  pictures, and the float store is used only while those together stay within 256 MiB a module
+  (`kFrameDelayFloatBudgetBytes`, `frameDelayFloatStoreFits()` in `frame_ring.hpp`). Above that the delay stores bytes
+  (the float picture rounded half up), the render notes it (`frameRingSetByteFallback`), and the FRAMES tooltip and
+  the module's context menu say "Stored as 8-bit". At 1440 x 1080 that is 9 frames or fewer as floats; at 640 x 480
+  every setting up to 30 frames fits (152 MiB).
+- Not converted: external frames (Video Player, Syphon In are bytes by origin; nothing to gain), and Video Probe, whose input is the service's rounded 320 x 240 picture and whose tables are integer sums;
+  its outputs are CV volts averaged over a region, so the one-level step does not show.
+
+What to expect. One converted node fed a byte picture is within 1 level of the byte path (2 for Color Lab, which cut
+the colour to a byte twice; 2 for Scope Trace, where graticule lines cross; 3 for Line Field, whose overlapping line
+blends each cut a level in bytes; 0 for Rotator, Focus, Deflection Yoke and Scan Processor on a single node, because
+they round once either way); a chain is within the sum of its nodes. Anything with a hard threshold (posterize,
+quantize, bands, solarize) can differ by a whole step at the pixels that sit on the threshold. `tests/precision_test.cpp`
+measures all of this, pins six ON-mode pictures (built with `-ffp-contract=off` so the pins do not depend on fused
+multiply-adds), and tests the loops: a Video Mixer ADD, Frame Delay and Rotator loop left to decay stays within 1 level
+of 0.8^n with the setting on and sticks at a grey with it off; Feedback reaches black at gains 0.95, 0.98 and 0.99;
+Scope Trace through a gain of 0.25 and then 2.0 keeps twice the levels. Peak memory for a ten node chain is about four
+times higher with the setting on (27 to 103 MiB at 640 x 480, 127 to 513 MiB at 1440 x 1080). A 30 frame Frame Delay
+(`precision_bench memdelay`) peaks at 48 MiB off and 184 MiB on at 640 x 480 (float store, 152 MiB of it), and at 234 MiB
+off and 311 MiB on at 1440 x 1080 (over the budget, so it stores bytes; unguarded it would hold 747 MB of floats). A 9
+frame delay at 1440 x 1080 stores floats and peaks at 424 MiB. `make precision-bench` times the chain and
+`build/precision_bench mem|memdelay` measures peak memory.
+
 ## CRT beam layer
 
 Code: `src/crt_beam.{hpp,cpp}`. The beam layer is the shared CRT physics. Scope Trace, the
@@ -730,8 +1220,8 @@ A module publishes a node that carries its parameters, and the renderer does the
 ### Model
 
 - **Energy field.** `crt::EnergyField` holds linear RGB energy as float, one value per channel
-  per pixel. It is additive. Each beam node on a bus owns one field in each renderer, so Display
-  and Syphon Out keep separate trails.
+  per pixel. It is additive. Each beam node on a bus owns one field in each renderer, that is, one
+  per picture size in the render service, so consumers of the same size share a trail.
 - **Path deposit.** `crt::depositPath(field, spot, x0, y0, x1, y1, rgb, energy, rowLo, rowHi)`
   spreads a path's total energy evenly along its length, one sample per pixel of travel (a Round
   spot of sigma s samples every `max(1, 2 s)` pixels, which still overlaps into a smooth line). The
@@ -841,6 +1331,45 @@ the ring at each pixel's scan time.
   during the copy. It tries again on its next call.
 - Values come back by linear interpolation (`SignalWindow::valueAtScanTime`,
   `sampleAt`). `valueAtScanTime` maps time by the window's own period.
+
+### Latency: from a sample to the screen
+
+How long after a sample is produced on the audio thread does it show on a Display? The figures count from the sample
+being pushed into the ring by `process()` and do not include Rack's audio output buffer. They are derived from the code, not
+measured on a screen. Times are for the defaults: 240 lines, 48 kHz, one Display drawn on the UI thread at 60 Hz.
+
+Deflection Yoke, Scan Processor and the Video Oscillator's IN A, IN B and BEND read a field window with
+`signalRingReadFrame()`. Three terms add up.
+
+1. The field window. The window is the field that ends on the newest field boundary, so a sample cannot appear until
+   the boundary after it has been written. A field is (lines + 22.5) / 15734.264 s (`crt::fieldSeconds`,
+   `src/crt_beam.hpp:39`, with `kLineRateHz` at line 27 and `kBlankingLines` at line 28): 16.68 ms at 240 lines (the
+   Video Oscillator's fixed `kPairLines`, `src/video_engine.hpp:26`), 9.06 ms at 120 lines, 39.57 ms at 600 lines. The
+   reader waits for the boundary plus 2 samples (`written - 2`, `src/signal_ring.cpp:95`), 0.04 ms at 48 kHz. A sample
+   waits between 0.04 ms and one field, 8.3 ms on average, for its window to finish.
+2. One render tick. The renderer reads the ring when it draws, at the Display's `draw()` (`src/Display.cpp:774`),
+   once per UI frame: up to 16.7 ms at 60 Hz, 8.3 ms at 120 Hz, 8.3 ms on average at 60 Hz. With "Render video on its own
+   thread" on, the service draws at 60 a second (`kRenderHz`, `src/render_service.hpp:102`, loop at
+   `src/render_service.cpp:640`) and the Display then takes the newest finished picture on its next UI frame, so there are two
+   ticks: up to 33.3 ms, 16.7 ms on average. A picture that nothing draws is rendered at most 30 times a second
+   (`kHiddenMaxHz`, `src/render_service.hpp:94`), up to 33.3 ms.
+3. The screen. The monitor scans the finished picture out and its pixels take time to change. This is outside the plugin;
+   count about one refresh, 16.7 ms at 60 Hz, 8.3 ms on average.
+
+Worst case from a sample arriving to its first appearance: 16.68 + 0.04 + 16.7 = about 33.4 ms before the screen, about 50
+ms with it. Typical: 8.3 + 8.3 = about 16.7 ms before the screen, about 25 ms with it. In thread mode add one more tick: about
+50 ms worst and 25 ms typical before the screen. Each figure grows with LINES by the field time above.
+
+A single picture also holds a span of signal. When it is drawn, its bottom line shows signal between 0.04 ms and one field old,
+and its top line signal between one and two fields old (up to 33.4 ms at 240 lines), because the window is one whole field and
+ends at the last boundary. `testFieldWindowStep` in `tests/bus_test.cpp` pins the rule: a step written at a known
+sample lands on the line `(sample - window start) / S * (lines + 22.5)` (three steps, worst error 0.7 of a row of 640), a step
+written before the window is on every line, and a step written after the window's end is not in the picture yet.
+
+Scope Trace does not use a field window. It reads the newest samples (`signalRingReadLatest`,
+`src/video_graph_renderer.cpp:862` and `:884`), so the newest end of its trace is only a render tick old: up to 16.7 ms, 8.3
+ms on average, plus the screen. With a trigger the trace starts at the trigger point and can end up to one window
+older. Video Probe goes the other way: it is one picture late (`docs/architecture.md`, "Video Probe").
 
 ### Deflection Yoke
 
@@ -1341,6 +1870,14 @@ When there are more lines than source rows, it is bilinear in y instead, so ther
 One segment per scan column joins neighbouring points, and each segment is deposited with
 `crt::depositPath`. Overlapping lines add light, and a steep lift is dimmer, as in the beam model.
 
+Scan-time behaviour, pinned by `testScanProcessorScanTimePinned` in `tests/bus_test.cpp`. Source luma displaces each scanline
+at the real position of each point on it: with a static byte ramp on LIFT IN and no deflection, line k at column x sits
+LUMA GAIN x height x luma(x) above its nominal row, and the measured positions agree to 0.23 px (worst case over 384 line
+positions, test limit 0.3 px). DEFLECT X is read at each point's own scan time: with a ramp over the field window on the
+ring, the left end of each line is where the signal is at that line's scan time, to 0.33 px (test limit 0.5 px; the ramp moves
+the lines up to 90 px over the field). The lift is read unrounded when "Full precision between modules" is on and as bytes
+when it is off (see "Precision").
+
 - **Scan space.** The beam is drawn with lines as rows and the sweep along columns, so the spot is
   Gaussian across the line (sigma 0.22 x line pitch, at least 0.3 px). ROTATE 90 transposes that
   scan into the output at the end, so the spot stays right on vertical lines too.
@@ -1352,6 +1889,15 @@ One segment per scan column joins neighbouring points, and each segment is depos
 - **Scan timing.** DEFLECT X, DEFLECT Y, BLANK and beam Z are read from the signal ring at each point's
   scan time, `(k + r) x line time`, in a field of the chosen line count (`crt::fieldSeconds`).
   Deflection is sampled per point, so the lines follow audio-rate signals.
+- **Lift source.** `luma(r, L)` in the `y` formula normally comes from the same picture the line is drawn
+  from. With LIFT IN patched it comes from that second picture instead (`ScanProcessorParams::liftBusId`),
+  built the same way (band average or bilinear, then bilinear in x). The brightness (`Z-INTENSITY`) and
+  the colour still use the BUS IN picture. This lets a round outline keep its shape while its texture
+  changes: put the outline on LIFT IN and the textured picture on BUS IN, or the other way round. The
+  renderer reads the lift picture in its own `case` in `renderNode` (scratch slot 1). If LIFT IN is
+  unpatched, empty, or this module's own bus, `liftBusId` is 0 and nothing changes: the output is
+  byte-identical to the module before LIFT IN (golden hashes in `tests/bus_test.cpp`). A lift picture that
+  loops back to this node returns `Status::Cycle`, as for the other second inputs.
 - **Blank.** A point with BLANK above 0.5 deposits no energy, so the segment on either side of it
   is dark.
 - **Persistence and glow.** The shared phosphor, as the Deflection Yoke: the field decays by
@@ -1372,13 +1918,14 @@ Inputs: BUS IN (unpatched reads bus 1), X and Y (audio-rate deflection; +/-5 V f
 half its width, through a fixed 3 kHz `crt::CoilFilter`), LUMA (the luma gain CV, +/-5 V = +/-1 on LUMA GAIN),
 INTENSITY (CV added to the knob, 10 V = full knob travel), H POS and V POS (CV added to the knobs, +/-5 V =
 +/-1 screen width or height), Z (audio-rate beam brightness: -5 V off, 0 V unchanged, +5 V double; not
-filtered), BLANK (beam off while above 1 V). Outputs: BUS 1 and BUS 2 (on black plates, the same video bus
+filtered), BLANK (beam off while above 1 V), LIFT IN (the last input id: a second bus whose luma lifts the
+lines, see Lift source). Outputs: BUS 1 and BUS 2 (on black plates, the same video bus
 token), with a SIG light.
 
 Panel (13 HP, 66.04 mm, titled SCAN PROCESSOR): four columns 15.24 mm apart and six rows. The knobs and
 switches fill the top three rows. Each switch carries only its name, with no position words. The CV jacks
 fill rows four and five, each H POS, INTENSITY and V POS jack under the knob it adds to, and the bus jacks
-and SIG light are in row six. The panel label for Z-INTENSITY is Z-INT.
+are in row six, left to right BUS IN, LIFT IN, BUS 1, BUS 2. The panel stays 13 HP. The SIG label went, and the signal light is now a small light beside BUS IN. The panel label for Z-INTENSITY is Z-INT.
 
 - Row 1, scan, y 29 (large knobs): LUMA GAIN, LINES, INTENSITY, and the ROTATE switch (up turns the picture 90 degrees).
 - Row 2, picture position, y 46: H WIDTH (large knob), H POS (small knob), V HEIGHT (large knob), V POS (small knob).
@@ -1524,6 +2071,88 @@ MIX is 0 or every effect is 0 the source frame is swapped through. Scratch buffe
 the frame size changes. `tests/focus_test.cpp` (in `make test`, also `focus_test <dir> bench` for
 timings) checks identity at zero, MIX, FOCUS reach in x and y, the SMEAR tail and that lines stay
 apart, SHARP overshoot, CONVERGE direction, and writes `focus_contact_sheet.png`.
+
+### Video Probe (VRU–26)
+
+Picture to voltage, the first module that reads a bus and gives back CV and audio. It publishes nothing to the bus
+and has no bus output. `VideoProbe.cpp` owns the knobs, jacks and the preview widget; `src/video_probe_math.hpp`
+(namespace `video_probe`, no Rack types) is the per-sample maths and the hand-off, tested by
+`tests/video_probe_test.cpp` (in `make test`).
+
+- Frame path. `VideoProbeFrameWidget::draw()` calls `VideoGraphRenderer::renderBus()` on the selected bus at a
+  fixed 320 x 240 (`kW`, `kH`), the same way Display and Syphon Out render, then `Analyzer::analyze()` turns the
+  RGBA frame into a `Frame`: four summed-area tables (red, green, blue, luma 77/150/29 over 256, as `uint32`),
+  the mean brightness (AVG) and the change from the previous frame's luma (MOTION, mean absolute difference
+  times 8, so 12.5% reads 10 V; the first frame after a gap reads 0). The same frame is drawn as the panel
+  preview with the read point and patch on it. About 3.7 MB for three slots, allocated in the constructor.
+- Hand-off. `TripleBuffer` has three `Frame` slots and one atomic index. The widget fills its own slot and
+  `publish()` swaps it with the middle slot; `process()` calls `readIndex()` and takes the middle slot only when
+  it is marked new. Neither side ever touches a slot the other holds, there is no lock and no allocation, and
+  `process()` always reads the latest complete frame. The test runs a writer thread against a reader and checks
+  that no frame is torn and none arrives out of order.
+- Video to audio. The picture holds still between pictures (about 60 a second, one picture late), and each
+  output sample is the picture's brightness along the path that X and Y trace. A sawtooth on X across a left
+  to right ramp gives a sawtooth on LUMA at the same frequency, LUMA = X + 5 V, 10 V peak to peak with an
+  offset of 5 V. A sawtooth on X at f across N vertical bars gives a tone at N times f. `tests/video_probe_test.cpp`
+  checks both: on the ramp LUMA is within 0.05 V of X + 5 V (measured worst case 0.029 V, from the 8-bit ramp
+  and the bilinear read), and N = 5 bars at 40 Hz give 5 rising mid-level crossings per cycle with the
+  strongest harmonic of f at the fifth.
+- FRAME. A fixed 10 V pulse, 1 ms long (48 samples at 48 kHz, the length of Scope Trace's SYNC), each time
+  `process()` takes a picture it has not read before (`TripleBuffer::readIndex(bool& fresh)`,
+  `FrameClock`). Two pictures published before `process()` looks give one pulse; no new picture gives none.
+  The picture is taken on the same sample the pulse rises, so LUMA, R, G and B change at or after it. The
+  per-sample read is `video_probe::Reader::process`, which `VideoProbe::process()` calls and the tests run.
+- Sampler. X and Y are knob plus AMT times jack, clamped to +/-5 V, which spans the picture (+5 V on Y is the
+  top). At each sample `sample()` averages the square of half-width `halfWidthPx(SIZE)` (0.5 px at SIZE 0, so
+  exactly bilinear between pixel centres, up to 120 px at SIZE 1, squared taper) with four reads of each table
+  in double precision. Near an edge the square is cut and the average is over what is left. SMOOTH is a one-pole
+  slew (off at 0, time constant 0.5 ms growing to 1 s) on LUMA, R, G and B. GATE reads the unsmoothed luma of the
+  same patch against LEVEL with a margin of 0.03 either side.
+- Limits. The frame is as fresh as Rack's UI frame (60 Hz by default) and one frame late. Since the render
+  service keeps registered buses running (see "Render service"), the widget's `step()`, which Rack calls
+  every UI frame whether or not the widget is drawn, registers the bus and takes the finished picture, so
+  `process()` keeps getting frames while the module is scrolled off screen, at 30 a second when nothing at
+  all is drawn. `process()` still holds its last values when the module is bypassed (no `process()`), when the
+  bus has no signal (no frame is published, the SIG light goes dark and the preview shows NO VIDEO), and
+  when the plugin setting "Keep video running when hidden" is off, in which case only `draw()` takes the
+  picture, as before. When Rack's window is minimised nothing in this plugin can run if Rack stops calling
+  `step()` then; the SDK headers do not say, and this has not been checked in Rack. The hand-off does not
+  tell `process()` that frames have stopped; the SIG light (frame counter checked every 0.1 s) is the only sign.
+- Panel (20 HP): the preview at the top (58.7 x 44 mm), a row of X, Y, SIZE, SMOOTH and LEVEL knobs at y 76, AMT
+  trimmers for X and Y and the SIG light at y 90, the X, Y and BUS IN jacks at y 103, and eight outputs on plates
+  at y 119 (LUMA, R, G, B, AVG, MOTION, GATE, FRAME), 11.8 mm apart on 11.2 mm plates, MOTION and FRAME in smaller type.
+- Params: X, Y, SIZE, SMOOTH, LEVEL, X AMT, Y AMT (0 to 6). Inputs: BUS IN, X, Y. Outputs in the order above; FRAME is the last id, appended.
+  Ids are append-only. Four presets are in `presets/VideoProbe/`.
+
+### Vector Osc (VRU–25)
+
+CV and audio only: no video bus, no frames. It is the signal source that `docs/scope-trace-audit.md`
+asks for ("Vector Osc"), so Scope Trace stays a sink. `VectorOsc.cpp` reads the knobs and jacks, and
+`src/vector_osc_math.hpp` (namespace `vector_osc`, no Rack types) does the work in `Engine::process`.
+
+- Two sides, X and Y, each the average of 1 to 8 voices. X runs at FREQ (C4 times 2 to the knob plus
+  V/OCT, 0.06 Hz to 8 kHz). Y runs at X times RATIO; the RATIO knob is a snap list of 19 whole and simple
+  ratios (`kRatios`), the RATIO jack adds whole steps (1 V per step) and FINE multiplies by up to plus or
+  minus one semitone with a squared taper. PHASE (turns, plus 10 V per turn from its jack) is added to Y's
+  phase, so at 1:1, sine and a quarter turn X is sin and Y is cos, a circle.
+- Voice k of n has frequency base times 2 to the (DETUNE squared times spread), spread running evenly from
+  minus 1 to plus 1 (a single voice sits at 0), so DETUNE 1 puts the outer voices an octave away. Each
+  voice's starting phase also gets DETUNE times a fixed constant (`kSkewX`, `kSkewY`), so the bundle opens
+  out at once instead of only after the voices have drifted apart. At DETUNE 0 all voices are identical
+  and the average equals one voice. Phases start at 0 on reset and on a SYNC edge, so a patch redraws the
+  same figure.
+- WAVE runs 0 to 1 through sine, triangle, saw and square with a smoothstep cross-fade between
+  neighbours; the saw and square use a polynomial step correction so audio-rate figures stay clean. All four
+  shapes start at zero (the square at plus 1) and rise, so the quarter-turn relation holds at any WAVE. Y WAVE
+  is added to WAVE for Y only.
+- Outputs are plus or minus 5 V times LEVEL for X and Y. Z is brightness following inverse beam speed:
+  speed is the step between samples of the unit (X, Y) point, divided by the step of a unit circle at
+  X's frequency, and Z is 10 V over 1 plus half the speed squared, smoothed with a 2 ms time constant. A
+  resting point gives 10 V, a plain circle 6.7 V, a fast sweep close to 0 V.
+- Param, input and output ids are append-only. `tests/vector_osc_test.cpp` (in `make test`) checks the
+  circle and its radius, 8 voices against 1 at DETUNE 0 for five wave settings, ranges over a grid of
+  settings including NaN and out-of-range values, equal samples after reset, the wave ends, the Z levels
+  and the ratio table. Six presets are in `presets/VectorOsc/`.
 
 ### Octoscillator (VRU–23)
 

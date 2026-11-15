@@ -44,6 +44,7 @@ struct ScanProcessor : Module {
 		H_POS_INPUT,       // horizontal position CV, +/-5 V = +/-1 screen width
 		V_POS_INPUT,       // vertical position CV, +/-5 V = +/-1 screen height
 		Z_INPUT,           // beam brightness at audio rate, -5 V off, 0 V unchanged, +5 V double
+		LIFT_INPUT,        // video bus whose brightness lifts the lines; unpatched, BUS IN lifts itself
 		INPUTS_LEN
 	};
 	enum OutputId {
@@ -88,6 +89,7 @@ struct ScanProcessor : Module {
 		configInput(H_POS_INPUT, "Horizontal position CV (+/-5 V = +/-1 screen width)");
 		configInput(V_POS_INPUT, "Vertical position CV (+/-5 V = +/-1 screen height)");
 		configInput(Z_INPUT, "Z: beam brightness, audio rate (-5 V off, 0 V unchanged, +5 V double)");
+		configInput(LIFT_INPUT, "Lift in: video bus whose brightness lifts the lines (unpatched: the BUS IN picture lifts itself)");
 		configOutput(VIDEO_BUS_OUTPUT, "Video bus token");
 		configOutput(VIDEO_BUS_2_OUTPUT, "Video bus token (same picture as BUS 1)");
 	}
@@ -137,6 +139,17 @@ struct ScanProcessor : Module {
 		scanProc.persist = params[PERSIST_PARAM].getValue();
 		scanProc.glow = params[GLOW_PARAM].getValue();
 		scanProc.signalSlotId = signalSlotId;
+
+		// LIFT IN: its picture lifts the lines; the brightness and colour still come from BUS IN. An empty bus
+		// or this module's own bus counts as no cable (the renderer also falls back when it cannot draw it).
+		int liftBusId = 0;
+		if (inputs[LIFT_INPUT].isConnected()) {
+			const int id = videoBusIdFromVoltage(inputs[LIFT_INPUT].getVoltage());
+			if (id > 0 && id != videoBus.id() && videoBusIsActive(id)) {
+				liftBusId = id;
+			}
+		}
+		scanProc.liftBusId = liftBusId;
 
 		sourceBus.store(inputBusId, std::memory_order_relaxed);
 		hasSignal.store(active, std::memory_order_relaxed);
@@ -234,15 +247,18 @@ struct ScanProcessorWidget : ModuleWidget {
 		addJackLabel(this, Vec(rowX(W, 4, 3, P), row5), "BLANK");
 		addInput(createInputCentered<PJ301MPort>(mm2px(Vec(rowX(W, 4, 3, P), row5)), module, ScanProcessor::BLANK_INPUT));
 
-		// Row 6: bus. BUS IN takes a video bus token. BUS 1 and BUS 2 carry the same token, and SIG lights
-		// while a signal is in.
+		// Row 6: bus. BUS IN takes the picture that is drawn: its brightness and colour set how the lines look.
+		// LIFT IN takes an optional second picture whose brightness lifts the lines instead; with no cable,
+		// BUS IN lifts itself. BUS 1 and BUS 2 carry the same token. The small light beside BUS IN shows
+		// that a picture is arriving.
 		const float rowIO = 115.f;
 		addJackLabel(this, Vec(rowX(W, 4, 0, P), rowIO), "BUS IN");
 		addInput(createInputCentered<PJ301MPort>(mm2px(Vec(rowX(W, 4, 0, P), rowIO)), module, ScanProcessor::VIDEO_BUS_INPUT));
-		addPlatedOutput<PJ301MPort>(this, Vec(rowX(W, 4, 1, P), rowIO), "BUS 1", module, ScanProcessor::VIDEO_BUS_OUTPUT);
-		addPlatedOutput<PJ301MPort>(this, Vec(rowX(W, 4, 2, P), rowIO), "BUS 2", module, ScanProcessor::VIDEO_BUS_2_OUTPUT);
-		addJackLabel(this, Vec(rowX(W, 4, 3, P), rowIO), "SIG");
-		addChild(createLightCentered<MediumLight<GreenLight>>(mm2px(Vec(rowX(W, 4, 3, P), rowIO)), module, ScanProcessor::SIGNAL_LIGHT));
+		addChild(createLightCentered<SmallLight<GreenLight>>(mm2px(Vec(rowX(W, 4, 0, P) + 7.62f, rowIO)), module, ScanProcessor::SIGNAL_LIGHT));
+		addJackLabel(this, Vec(rowX(W, 4, 1, P), rowIO), "LIFT IN");
+		addInput(createInputCentered<PJ301MPort>(mm2px(Vec(rowX(W, 4, 1, P), rowIO)), module, ScanProcessor::LIFT_INPUT));
+		addPlatedOutput<PJ301MPort>(this, Vec(rowX(W, 4, 2, P), rowIO), "BUS 1", module, ScanProcessor::VIDEO_BUS_OUTPUT);
+		addPlatedOutput<PJ301MPort>(this, Vec(rowX(W, 4, 3, P), rowIO), "BUS 2", module, ScanProcessor::VIDEO_BUS_2_OUTPUT);
 	}
 };
 

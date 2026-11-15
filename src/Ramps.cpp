@@ -13,9 +13,9 @@ struct RampsFrequencyQuantity : ParamQuantity {
 
 struct Ramps : Module {
 	enum ParamId { AXIS_A_PARAM, FREQ_A_PARAM, PHASE_A_PARAM, WAVE_A_PARAM,
-		AXIS_B_PARAM, FREQ_B_PARAM, PHASE_B_PARAM, WAVE_B_PARAM, MIX_PARAM, PARAMS_LEN };
+		AXIS_B_PARAM, FREQ_B_PARAM, PHASE_B_PARAM, WAVE_B_PARAM, MIX_PARAM, MOD_AMOUNT_PARAM, PARAMS_LEN };
 	enum InputId { FREQ_A_INPUT, PHASE_A_INPUT, WAVE_A_INPUT,
-		FREQ_B_INPUT, PHASE_B_INPUT, WAVE_B_INPUT, INPUTS_LEN };
+		FREQ_B_INPUT, PHASE_B_INPUT, WAVE_B_INPUT, MOD_INPUT, INPUTS_LEN };
 	enum OutputId { VIDEO_BUS_OUTPUT, OUTPUTS_LEN };
 	VideoBusOwner videoBus;
 
@@ -33,6 +33,10 @@ struct Ramps : Module {
 			configInput(layer * 3 + 2, "Wave" + name + " CV");
 		}
 		configSwitch(MIX_PARAM, 0.f, 3.f, 0.f, "Mix", {"A", "A + B", "A - B", "A x B"});
+		configParam(MOD_AMOUNT_PARAM, -1.f, 1.f, 0.f, "Mod amount");
+		paramQuantities[MOD_AMOUNT_PARAM]->description = "How far the MOD IN picture shifts layer A's phase. 0 is none. At full, a black pixel shifts A one cycle one way and a white pixel one cycle the other way; mid grey shifts nothing.";
+		configInput(MOD_INPUT, "Mod In (video bus)");
+		inputInfos[MOD_INPUT]->description = "A second picture. Its brightness, at each pixel, shifts the phase of layer A at that pixel, so one picture bends another's ramps. Unpatched, or with AMT at zero, nothing changes.";
 		configOutput(VIDEO_BUS_OUTPUT, "Video bus token");
 	}
 
@@ -50,6 +54,14 @@ struct Ramps : Module {
 			else { p.axisB = axis; p.freqB = freq; p.phaseB = phase; p.waveB = wave; }
 		}
 		p.mix = static_cast<int>(clamp(std::round(params[MIX_PARAM].getValue()), 0.f, 3.f));
+		// MOD IN: a picture offsets layer A's phase. Unpatched, a bus with no picture, or this module's own bus: none.
+		if (inputs[MOD_INPUT].isConnected()) {
+			const int modBus = videoBusIdFromVoltage(inputs[MOD_INPUT].getVoltage());
+			if (modBus != videoBus.id() && videoBusIsActive(modBus)) {
+				p.modBusId = modBus;
+				p.modAmount = clamp(params[MOD_AMOUNT_PARAM].getValue(), -1.f, 1.f);
+			}
+		}
 		videoBusPublishRamps(videoBus.id(), p);
 		outputs[VIDEO_BUS_OUTPUT].setVoltage(videoBus.voltage());
 	}
@@ -128,6 +140,11 @@ struct RampsWidget : ModuleWidget {
 			addJackLabel(this, pos, cvLabels[i]);
 			addInput(createInputCentered<PJ301MPort>(mm2px(pos), module, i));
 		}
+		// MOD IN and its amount, in the free first column: the jack on layer A's jack row, AMT under it.
+		addJackLabel(this, Vec(rowX(W, 5, 0, P), 100.f), "MOD IN");
+		addInput(createInputCentered<PJ301MPort>(mm2px(Vec(rowX(W, 5, 0, P), 100.f)), module, Ramps::MOD_INPUT));
+		addKnobLabel(this, Vec(rowX(W, 5, 0, P), 116.f), "AMT", R_SMALL);
+		addParam(createParamCentered<RoundSmallBlackKnob>(mm2px(Vec(rowX(W, 5, 0, P), 116.f)), module, Ramps::MOD_AMOUNT_PARAM));
 		addPlatedOutput<PJ301MPort>(this, Vec(rowX(W, 5, 4, P), 116), "BUS", module, Ramps::VIDEO_BUS_OUTPUT);
 	}
 };

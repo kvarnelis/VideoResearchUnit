@@ -15,7 +15,9 @@
 #include "video_bus.hpp"
 #include "video_engine.hpp"
 #include "video_external_frame.hpp"
+#include "render_service.hpp"
 #include "video_graph_renderer.hpp"
+#include "video_probe_math.hpp"
 #include "video_mixer_math.hpp"
 #include "video_slot_allocator.hpp"
 #include "rotator_math.hpp"
@@ -32,6 +34,7 @@
 #include <cstdarg>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <limits>
@@ -1139,6 +1142,41 @@ void testPairWave() {
 	check(kPairMinCycles == 0.25 && kPairMaxCycles == 512.0, "cycles are limited to 0.25..512");
 }
 
+// The two ends of LOCK draw what the old two-position switch drew. The hashes were taken from the
+// renderer before LOCK became a hold (all sixteen on/off combinations of the four switches, both fields).
+void testPairLockEnds() {
+	std::printf("pair: LOCK ends match the old switch\n");
+	static const uint64_t golden[32] = {4150854057808350755ull,2857654604737306081ull,8900169974183665426ull,3899548724099247939ull,8636053872769710436ull,17809575682901730817ull,16717804881759276728ull,8155107354132404125ull,2878119114808869717ull,3427362313583112997ull,12840796834925465684ull,15103182762046441372ull,3168278770559842650ull,9362158114502207528ull,5321049586408554148ull,7884182825585960355ull,4150854057808350755ull,2410570979791285392ull,7763542326765019982ull,12371470619585315524ull,8636053872769710436ull,17809575682901730817ull,15201549756527176818ull,4688794155700745189ull,2878119114808869717ull,13281144988450694547ull,12840796834925465684ull,8873990478799598214ull,3168278770559842650ull,9362158114502207528ull,5321049586408554148ull,7884182825585960355ull};
+	int wrong = 0;
+	for (int i = 0; i < 32; ++i) {
+		VideoParams p = pairBase();
+		p.mix = 1;
+		p.cyclesA = 8.3f;
+		p.cyclesB = 3.7f;
+		p.bend = 1.5f;
+		p.shape = 0.4f;
+		p.waveB = 0.7f;
+		p.latchedA = 0.3;
+		p.latchedB = 0.6;
+		p.barsA = (i & 1) != 0;
+		p.barsB = (i & 2) != 0;
+		const float lockA = (i & 4) ? 1.f : 0.f;
+		const float lockB = (i & 8) ? 1.f : 0.f;
+		p.lockA = lockA;
+		p.lockB = lockB;
+		p.fieldOdd = (i & 16) != 0;
+		const Frame f = pairRender(96, 60, p);
+		uint64_t h = 1469598103934665603ull;
+		for (unsigned char c : f) {
+			h = (h ^ c) * 1099511628211ull;
+		}
+		if (h != golden[i]) {
+			++wrong;
+		}
+	}
+	check(wrong == 0, "LOCK fully down and fully up draw exactly what the switch drew");
+}
+
 void testPairClockContinuity() {
 	std::printf("pair: clock continuity\n");
 	PairClock c;
@@ -1380,6 +1418,173 @@ int pushScanSignal(int slot, int frames, const std::function<void(int, float*)>&
 	return total;
 }
 
+// ---- Video Oscillator: LOCK as a hold, and the scan-time inputs ----
+
+int pairRowDifference(const Frame& a, const Frame& b, int w, int y) {
+	int diff = 0;
+	for (int x = 0; x < w; ++x) {
+		diff += std::abs(int(a[(static_cast<size_t>(y) * w + x) * 4u]) - int(b[(static_cast<size_t>(y) * w + x) * 4u]));
+	}
+	return diff;
+}
+
+void testPairHold() {
+	std::printf("pair: LOCK between its ends\n");
+	const int w = 192;
+	const int h = 240;
+	VideoParams base = pairBase();
+	base.shape = 1.f;
+	base.latchedA = 0.3;
+	base.lockB = 1.f;
+
+	// A whole number of cycles per line: the hold catches, so the bars settle into step down the picture.
+	base.cyclesA = 8.f;
+	VideoParams locked = base;
+	locked.lockA = 1.f;
+	VideoParams free = base;
+	free.lockA = 0.f;
+	VideoParams held = base;
+	held.lockA = 0.5f;
+	const Frame fl = pairRender(w, h, locked);
+	const Frame ff = pairRender(w, h, free);
+	const Frame fh = pairRender(w, h, held);
+	check(pairRowDifference(ff, fl, w, 0) > 0, "free bars start off step with the scan");
+	check(pairRowDifference(fh, fl, w, 0) < pairRowDifference(ff, fl, w, 0), "the hold starts the first line closer to step than free");
+	check(pairRowDifference(fh, fl, w, 200) == 0, "near a whole number the hold catches and the pattern stands in step");
+
+	// Off a whole number by a fifth of a cycle a line, a weak hold cannot keep up: the bars stay out of
+	// step with the locked picture and with the line above.
+	base.cyclesA = 8.2f;
+	held = base;
+	held.lockA = 0.25f;
+	const Frame fs = pairRender(w, h, held);
+	locked = base;
+	locked.lockA = 1.f;
+	const Frame fl2 = pairRender(w, h, locked);
+	int outOfStep = 0;
+	for (int y = 100; y < 140; ++y) {
+		if (pairRowDifference(fs, fl2, w, y) > 0) {
+			++outOfStep;
+		}
+	}
+	check(outOfStep > 20, "a weak hold off a whole number leaves the bars out of step with the scan");
+
+	// Rows: the field starts off step, and the hold pulls that start part of the way back, once.
+	VideoParams rows = pairBase();
+	rows.shape = 1.f;
+	rows.barsA = false;
+	rows.cyclesA = 4.f;
+	rows.latchedA = 0.4;
+	VideoParams rowsLocked = rows;
+	rowsLocked.lockA = 1.f;
+	VideoParams rowsFree = rows;
+	rowsFree.lockA = 0.f;
+	VideoParams rowsHeld = rows;
+	rowsHeld.lockA = 0.5f;
+	const Frame rl = pairRender(w, h, rowsLocked);
+	const Frame rf = pairRender(w, h, rowsFree);
+	const Frame rh = pairRender(w, h, rowsHeld);
+	long toLocked = 0;
+	long freeToLocked = 0;
+	for (int y = 0; y < h; ++y) {
+		toLocked += pairRowDifference(rh, rl, w, y);
+		freeToLocked += pairRowDifference(rf, rl, w, y);
+	}
+	check(freeToLocked > 0 && toLocked < freeToLocked, "on rows the hold moves the picture toward the locked one");
+}
+
+// A ring slot filled with the inputs a Video Oscillator pushes, in the ring's units, the same for every sample.
+int pairSignalSlot(float inA, float inB, float bend) {
+	const int slot = signalRingAllocate();
+	pushScanSignal(slot, 6, [&](int, float* v) {
+		v[kVideoOscInA] = inA;
+		v[kVideoOscInB] = inB;
+		v[kVideoOscBend] = bend;
+	});
+	return slot;
+}
+
+void testPairScanInputs() {
+	std::printf("pair: scan-time inputs\n");
+	const int w = 192;
+	const int h = 120;
+	VideoParams p = pairBase();
+	p.cyclesA = 4.f;
+	p.shape = 1.f;
+	p.bend = 1.5f;
+	p.waveB = 0.5f;
+	p.cyclesB = 3.f;
+	const Frame plain = pairRender(w, h, p);
+
+	// Nothing patched: scanInputs is false and the ring is not read, whatever is in it.
+	const int busy = pairSignalSlot(0.7f, -0.4f, 0.9f);
+	VideoParams unpatched = p;
+	unpatched.signalSlotId = busy;
+	unpatched.scanInputs = false;
+	check(pairRender(w, h, unpatched) == plain, "unpatched IN A, IN B and BEND leave the picture as it was");
+
+	// Patched but silent: a ring of zeros draws the same picture.
+	const int quiet = pairSignalSlot(0.f, 0.f, 0.f);
+	VideoParams silent = p;
+	silent.signalSlotId = quiet;
+	silent.scanInputs = true;
+	check(pairRender(w, h, silent) == plain, "silent IN A, IN B and BEND leave the picture as it was");
+
+	// IN A at half a cycle turns square bars inside out.
+	const int half = pairSignalSlot(0.5f, 0.f, 0.f);
+	VideoParams pushed = p;
+	pushed.bend = 0.f;
+	pushed.mix = 0;
+	const Frame still = pairRender(w, h, pushed);
+	pushed.signalSlotId = half;
+	pushed.scanInputs = true;
+	const Frame inverted = pairRender(w, h, pushed);
+	int opposite = 0;
+	int total = 0;
+	for (int x = 0; x < w; ++x) {
+		const float a = pairLevel(still, w, x, 60);
+		const float b = pairLevel(inverted, w, x, 60);
+		if (a < 0.05f || a > 0.95f) {
+			++total;
+			if (std::abs(a - b) > 0.9f) {
+				++opposite;
+			}
+		}
+	}
+	check(total > 100 && opposite > total * 9 / 10, "IN A of half a cycle swaps the bars' light and dark");
+
+	// IN B moves B but not A: with MIX at A alone the picture does not change.
+	const int inB = pairSignalSlot(0.f, 0.5f, 0.f);
+	VideoParams onlyB = pushed;
+	onlyB.signalSlotId = inB;
+	check(pairRender(w, h, onlyB) == still, "IN B does not move oscillator A");
+
+	// A steady BEND CV bends like the knob turned by the same amount.
+	const int cv = pairSignalSlot(0.f, 0.f, 0.8f);
+	VideoParams knob = p;
+	knob.bend = 1.5f + 0.8f;
+	VideoParams cvd = p;
+	cvd.signalSlotId = cv;
+	cvd.scanInputs = true;
+	const Frame viaKnob = pairRender(w, h, knob);
+	const Frame viaCv = pairRender(w, h, cvd);
+	long off = 0;
+	for (size_t i = 0; i < viaKnob.size(); ++i) {
+		off += std::abs(int(viaKnob[i]) - int(viaCv[i]));
+	}
+	check(off < static_cast<long>(viaKnob.size()) * 255 / 100, "a steady BEND CV read at scan time bends like the knob");
+
+	// A signal that changes along the picture bends each pixel differently: a tone on IN A makes the bars wave.
+	const int tone = signalRingAllocate();
+	pushScanSignal(tone, 6, [&](int n, float* v) {
+		v[kVideoOscInA] = 0.5f * std::sin(6.2831853f * 480.f * static_cast<float>(n) / static_cast<float>(kWobRate));
+	});
+	VideoParams wavy = pushed;
+	wavy.signalSlotId = tone;
+	const Frame fw = pairRender(w, h, wavy);
+	check(fw != still && fw != inverted, "a tone on IN A bends the bars along the picture");
+}
+
 Frame renderWobble(VideoGraphRenderer& r, const Frame& source, int slot, const DeflectionYokeParams& params) {
 	constexpr int srcBus = 40;
 	constexpr int outBus = 41;
@@ -1588,6 +1793,60 @@ void testDeflectionYokeRipples() {
 	const Frame pass = renderWobble(renderer, grid, emptySlot, p);
 	check(maxDiff(pass, grid) == 0, "no raster signal passes the source through");
 	signalRingRelease(emptySlot);
+}
+
+// The field-window rule (docs/architecture.md, "Scan-time signal model" and "Latency"): a renderer reads the newest
+// complete field of the ring, which is the field that ends on the newest multiple of S samples (S samples to the field,
+// boundary counted from the first sample ever written, two samples held back for interpolation). A step in a signal
+// written at known sample n0 lands at window position n0 - start, so at scan line (n0 - start) / S * (lines + flyback).
+// A step before the window is on every line, and a step after the window's end is not in the picture yet.
+void testFieldWindowStep() {
+	std::printf("scan-time signals: a step lands on the line its sample position predicts\n");
+	const Frame line = makeLineSource(kWobW, kWobH, kWobW / 2);
+	DeflectionYokeParams p;
+	p.depth = 1.f;
+	const int fieldSamples = static_cast<int>(std::lround(kWobRate * crt::fieldSeconds(kWobLines)));
+	const double linesPerField = kWobLines + crt::kBlankingLines;
+	const double step = 0.2;   // raster widths of horizontal deflection after the step
+	// First row whose centroid has moved more than half the step, or -1.
+	auto firstShiftedRow = [&](const Frame& out) {
+		const std::vector<double> c = lineCentroids(out, kWobW, kWobH);
+		const double half = 0.5 * step * (kWobW - 1);
+		for (int y = 0; y < kWobH; ++y) {
+			if (!std::isnan(c[static_cast<size_t>(y)]) && std::fabs(c[static_cast<size_t>(y)] - kWobW / 2) > half) return y;
+		}
+		return -1;
+	};
+	auto render = [&](int total, int stepAt) {
+		const int slot = signalRingAllocate();
+		signalRingSetSampleRate(slot, kWobRate);
+		for (int n = 0; n < total; ++n) {
+			float values[kSignalRingChannels] = {0.f, 0.f, 0.f, 0.f};
+			values[kDeflectionYokeDeflectX] = n >= stepAt ? static_cast<float>(step) : 0.f;
+			signalRingPush(slot, values);
+		}
+		VideoGraphRenderer r;
+		const Frame out = renderWobble(r, line, slot, p);
+		signalRingRelease(slot);
+		return out;
+	};
+
+	const int total = 6 * fieldSamples + 35;
+	const int boundary = (total - 2) / fieldSamples;
+	const int windowStart = (boundary - 1) * fieldSamples;
+	double worstRows = 0.0;
+	for (int pos : {100, 400, 700}) {
+		const int stepAt = windowStart + pos;
+		const int row = firstShiftedRow(render(total, stepAt));
+		const double predictedLine = static_cast<double>(pos) / fieldSamples * linesPerField;
+		const double predictedRow = predictedLine * kWobH / kWobLines;
+		std::printf("  step at window sample %d: first shifted row %d, predicted %.1f (line %.1f)\n", pos, row, predictedRow, predictedLine);
+		check(row >= 0, "a step inside the window shows in the picture");
+		worstRows = std::max(worstRows, std::fabs(row - predictedRow));
+	}
+	check(worstRows <= 4.0, "a step lands within 4 rows (1.5 scanlines) of the line its sample position predicts");
+	check(firstShiftedRow(render(total, windowStart - 50)) == 0, "a step before the window is there from the first line");
+	check(firstShiftedRow(render(total, windowStart + fieldSamples + 10)) == -1, "a step after the window's end is not in this picture");
 }
 
 // Grid lines dim (120) and one vertical line at `column` bright (235), on black (40 between lines).
@@ -5056,6 +5315,294 @@ void saveScanProcessorProof(const std::string& name, const Frame& f, int w = kRu
 	}
 }
 
+// A source with a horizontal ramp, a bright square and some colour, so the lift, the brightness and the colour all differ.
+Frame goldenPicture(int w, int h) {
+	Frame f(static_cast<size_t>(w) * static_cast<size_t>(h) * 4u, 255);
+	for (int y = 0; y < h; ++y) {
+		for (int x = 0; x < w; ++x) {
+			unsigned char* px = &f[(static_cast<size_t>(y) * static_cast<size_t>(w) + static_cast<size_t>(x)) * 4u];
+			const bool square = x > w / 3 && x < 2 * w / 3 && y > h / 4 && y < 3 * h / 4;
+			px[0] = square ? 250 : static_cast<unsigned char>(255 * x / (w - 1));
+			px[1] = square ? 240 : static_cast<unsigned char>(255 * y / (h - 1));
+			px[2] = square ? 60 : static_cast<unsigned char>(128 + 100 * x / (w - 1));
+		}
+	}
+	return f;
+}
+
+uint64_t hashFrame(const Frame& f) {
+	uint64_t h = 1469598103934665603ull;
+	for (unsigned char c : f) {
+		h = (h ^ c) * 1099511628211ull;
+	}
+	return h;
+}
+
+// The Scan Processor's output for four settings, with the single bus input and no LIFT IN. The hashes were taken
+// before LIFT IN existed, so they hold the module's old output; every render here starts from a fresh renderer.
+ScanProcessorParams goldenParams(int i) {
+	ScanProcessorParams p = measureParams(i == 3 ? 256 : 128);
+	p.intensity = 0.6f;
+	p.persist = 0.35f;
+	p.glow = 0.25f;
+	p.lumaGain = i == 1 ? -0.4f : 0.3f;
+	p.color = i == 1 || i == 3;
+	p.zIntensity = i == 2 ? 0.7f : 0.f;
+	p.rotate = i == 2;
+	p.hWidth = i == 3 ? -0.8f : 1.f;
+	p.vPos = i == 3 ? 0.1f : 0.f;
+	return p;
+}
+
+void testScanProcessorGoldens() {
+	std::printf("scan processor: output with no LIFT IN matches the goldens\n");
+	static const uint64_t golden[4] = {2781341562911040581ull, 16277049126569950835ull, 14249625778491769734ull, 1631942134664176442ull};
+	const Frame pic = goldenPicture(kRutW, kRutH);
+	int wrong = 0;
+	for (int i = 0; i < 4; ++i) {
+		VideoGraphRenderer r;
+		const int slot = signalRingAllocate();
+		const uint64_t h = hashFrame(renderScanProcessorFrame(r, pic, slot, goldenParams(i), kRutW, kRutH));
+		std::printf("  case %d hash %lluull\n", i, static_cast<unsigned long long>(h));
+		if (h != golden[i]) {
+			++wrong;
+		}
+		signalRingRelease(slot);
+	}
+	check(wrong == 0, "Scan Processor output without LIFT IN is unchanged");
+}
+
+constexpr int kRutLiftBus = 45;
+
+// Renders a Scan Processor over a main picture with a second picture on LIFT IN.
+Frame renderScanProcessorLifted(VideoGraphRenderer& r, const Frame& main, const Frame& lift, int slot, ScanProcessorParams p, int w, int h) {
+	const int mainId = videoExternalFrameAllocate();
+	const int liftId = videoExternalFrameAllocate();
+	videoExternalFramePublish(mainId, main.data(), w, h, 0.0);
+	videoExternalFramePublish(liftId, lift.data(), w, h, 0.0);
+	videoBusPublishExternalFrame(kRutSrcBus, mainId);
+	videoBusPublishExternalFrame(kRutLiftBus, liftId);
+	p.liftBusId = kRutLiftBus;
+	Frame out = renderScanProcessorNode(r, kRutSrcBus, slot, p, w, h);
+	videoBusClear(kRutSrcBus);
+	videoBusClear(kRutLiftBus);
+	videoExternalFrameRelease(mainId);
+	videoExternalFrameRelease(liftId);
+	return out;
+}
+
+// LIFT IN fed the same picture as BUS IN draws exactly what no cable draws.
+void testScanProcessorLiftInSamePicture() {
+	std::printf("scan processor: LIFT IN with the same picture changes nothing\n");
+	static const uint64_t golden[4] = {2781341562911040581ull, 16277049126569950835ull, 14249625778491769734ull, 1631942134664176442ull};
+	const Frame pic = goldenPicture(kRutW, kRutH);
+	int wrong = 0;
+	for (int i = 0; i < 4; ++i) {
+		VideoGraphRenderer r;
+		const int slot = signalRingAllocate();
+		if (hashFrame(renderScanProcessorLifted(r, pic, pic, slot, goldenParams(i), kRutW, kRutH)) != golden[i]) {
+			++wrong;
+		}
+		signalRingRelease(slot);
+	}
+	check(wrong == 0, "LIFT IN with the BUS IN picture is byte-identical to no LIFT IN");
+}
+
+// A flat grey on BUS IN and a ramp on LIFT IN: the lines follow the ramp, and every line looks the same.
+void testScanProcessorLiftInShapesLines() {
+	std::printf("scan processor: LIFT IN bends the lines, BUS IN sets how they look\n");
+	const int W = kRutW;
+	const int H = kRutH;
+	Frame ramp(static_cast<size_t>(W) * H * 4u, 255);
+	for (int y = 0; y < H; ++y) {
+		for (int x = 0; x < W; ++x) {
+			const unsigned char v = static_cast<unsigned char>(255.0 * (x + 0.5) / W + 0.5);
+			unsigned char* px = &ramp[(static_cast<size_t>(y) * W + x) * 4u];
+			px[0] = px[1] = px[2] = v;
+		}
+	}
+	const Frame grey = flatFrame(W, H, 128);
+	const float gain = 0.05f;
+	ScanProcessorParams p = measureParams(32);
+	p.lumaGain = gain;
+	const double pitch = static_cast<double>(H) / 32.0;
+
+	VideoGraphRenderer r;
+	const int slot = signalRingAllocate();
+	const Frame lifted = renderScanProcessorLifted(r, grey, ramp, slot, p, W, H);
+	VideoGraphRenderer r0;
+	ScanProcessorParams flat = p;
+	flat.lumaGain = 0.f;
+	const Frame still = renderScanProcessorFrame(r0, grey, slot, flat, W, H);
+
+	for (int col : {W / 4, 3 * W / 4}) {
+		const double u = (col + 0.5) / W;  // the ramp's luma here
+		const double expected = gain * H * u;
+		const std::vector<double> peaks = columnPeaks(lifted, W, H, col, 0.05);
+		const std::vector<double> rest = columnPeaks(still, W, H, col, 0.05);
+		double sum = 0.0;
+		int n = 0;
+		double lo = 1e9;
+		double hi = -1e9;
+		double restSum = 0.0;
+		for (int k = 4; k < 28; ++k) {
+			const double y0 = (k + 0.5) * pitch;
+			for (double pk : peaks) {
+				if (std::fabs(pk - (y0 - expected)) < 0.5 * pitch) {
+					sum += y0 - pk;
+					++n;
+					const double lum = lum01(lifted, W, col, static_cast<int>(std::lround(pk)));
+					lo = std::min(lo, lum);
+					hi = std::max(hi, lum);
+					break;
+				}
+			}
+			for (double pk : rest) {
+				if (std::fabs(pk - y0) < 0.5 * pitch) {
+					restSum += lum01(still, W, col, static_cast<int>(std::lround(pk)));
+					break;
+				}
+			}
+		}
+		const double mean = n > 0 ? sum / n : 0.0;
+		const double restMean = restSum / 24.0;
+		std::printf("  column %d: lift %.2f px (expected %.2f), line brightness %.3f to %.3f, unlifted %.3f\n", col, mean, expected, lo, hi, restMean);
+		check(n == 24, "every line is found at its lifted place");
+		check(std::fabs(mean - expected) < 0.1 * expected, "lines are displaced by the LIFT IN ramp");
+		check(hi - lo < 0.03, "every line has the same brightness");
+		check(std::fabs(0.5 * (lo + hi) - restMean) < 0.05 * restMean, "brightness matches the unlifted lines");
+	}
+
+	// Colour still comes from BUS IN: a red picture drawn with a grey lift stays red.
+	Frame red(static_cast<size_t>(W) * H * 4u, 255);
+	for (size_t i = 0; i < red.size(); i += 4) {
+		red[i] = 220;
+		red[i + 1] = 30;
+		red[i + 2] = 30;
+	}
+	ScanProcessorParams q = p;
+	q.color = true;
+	VideoGraphRenderer r2;
+	const Frame coloured = renderScanProcessorLifted(r2, red, ramp, slot, q, W, H);
+	double rs = 0.0;
+	double gs = 0.0;
+	for (size_t i = 0; i < coloured.size(); i += 4) {
+		rs += coloured[i];
+		gs += coloured[i + 1];
+	}
+	check(rs > 3.0 * gs && rs > 0.0, "the lines take their colour from BUS IN, not from LIFT IN");
+	signalRingRelease(slot);
+}
+
+// The Scan Processor's scan-time behaviour, pinned (docs/architecture.md, "Scan Processor"). Source luma displaces each
+// scanline at the real scan position of each point on it, and the deflection signal is read at each point's scan time.
+// These were written against the code before "Full precision between modules" reached the lift, and they pass with the
+// setting off; the same numbers hold with it on, where the lift is a smooth float ramp instead of a byte ramp.
+Frame makeRampFrame(int w, int h) {
+	Frame ramp(static_cast<size_t>(w) * h * 4u, 255);
+	for (int y = 0; y < h; ++y) {
+		for (int x = 0; x < w; ++x) {
+			const unsigned char v = static_cast<unsigned char>(std::lround(255.0 * (x + 0.5) / w));
+			unsigned char* px = &ramp[(static_cast<size_t>(y) * w + x) * 4u];
+			px[0] = px[1] = px[2] = v;
+		}
+	}
+	return ramp;
+}
+
+void testScanProcessorScanTimePinned() {
+	std::printf("scan processor: lift and deflection land where each point is scanned\n");
+	const int W = kRutW;
+	const int H = kRutH;
+
+	// (1) A static ramp on LIFT IN, no deflection: line k, at column x, sits gain x H x luma(x) above its nominal row.
+	{
+		const Frame ramp = makeRampFrame(W, H);
+		const Frame grey = flatFrame(W, H, 128);
+		const float gain = 0.05f;
+		const int lines = 32;
+		ScanProcessorParams p = measureParams(lines);
+		p.lumaGain = gain;
+		VideoGraphRenderer r;
+		const int slot = signalRingAllocate();
+		const Frame lifted = renderScanProcessorLifted(r, grey, ramp, slot, p, W, H);
+		const double pitch = static_cast<double>(H) / lines;
+		double worst = 0.0;
+		double sumAbs = 0.0;
+		int found = 0;
+		int expectedCount = 0;
+		for (int col = 40; col <= W - 40; col += 24) {
+			const std::vector<double> peaks = columnPeaks(lifted, W, H, col, 0.05);
+			const double luma = static_cast<double>(ramp[(static_cast<size_t>(H / 2) * W + col) * 4u]) / 255.0;
+			const double expected = gain * H * luma;
+			for (int k = 4; k < lines - 4; ++k) {
+				++expectedCount;
+				const double y0 = (k + 0.5) * pitch;
+				double best = 1e9;
+				for (double pk : peaks) {
+					if (std::fabs(pk - (y0 - expected)) < std::fabs(best)) best = pk - (y0 - expected);
+				}
+				if (std::fabs(best) < 0.5 * pitch) {
+					++found;
+					worst = std::max(worst, std::fabs(best));
+					sumAbs += std::fabs(best);
+				}
+			}
+		}
+		std::printf("  lift: %d of %d line positions found, worst error %.3f px, mean %.3f px (line pitch %.1f px, lift up to %.1f px)\n",
+			found, expectedCount, worst, found ? sumAbs / found : 0.0, pitch, gain * H);
+		check(found == expectedCount, "every line is found at the column it was predicted at");
+		check(worst < 0.3, "each line lift equals LUMA GAIN x height x the LIFT IN luma at that column, within 0.3 px");
+		signalRingRelease(slot);
+	}
+
+	// (2) A known ring signal on DEFLECT X, flat luma: the left end of line k is where the signal is at that line's
+	// scan time. The signal is a ramp over the field window, dx = a (n - window start) / S for sample n.
+	{
+		const int lines = 64;
+		const Frame grey = flatFrame(W, H, 200);
+		ScanProcessorParams p = measureParams(lines);
+		const int fieldSamples = static_cast<int>(std::lround(kWobRate * crt::fieldSeconds(lines)));
+		const int total = 6 * fieldSamples + 35;
+		const int boundary = (total - 2) / fieldSamples;
+		const int windowStart = (boundary - 1) * fieldSamples;
+		const double a = 0.2;   // ramp units over one field
+		const int slot = signalRingAllocate();
+		pushScanRange(slot, 0, total, [&](int n, float* v) {
+			v[kScanProcessorDeflectX] = static_cast<float>(a * static_cast<double>(n - windowStart) / fieldSamples);
+		});
+		VideoGraphRenderer r;
+		const Frame out = renderScanProcessorFrame(r, grey, slot, p, W, H);
+		const double pitch = static_cast<double>(H) / lines;
+		double worst = 0.0;
+		int measured = 0;
+		for (int k = 3; k < lines - 3; ++k) {
+			const double expectedLeft = W * a * k / (lines + crt::kBlankingLines);   // dx at the line's start, in px
+			if (expectedLeft < 4.0) continue;
+			const int row = static_cast<int>(std::lround((k + 0.5) * pitch - 0.5));
+			double peak = 0.0;
+			for (int x = 0; x < W; ++x) peak = std::max(peak, lum01(out, W, x, row));
+			double edge = -1.0;
+			for (int x = 1; x < W; ++x) {
+				const double l0 = lum01(out, W, x - 1, row);
+				const double l1 = lum01(out, W, x, row);
+				if (l0 < 0.5 * peak && l1 >= 0.5 * peak) {
+					edge = (x - 1) + 0.5 + (0.5 * peak - l0) / (l1 - l0);
+					break;
+				}
+			}
+			if (edge < 0.0) continue;
+			++measured;
+			worst = std::max(worst, std::fabs(edge - expectedLeft));
+			if (k % 8 == 0) std::printf("    line %d: left end %.2f px, predicted %.2f px\n", k, edge, expectedLeft);
+		}
+		std::printf("  deflection: %d lines measured, worst error %.3f px (the signal moves %.1f px over the field)\n", measured, worst, W * a);
+		check(measured >= lines - 20, "most lines have a measurable left end");
+		check(worst < 0.5, "each line's left end is DEFLECT X at that line's scan time, within 0.5 px");
+		signalRingRelease(slot);
+	}
+}
+
 // 1. A flat grey source gives evenly spaced, straight lines.
 void testScanProcessorFlatLines() {
 	std::printf("scan processor: flat grey gives even straight lines\n");
@@ -5800,6 +6347,36 @@ void testFeedbackTwoRenderers() {
 	const Frame source = render(a, 1);
 	check(maxDiff(source, render(a, 2)) <= 1, "blend at zero gain equals source");
 	frameRingReleaseSlot(p.ringSlotId);
+
+	// The same with the fade option on: the float history is stored beside the 8-bit picture, still one store per
+	// tick, still sized by the first renderer, and a renderer of another size reads it resampled.
+	FeedbackParams f;
+	f.ringSlotId = frameRingAllocateSlot();
+	frameRingSetCapacity(f.ringSlotId, 4);
+	f.gain = 0.6f;
+	f.fadeToBlack = 1;
+	VideoGraphRenderer c, d;
+	f.frameCounter = 1;
+	videoBusPublishFeedback(2, 1, f);
+	render(c, 2);
+	f.frameCounter = 2;
+	videoBusPublishFeedback(2, 1, f);
+	const Frame fadeFirst = render(c, 2);
+	check(maxDiff(fadeFirst, render(d, 2)) == 0, "fade on: two renderers see identical feedback step");
+	const Frame fadeSmall = d.renderBus(2, 128, 72);
+	check(fadeSmall.size() == 128*72*4 && std::abs(mean(fadeSmall)-mean(fadeFirst)) < 0.02, "fade on: different-size renderer resamples without another feedback step");
+	FrameRingFrame fadeStored;
+	check(frameRingRead(f.ringSlotId, 0, fadeStored) && fadeStored.width == kW && fadeStored.height == kH &&
+		fadeStored.rgbaF.size() == fadeStored.rgba.size() && frameRingCount(f.ringSlotId) == 2, "fade on: one store per tick, float plane at the first renderer's size");
+	// A renderer of another size that draws the next tick first takes the step at its own size, from the float plane.
+	f.frameCounter = 3;
+	videoBusPublishFeedback(2, 1, f);
+	const Frame fadeSmallFirst = d.renderBus(2, 128, 72);
+	check(fadeSmallFirst.size() == 128*72*4 && frameRingCount(f.ringSlotId) == 3, "fade on: a smaller renderer can take the step");
+	check(frameRingRead(f.ringSlotId, 0, fadeStored) && fadeStored.width == 128 && fadeStored.height == 72 &&
+		fadeStored.rgbaF.size() == fadeStored.rgba.size(), "fade on: the stored size and float plane follow the renderer that stored");
+	check(render(c, 2).size() == static_cast<size_t>(kW*kH*4) && frameRingCount(f.ringSlotId) == 3, "fade on: the larger renderer reads it back resampled");
+	frameRingReleaseSlot(f.ringSlotId);
 	videoBusClear(2);
 	videoBusClear(1);
 }
@@ -6861,6 +7438,221 @@ void testVideoMixerColor() {
 	check(maxDiff(rig.run(a), halfTurn) > 10, "and not hue 0");
 }
 
+// Gradient colouring: off and hue are untouched, SPAN 0 is one hue from black to white, and the gradient is the
+// Colorizer's own.
+void testVideoMixerGradient() {
+	std::printf("Video Mixer gradient colour\n");
+	VmRig rig;
+	// Column x of this picture is grey x, so one row of the output is the whole gradient.
+	Frame greys(static_cast<size_t>(kW) * kH * 4u);
+	for (int y = 0; y < kH; ++y) {
+		for (int x = 0; x < kW; ++x) {
+			const size_t i = (static_cast<size_t>(y) * kW + static_cast<size_t>(x)) * 4u;
+			greys[i] = greys[i + 1] = greys[i + 2] = static_cast<unsigned char>(x & 255);
+			greys[i + 3] = 255;
+		}
+	}
+	rig.set(1, greys);
+	rig.set(2, vmCard(1));
+	rig.set(3, vmSolid(0, 0, 0));
+	rig.set(4, vmSolid(128, 128, 128));
+	rig.set(5, vmRings());
+
+	// COLOR Off and Hue draw what they drew before, in every transition mode, whatever SPAN says.
+	int worst = 0;
+	for (int mode = 0; mode < 3; ++mode) {
+		for (int colour = 0; colour < 2; ++colour) {
+			VideoMixerParams p = vmParams();
+			p.patternBus = 5;
+			p.mode = mode;
+			p.fader = 0.4f;
+			p.sat = 0.8f;
+			for (int i = 0; i < 4; ++i) {
+				p.colorOn[i] = colour == 1;
+				p.hue[i] = 0.1f + 0.2f * i;
+			}
+			p.span = 0.f;
+			const Frame base = rig.run(p);
+			p.span = 0.37f;
+			const Frame spanned = rig.run(p);
+			worst = std::max(worst, maxDiff(base, spanned));
+			vmCheckf(maxDiff(base, rig.expected(p)) <= 1, "mode %d, color %s still matches the reference maths", mode, colour ? "Hue" : "Off");
+		}
+	}
+	vmCheckf(worst == 0, "SPAN changes nothing while COLOR is Off or Hue (worst difference %d)", worst);
+
+	// Gradient with SPAN 0: black stays black, mid grey takes the input's hue, white stays white.
+	VideoMixerParams g = vmParams();
+	g.fader = 0.f;
+	g.sat = 1.f;
+	g.span = 0.f;
+	for (int i = 0; i < 4; ++i) {
+		g.gradientOn[i] = true;
+		g.hue[i] = 0.f;
+	}
+	g.onAir = 2;   // black
+	Frame f = rig.run(g);
+	vmCheckf(vmPx(f, 5, 5, 0) == 0 && vmPx(f, 5, 5, 1) == 0 && vmPx(f, 5, 5, 2) == 0, "Gradient: black stays black, got %d %d %d", vmPx(f, 5, 5, 0), vmPx(f, 5, 5, 1), vmPx(f, 5, 5, 2));
+	g.onAir = 3;   // grey 128
+	f = rig.run(g);
+	vmCheckf(std::abs(vmPx(f, 5, 5, 0) - 128) <= 1 && vmPx(f, 5, 5, 1) == 0 && vmPx(f, 5, 5, 2) == 0, "Gradient SPAN 0: mid grey is the input's hue (red), got %d %d %d", vmPx(f, 5, 5, 0), vmPx(f, 5, 5, 1), vmPx(f, 5, 5, 2));
+	g.hue[3] = 0.5f;
+	f = rig.run(g);
+	vmCheckf(vmPx(f, 5, 5, 0) == 0 && std::abs(vmPx(f, 5, 5, 1) - 128) <= 1 && std::abs(vmPx(f, 5, 5, 2) - 128) <= 1, "Gradient SPAN 0: hue 0.5 gives cyan at mid grey, got %d %d %d", vmPx(f, 5, 5, 0), vmPx(f, 5, 5, 1), vmPx(f, 5, 5, 2));
+	rig.set(4, vmSolid(255, 255, 255));
+	f = rig.run(g);
+	vmCheckf(vmPx(f, 5, 5, 0) == 255 && vmPx(f, 5, 5, 1) == 255 && vmPx(f, 5, 5, 2) == 255, "Gradient: white stays white, got %d %d %d", vmPx(f, 5, 5, 0), vmPx(f, 5, 5, 1), vmPx(f, 5, 5, 2));
+	rig.set(4, vmSolid(128, 128, 128));
+
+	// SAT 0 is the plain grey, as it is for Hue.
+	g.hue[3] = 0.f;
+	g.sat = 0.f;
+	f = rig.run(g);
+	vmCheckf(std::abs(vmPx(f, 5, 5, 0) - 128) <= 1 && std::abs(vmPx(f, 5, 5, 1) - 128) <= 1 && std::abs(vmPx(f, 5, 5, 2) - 128) <= 1, "Gradient at SAT 0 is plain grey, got %d %d %d", vmPx(f, 5, 5, 0), vmPx(f, 5, 5, 1), vmPx(f, 5, 5, 2));
+
+	// Gradient against the Colorizer: the same four stops give the same colours. The mixer's top stop is white (no
+	// saturation), which the Colorizer cannot do, so the match is below grey 170, where white starts to take over; the top must be white
+	// at the very end and never darken on the way.
+	VideoMixerParams c = vmParams();
+	c.onAir = 0;
+	c.fader = 0.f;
+	c.sat = 1.f;
+	c.gradientOn[0] = true;
+	c.hue[0] = 0.1f;
+	for (int n = 0; n < 4; ++n) {
+		const float span = 0.1f * n;   // 0, 0.1, 0.2, 0.3 turns
+		c.span = span;
+		const Frame mixed = rig.run(c);
+		ColorizerParams z;
+		z.hue[0] = 0.1f;
+		z.hue[1] = 0.1f;
+		z.hue[2] = 0.1f + span;
+		z.hue[3] = 0.1f + 2.f * span;
+		z.level[0] = 0.f;
+		z.level[1] = 1.f / 3.f;
+		z.level[2] = 2.f / 3.f;
+		z.level[3] = 1.f;
+		z.saturation = 1.f;
+		videoBusPublishColorizer(10, 1, z);
+		VideoGraphRenderer cr;
+		const Frame colorized = render(cr, 10);
+		int lowerWorst = 0;
+		for (int x = 0; x <= 169; ++x) {
+			for (int ch = 0; ch < 3; ++ch) {
+				lowerWorst = std::max(lowerWorst, std::abs(vmPx(mixed, x, 3, ch) - vmPx(colorized, x, 3, ch)));
+			}
+		}
+		vmCheckf(lowerWorst == 0, "SPAN %.1f: the part of the gradient below the white stop (grey 0 to 169) is the Colorizer's, byte for byte (worst %d)", span, lowerWorst);
+		vmCheckf(vmPx(mixed, 255, 3, 0) == 255 && vmPx(mixed, 255, 3, 1) == 255 && vmPx(mixed, 255, 3, 2) == 255, "SPAN %.1f: white input is white", span);
+		videoBusClear(10);
+	}
+
+	// More SPAN gives more colours.
+	c.span = 0.f;
+	const Frame one = rig.run(c);
+	c.span = 0.3f;
+	const Frame many = rig.run(c);
+	check(maxDiff(one, many) > 20, "turning SPAN up changes the gradient");
+
+	// Gradient is per input: an input left on Hue still tints flat.
+	VideoMixerParams mix = vmParams();
+	mix.onAir = 3;
+	mix.fader = 0.f;
+	mix.colorOn[3] = true;
+	mix.hue[3] = 0.f;
+	mix.sat = 1.f;
+	mix.gradientOn[0] = true;
+	f = rig.run(mix);
+	vmCheckf(std::abs(vmPx(f, 5, 5, 0) - 128) <= 1 && vmPx(f, 5, 5, 1) == 0, "an input left on Hue still tints flat, got %d %d", vmPx(f, 5, 5, 0), vmPx(f, 5, 5, 1));
+}
+
+// ALL (mode 3): every patched picture at once. Each is scaled by its LEVEL and added, the sum is clamped at white, the
+// AVERAGE option divides by the number of patched pictures, an unpatched input is ignored, a LEVEL of 0 takes a picture
+// out, the picture is coloured before it is summed, the other modes ignore LEVEL and AVERAGE, and full precision gives
+// the same picture.
+bool vmNear(const Frame& f, int x, int y, double r, double g, double b, double tol) {
+	return std::abs(vmPx(f, x, y, 0) - r) <= tol && std::abs(vmPx(f, x, y, 1) - g) <= tol && std::abs(vmPx(f, x, y, 2) - b) <= tol && vmOpaque(f);
+}
+
+void testVideoMixerAll() {
+	std::printf("Video Mixer all\n");
+	VmRig rig;
+	rig.set(1, vmSolid(100, 0, 0));
+	rig.set(2, vmSolid(0, 100, 0));
+	rig.set(3, vmSolid(0, 0, 100));
+	rig.set(4, vmSolid(50, 50, 50));
+	VideoMixerParams p = vmParams();
+	p.mode = 3;
+
+	// Four pictures at LEVEL 100%: the sum, whatever the fader and the live and next pictures say.
+	p.fader = 0.7f;
+	Frame out = rig.run(p);
+	check(vmNear(out, 100, 70, 150, 150, 150, 1.0), "all: four pictures at full level add to (150, 150, 150)");
+	p.fader = 0.f;
+	check(vmNear(rig.run(p), 100, 70, 150, 150, 150, 1.0), "all: the fader does not change the picture");
+
+	// Clamped at white: two bright pictures add past 255 and stop there.
+	rig.set(1, vmSolid(200, 200, 200));
+	rig.set(2, vmSolid(200, 200, 200));
+	check(vmAll(rig.run(p), 255, 255, 255), "all: the sum stops at white");
+	rig.set(1, vmSolid(100, 0, 0));
+	rig.set(2, vmSolid(0, 100, 0));
+
+	// LEVEL scales each picture before the sum; LEVEL 0 removes the picture altogether.
+	p.level[0] = 1.f;
+	p.level[1] = 0.5f;
+	p.level[2] = 0.f;
+	p.level[3] = 1.f;
+	check(vmNear(rig.run(p), 100, 70, 150, 100, 50, 1.0), "all: LEVEL 50% halves B, LEVEL 0% removes C");
+	p.level[1] = 1.f;
+	p.level[2] = 1.f;
+	p.level[3] = 0.f;
+	check(vmNear(rig.run(p), 100, 70, 100, 100, 100, 1.0), "all: LEVEL 0% removes D");
+	p.level[3] = 1.f;
+
+	// AVERAGE divides by the number of patched pictures. With two patched it is the mean of A and B.
+	p.average = true;
+	VideoMixerParams two = p;
+	two.inputBus[2] = 0;
+	two.inputBus[3] = 0;
+	check(vmNear(rig.run(two), 100, 70, 50, 50, 0, 1.0), "all: average of two patched pictures is their mean");
+	check(vmNear(rig.run(p), 100, 70, 37.5, 37.5, 37.5, 1.0), "all: average of four patched pictures is a quarter of the sum");
+	p.average = false;
+
+	// An unpatched input is ignored, not read as black: with B unpatched, A, C and D add to (150, 50, 150), and the
+	// average divides by three.
+	VideoMixerParams noB = p;
+	noB.inputBus[1] = 0;
+	check(vmNear(rig.run(noB), 100, 70, 150, 50, 150, 1.0), "all: an unpatched input is left out of the sum");
+	noB.average = true;
+	check(vmNear(rig.run(noB), 100, 70, 50, 16.7, 50, 1.0), "all: the average counts only patched pictures");
+
+	// Each picture is coloured as it is in the other modes, before the sum. A is grey 21 in red on hue 0.
+	VideoMixerParams tinted = p;
+	tinted.colorOn[0] = true;
+	tinted.hue[0] = 0.f;
+	tinted.sat = 1.f;
+	check(vmNear(rig.run(tinted), 100, 70, 71.3, 150, 150, 2.0), "all: a picture with COLOR on is tinted before it is added");
+
+	// The other modes ignore LEVEL and AVERAGE: dissolve, add and wipe give the same picture for any LEVEL.
+	for (int mode = 0; mode <= 2; ++mode) {
+		VideoMixerParams a = vmParams();
+		a.mode = mode;
+		a.fader = 0.3f;
+		VideoMixerParams b = a;
+		b.level[0] = b.level[1] = b.level[2] = b.level[3] = 0.f;
+		b.average = true;
+		const Frame fa = rig.run(a);
+		const Frame fb = rig.run(b);
+		vmCheckf(fa == fb, "all: mode %d ignores LEVEL and AVERAGE", mode);
+	}
+
+	// Full precision between modules: the same picture on the float path.
+	rig.r.setFullPrecision(true);
+	check(vmNear(rig.run(p), 100, 70, 150, 150, 150, 1.0), "all: full precision gives the same sum");
+	rig.r.setFullPrecision(false);
+}
+
 void testVideoMixerKey() {
 	std::printf("Video Mixer key\n");
 	VmRig rig;
@@ -7793,6 +8585,1280 @@ void testRotatorSawSeam() {
 }
 
 
+// ---- Shared taps (issue 13): a picture that feeds more than one input in a pass ----
+// The golden hashes were taken from the renderer before it shared taps, so they prove the change did not
+// move a pixel. Run with VRU_PRINT_GOLDEN=1 to print the hashes.
+uint64_t sharedHash(const Frame& f, uint64_t h = 1469598103934665603ull) {
+	for (unsigned char c : f) {
+		h = (h ^ c) * 1099511628211ull;
+	}
+	return h;
+}
+
+// Diamond graph: bus 1 is a Video Oscillator, bus k+1 is a Bus Mixer whose A and B both read bus k.
+void publishDiamond(int levels) {
+	publishOsc(1, 0.2f, 1);
+	for (int k = 1; k <= levels; ++k) {
+		BusMixerParams m;
+		m.busB = k;
+		m.mode = (k % 2) ? 2 : 4;
+		m.mix = 0.6f;
+		videoBusPublishBusMixer(k + 1, k, m);
+	}
+}
+
+void clearBuses(int count) {
+	for (int k = 1; k <= count; ++k) {
+		videoBusClear(k);
+	}
+}
+
+// Several graphs that reach a bus twice, rendered for a few frames each. Returns one hash per graph.
+std::vector<uint64_t> sharedTapHashes() {
+	std::vector<uint64_t> out;
+	// 0 and 1: diamonds 3 and 8 deep.
+	for (int levels : {3, 8}) {
+		publishDiamond(levels);
+		VideoGraphRenderer r;
+		out.push_back(sharedHash(render(r, levels + 1)));
+		clearBuses(levels + 1);
+	}
+	// 2: oscillator -> Keyer; oscillator and Keyer both feed a Video Mixer (live, next, key and matte).
+	{
+		publishOsc(1, 0.1f, 1);
+		KeyerParams k;
+		k.mode = 2;
+		videoBusPublishKeyer(2, 1, k);
+		VideoMixerParams v;
+		v.inputBus[0] = 1;
+		v.inputBus[1] = 2;
+		v.onAir = 0;
+		v.next = 1;
+		v.fader = 0.4f;
+		v.keyOn = true;
+		v.keyBus = 2;
+		v.matteBus = 1;
+		videoBusPublishVideoMixer(3, v);
+		VideoGraphRenderer r;
+		uint64_t h = 1469598103934665603ull;
+		for (int n = 0; n < 3; ++n) {
+			h = sharedHash(render(r, 3), h);
+		}
+		out.push_back(h);
+		clearBuses(3);
+	}
+	// 3: oscillator -> Rotator -> Feedback, the Feedback feeding both inputs of a Bus Mixer; five ticks.
+	{
+		publishOsc(1, 0.0f, 4);
+		RotatorParams ro;
+		ro.angle = 0.05f;
+		videoBusPublishRotator(2, 1, ro);
+		FeedbackParams fb;
+		fb.ringSlotId = frameRingAllocateSlot();
+		fb.gain = 0.7f;
+		BusMixerParams m;
+		m.busB = 3;
+		m.mode = 1;
+		m.mix = 0.5f;
+		videoBusPublishBusMixer(4, 3, m);
+		VideoGraphRenderer r;
+		uint64_t h = 1469598103934665603ull;
+		for (int n = 1; n <= 5; ++n) {
+			fb.frameCounter = n;
+			videoBusPublishFeedback(3, 2, fb);
+			h = sharedHash(render(r, 4), h);
+		}
+		out.push_back(h);
+		frameRingReleaseSlot(fb.ringSlotId);
+		clearBuses(4);
+	}
+	// 4: oscillator and its Freeze Frame both feed a Bus Mixer; captured on the first tick, then held.
+	{
+		publishOsc(1, 0.3f, 1);
+		FreezeFrameParams fz;
+		fz.freezeSlotId = freezeFrameAllocateSlot();
+		fz.hold = 1.f;
+		fz.blend = 1.f;
+		BusMixerParams m;
+		m.busB = 2;
+		m.mode = 4;
+		m.mix = 0.5f;
+		videoBusPublishBusMixer(3, 1, m);
+		VideoGraphRenderer r;
+		uint64_t h = 1469598103934665603ull;
+		for (int n = 1; n <= 3; ++n) {
+			publishOsc(1, 0.3f + 0.1f * n, 1);
+			fz.captureCounter = 1;
+			videoBusPublishFreezeFrame(2, 1, fz);
+			h = sharedHash(render(r, 3), h);
+		}
+		out.push_back(h);
+		freezeFrameReleaseSlot(fz.freezeSlotId);
+		clearBuses(3);
+	}
+	return out;
+}
+
+void testSharedTapsUnchanged() {
+	std::printf("shared taps: pictures do not change\n");
+	static const uint64_t golden[5] = {7810114910781349443ull, 12488064554238182275ull, 925399523948482243ull, 12788543973977081743ull, 12247377462014611139ull};
+	const std::vector<uint64_t> got = sharedTapHashes();
+	int wrong = 0;
+	for (size_t i = 0; i < got.size(); ++i) {
+		if (std::getenv("VRU_PRINT_GOLDEN")) {
+			std::printf("  golden[%zu] = %lluull\n", i, static_cast<unsigned long long>(got[i]));
+		}
+		if (i >= 5 || got[i] != golden[i]) {
+			++wrong;
+		}
+	}
+	check(wrong == 0, "diamond, keyer-mixer, feedback and freeze graphs draw exactly what they drew before shared taps");
+}
+
+void testSharedTapsRenderOnce() {
+	std::printf("shared taps: each bus renders once per pass\n");
+	// A diamond 10 levels deep has 2^10 paths to the oscillator. Every bus must still render exactly once, on
+	// every pass, and the second pass must not grow anything.
+	publishDiamond(10);
+	VideoGraphRenderer r;
+	bool once = true;
+	for (int pass = 0; pass < 3; ++pass) {
+		const Frame f = render(r, 11);
+		once = once && !f.empty();
+		for (int bus = 1; bus <= 11; ++bus) {
+			once = once && r.busRenderCount(bus) == 1;
+		}
+		once = once && r.busRenderCount(12) == 0;
+	}
+	check(once, "every bus of a 10 level diamond renders once per pass");
+	clearBuses(11);
+
+	// An oscillator that feeds a Keyer and a Video Mixer, the Keyer feeding the mixer too.
+	publishOsc(1, 0.1f, 1);
+	KeyerParams k;
+	videoBusPublishKeyer(2, 1, k);
+	VideoMixerParams v;
+	v.inputBus[0] = 1;
+	v.inputBus[1] = 2;
+	v.fader = 0.4f;
+	v.keyOn = true;
+	v.keyBus = 2;
+	v.matteBus = 1;
+	videoBusPublishVideoMixer(3, v);
+	render(r, 3);
+	check(r.busRenderCount(1) == 1 && r.busRenderCount(2) == 1 && r.busRenderCount(3) == 1, "oscillator, keyer and video mixer each render once");
+	clearBuses(3);
+
+	// The depth limit holds for a reused bus: 15 levels is within 16 levels, 17 is not.
+	publishDiamond(15);
+	check(!render(r, 16).empty() && !r.hasCycle(), "a 15 level diamond renders");
+	clearBuses(16);
+	VideoGraphRenderer fresh;
+	publishDiamond(17);
+	check(render(fresh, 18).empty() && fresh.hasCycle(), "a 17 level diamond is too deep, as a chain is");
+	clearBuses(18);
+}
+
+
+// ---- Render service, stage 1 (issue 6): characterization of the renderer as it is ----
+// These pin what one renderer does today with beam trails, with Freeze Frame shared by two renderers, and
+// with two root buses rendered alternately. The render service design rests on them. Run with
+// VRU_PRINT_GOLDEN=1 to print the hashes.
+constexpr int kSvcW = 192;
+constexpr int kSvcH = 108;
+
+struct ServiceRig {
+	int scopeSlot = 0;
+	int yokeSlot = 0;
+	int tick = 0;
+
+	// bus 1 oscillator with feedback (so the generator keeps a previous frame), bus 2 Scope Trace, bus 3
+	// Deflection Yoke on bus 1, bus 4 Bus Mixer of bus 3 and bus 2.
+	void build() {
+		scopeSlot = signalRingAllocate();
+		yokeSlot = signalRingAllocate();
+		signalRingSetSampleRate(scopeSlot, 48000.f);
+		signalRingSetSampleRate(yokeSlot, 48000.f);
+		tick = 0;
+		push(4800);
+		VideoParams v;
+		v.phase = 0.15f;
+		v.pattern = 1;
+		v.feedback = 0.5f;
+		videoBusPublish(1, v);
+		ScopeTraceParams st;
+		st.decay = 0.8f;
+		videoBusPublishScopeTrace(2, scopeSlot, st);
+		DeflectionYokeParams dy;
+		dy.signalSlotId = yokeSlot;
+		dy.persist = 0.7f;
+		dy.lines = 120;
+		dy.depth = 0.5f;
+		videoBusPublishDeflectionYoke(3, 1, dy);
+		BusMixerParams m;
+		m.busB = 2;
+		m.mode = 1;
+		m.mix = 0.5f;
+		videoBusPublishBusMixer(4, 3, m);
+	}
+
+	// New samples for the next tick: the same amount each time, so every renderer sees the same signal.
+	void push(int count) {
+		for (int n = 0; n < count; ++n) {
+			const double t = static_cast<double>(tick * 100000 + n);
+			const float sc[kSignalRingChannels] = {static_cast<float>(0.8 * std::sin(0.031 * t)), static_cast<float>(0.8 * std::cos(0.047 * t)), 1.f, 0.f};
+			signalRingPush(scopeSlot, sc);
+			const float yk[kSignalRingChannels] = {static_cast<float>(0.2 * std::sin(0.011 * t)), static_cast<float>(0.2 * std::sin(0.013 * t)), 0.f, 0.f};
+			signalRingPush(yokeSlot, yk);
+		}
+	}
+
+	void nextTick() {
+		++tick;
+		push(800);
+	}
+
+	void release() {
+		clearBuses(4);
+		signalRingRelease(scopeSlot);
+		signalRingRelease(yokeSlot);
+	}
+};
+
+Frame renderSvc(VideoGraphRenderer& r, int bus) {
+	return r.renderBus(bus, kSvcW, kSvcH);
+}
+
+void testBeamTrailsPinned() {
+	std::printf("render service characterization: beam trails over passes\n");
+	ServiceRig rig;
+	rig.build();
+	VideoGraphRenderer r;
+	std::vector<uint64_t> got;
+	Frame f;
+	for (int pass = 1; pass <= 5; ++pass) {
+		f = renderSvc(r, 4);
+		if (pass == 1 || pass == 2 || pass == 5) {
+			got.push_back(sharedHash(f));
+		}
+		rig.nextTick();
+	}
+	rig.release();
+	static const uint64_t golden[3] = {5930133027663224981ull, 9186846114856468411ull, 9898023220337517764ull};
+	bool ok = got.size() == 3;
+	for (size_t i = 0; i < got.size(); ++i) {
+		if (std::getenv("VRU_PRINT_GOLDEN")) {
+			std::printf("  beam golden[%zu] = %lluull\n", i, static_cast<unsigned long long>(got[i]));
+		}
+		ok = ok && got[i] == golden[i];
+	}
+	check(got.size() == 3 && got[0] != got[1] && got[1] != got[2], "beam trails change from pass to pass");
+	check(ok, "Scope Trace and Deflection Yoke trails after 1, 2 and 5 passes match the pinned hashes");
+}
+
+void testFreezeTwoRenderersPinned() {
+	std::printf("render service characterization: Freeze Frame shared renderers\n");
+	publishOsc(1, 0.3f, 1);
+	FreezeFrameParams fz;
+	fz.freezeSlotId = freezeFrameAllocateSlot();
+	fz.hold = 1.f;
+	fz.blend = 1.f;
+	fz.captureCounter = 1;
+	videoBusPublishFreezeFrame(2, 1, fz);
+	VideoGraphRenderer a, b;
+	const Frame first = render(a, 2);
+	check(maxDiff(first, render(b, 2)) == 0, "two renderers see the same frozen picture");
+	// The source moves on; the frozen picture stays, and both renderers keep agreeing.
+	publishOsc(1, 0.7f, 1);
+	const Frame held = render(a, 2);
+	check(maxDiff(held, render(b, 2)) == 0, "two renderers still agree after the source moves");
+	check(maxDiff(first, held) <= 1, "the hold keeps the first capture");
+	// A capture taken by one renderer is seen by the other, and nothing is captured twice.
+	publishOsc(1, 0.7f, 4);
+	fz.captureCounter = 2;
+	videoBusPublishFreezeFrame(2, 1, fz);
+	const Frame second = render(a, 2);
+	check(maxDiff(second, render(b, 2)) == 0, "a new capture reaches both renderers");
+	check(maxDiff(second, held) > 5, "the new capture replaced the old one");
+	const Frame small = b.renderBus(2, 128, 72);
+	FreezeFrameData stored;
+	check(small.size() == 128 * 72 * 4 && freezeFrameRead(fz.freezeSlotId, stored) && stored.width == kW && stored.height == kH,
+		"a smaller renderer resamples the stored frame without recapturing");
+	uint64_t h = sharedHash(first);
+	h = sharedHash(held, h);
+	h = sharedHash(second, h);
+	h = sharedHash(small, h);
+	static const uint64_t golden = 11707648022494998403ull;
+	if (std::getenv("VRU_PRINT_GOLDEN")) {
+		std::printf("  freeze golden = %lluull\n", static_cast<unsigned long long>(h));
+	}
+	check(h == golden, "Freeze Frame two-renderer pictures match the pinned hash");
+	freezeFrameReleaseSlot(fz.freezeSlotId);
+	videoBusClear(2);
+	videoBusClear(1);
+}
+
+// One renderer rendering two root buses alternately, against one renderer per root. Each round renders
+// rootA then rootB. Returns one hash per render (A1 B1 A2 B2 A3 B3).
+std::vector<uint64_t> alternatingHashes(int rootA, int rootB, bool shared) {
+	ServiceRig rig;
+	rig.build();
+	VideoGraphRenderer one, two;
+	std::vector<uint64_t> out;
+	for (int round = 0; round < 3; ++round) {
+		out.push_back(sharedHash(renderSvc(one, rootA)));
+		out.push_back(sharedHash(renderSvc(shared ? one : two, rootB)));
+		rig.nextTick();
+	}
+	rig.release();
+	return out;
+}
+
+void testAlternatingRootsPinned() {
+	std::printf("render service characterization: two roots on one renderer\n");
+	// disjoint: A is bus 3 (oscillator then Yoke), B is bus 2 (Scope Trace). They share no bus.
+	// overlap: A is bus 3, B is bus 4 (a Bus Mixer that reads bus 3 and bus 2). They share buses 3 and 1.
+	// Result today: on disjoint roots one renderer and two renderers draw identical frames. On overlapping roots
+	// they differ from the very first B: the second render of bus 3 starts a new pass, so the Yoke's beam energy
+	// decays and takes new energy twice per round, the oscillator's feedback `previous` frame advances twice,
+	// and Scope Trace (bus 2) is reached from B only. A shared pass must advance each of these once per tick.
+	struct Case { const char* name; int a; int b; };
+	const Case cases[2] = {{"disjoint", 3, 2}, {"overlap", 3, 4}};
+	static const uint64_t golden[2][2][6] = {{{16467987211423747349ull, 10124434794780682920ull, 13662329181823115394ull, 1314343793154128939ull, 3693843981414716914ull, 14888959375497673740ull}, {16467987211423747349ull, 10124434794780682920ull, 13662329181823115394ull, 1314343793154128939ull, 3693843981414716914ull, 14888959375497673740ull}}, {{16467987211423747349ull, 16378486160927061331ull, 7817402214636050050ull, 10759769301473454181ull, 16648296588634103633ull, 12256587926714392161ull}, {16467987211423747349ull, 5930133027663224981ull, 13662329181823115394ull, 9186846114856468411ull, 3693843981414716914ull, 14959408401144526822ull}}};
+	bool allPinned = true;
+	for (int c = 0; c < 2; ++c) {
+		const std::vector<uint64_t> one = alternatingHashes(cases[c].a, cases[c].b, true);
+		const std::vector<uint64_t> two = alternatingHashes(cases[c].a, cases[c].b, false);
+		for (size_t i = 0; i < one.size(); ++i) {
+			if (std::getenv("VRU_PRINT_GOLDEN")) {
+				std::printf("  alt %s %s[%zu] one=%lluull two=%lluull%s\n", cases[c].name, (i % 2) ? "B" : "A", i / 2, static_cast<unsigned long long>(one[i]), static_cast<unsigned long long>(two[i]), one[i] == two[i] ? " same" : " DIFFERENT");
+			}
+			allPinned = allPinned && one[i] == golden[c][0][i] && two[i] == golden[c][1][i];
+		}
+		check(one.size() == 6 && two.size() == 6, "alternating run produced six frames");
+		// The first render of A is the same in both modes: nothing has advanced yet.
+		check(one[0] == two[0], "first render of A is the same either way");
+	}
+	check(allPinned, "alternating roots, one renderer against two, match the pinned hashes");
+}
+
+
+// ---- Render service, stage 1: the gate and the sharing rules ----
+uint64_t gGateTick = 0;
+uint64_t gateTickSource() {
+	return gGateTick;
+}
+
+// One way of asking for pictures: a private renderer (what every consumer did before) or the service.
+// The injected clock for thread mode: seconds, moved by the tests.
+double gThreadTime = 1000.0;
+double threadTimeSource() {
+	return gThreadTime;
+}
+
+struct GateEnv {
+	bool viaService = false;
+	bool viaThread = false;  // thread mode: touch, one synchronous thread tick, frame
+	int width = kSvcW;
+	int height = kSvcH;
+	int threadOwner = 0;
+	VideoGraphRenderer direct;
+	RenderService service;
+
+	explicit GateEnv(bool useService, bool useThread = false) : viaService(useService || useThread), viaThread(useThread) {
+		gGateTick = 1;
+		service.setTickSource(gateTickSource);
+		if (viaThread) {
+			gThreadTime = 1000.0;
+			service.setTimeSource(threadTimeSource);
+			service.setThreadAutoStart(false);
+			service.setThreadMode(true);
+		}
+	}
+
+	// A hash of the picture and the flags the Display reads: signal, cycle.
+	uint64_t get(int root, uint64_t h) {
+		if (viaThread) {
+			service.touch(&threadOwner, root, width, height);
+			service.runTickForTest();
+			const RenderService::Result r = service.frame(&threadOwner, root, width, height);
+			h = sharedHash(*r.pixels, h);
+			return (h ^ (r.signal ? 1u : 0u) ^ (r.cycle ? 2u : 0u)) * 1099511628211ull;
+		}
+		if (viaService) {
+			const RenderService::Result r = service.frame(root, width, height);
+			h = sharedHash(*r.pixels, h);
+			return (h ^ (r.signal ? 1u : 0u) ^ (r.cycle ? 2u : 0u)) * 1099511628211ull;
+		}
+		const Frame& f = direct.renderBus(root, width, height);
+		h = sharedHash(f, h);
+		return (h ^ (direct.hasSignal() ? 1u : 0u) ^ (direct.hasCycle() ? 2u : 0u)) * 1099511628211ull;
+	}
+	void nextTick() {
+		++gGateTick;
+		gThreadTime += 1.0 / 60.0;
+	}
+};
+
+constexpr int kGateGraphs = 10;
+const char* const kGateNames[kGateGraphs] = {"3 level diamond", "8 level diamond", "keyer and video mixer", "feedback diamond", "freeze diamond",
+	"yoke and scope, both beams", "yoke and scope, yoke bus", "yoke and scope, scope bus", "processor chain", "cycle and gap"};
+
+// One picture hash per tick for graph `index`, asked for through `env`.
+std::vector<uint64_t> gateRun(int index, GateEnv& env) {
+	std::vector<uint64_t> out;
+	auto tick = [&](int root) {
+		out.push_back(env.get(root, 1469598103934665603ull));
+		env.nextTick();
+	};
+	switch (index) {
+	case 0:
+	case 1: {
+		const int levels = index == 0 ? 3 : 8;
+		publishDiamond(levels);
+		for (int n = 0; n < 3; ++n) tick(levels + 1);
+		clearBuses(levels + 1);
+		break;
+	}
+	case 2: {
+		publishOsc(1, 0.1f, 1);
+		KeyerParams k;
+		k.mode = 2;
+		videoBusPublishKeyer(2, 1, k);
+		VideoMixerParams v;
+		v.inputBus[0] = 1;
+		v.inputBus[1] = 2;
+		v.next = 1;
+		v.fader = 0.4f;
+		v.keyOn = true;
+		v.keyBus = 2;
+		v.matteBus = 1;
+		videoBusPublishVideoMixer(3, v);
+		for (int n = 0; n < 3; ++n) tick(3);
+		clearBuses(3);
+		break;
+	}
+	case 3: {
+		publishOsc(1, 0.0f, 4);
+		RotatorParams ro;
+		ro.angle = 0.05f;
+		videoBusPublishRotator(2, 1, ro);
+		FeedbackParams fb;
+		fb.ringSlotId = frameRingAllocateSlot();
+		fb.gain = 0.7f;
+		BusMixerParams m;
+		m.busB = 3;
+		m.mode = 1;
+		m.mix = 0.5f;
+		videoBusPublishBusMixer(4, 3, m);
+		for (int n = 1; n <= 5; ++n) {
+			fb.frameCounter = n;
+			videoBusPublishFeedback(3, 2, fb);
+			tick(4);
+		}
+		frameRingReleaseSlot(fb.ringSlotId);
+		clearBuses(4);
+		break;
+	}
+	case 4: {
+		publishOsc(1, 0.3f, 1);
+		FreezeFrameParams fz;
+		fz.freezeSlotId = freezeFrameAllocateSlot();
+		fz.hold = 1.f;
+		fz.blend = 1.f;
+		BusMixerParams m;
+		m.busB = 2;
+		m.mode = 4;
+		m.mix = 0.5f;
+		videoBusPublishBusMixer(3, 1, m);
+		for (int n = 1; n <= 3; ++n) {
+			publishOsc(1, 0.3f + 0.1f * n, n % 2 ? 1 : 4);
+			fz.captureCounter = n == 3 ? 2 : 1;
+			videoBusPublishFreezeFrame(2, 1, fz);
+			tick(3);
+		}
+		freezeFrameReleaseSlot(fz.freezeSlotId);
+		clearBuses(3);
+		break;
+	}
+	case 5:
+	case 6:
+	case 7: {
+		ServiceRig rig;
+		rig.build();
+		const int root = index == 5 ? 4 : (index == 6 ? 3 : 2);
+		for (int n = 0; n < 6; ++n) {
+			out.push_back(env.get(root, 1469598103934665603ull));
+			env.nextTick();
+			rig.nextTick();
+		}
+		rig.release();
+		break;
+	}
+	case 8: {
+		publishOsc(1, 0.2f, 1);
+		ColorLabParams cl;
+		cl.hue = 0.2f;
+		videoBusPublishColorLab(2, 1, cl);
+		ColorizerParams cz;
+		videoBusPublishColorizer(3, 2, cz);
+		WaveShaperParams ws;
+		videoBusPublishWaveShaper(4, 3, ws);
+		RotatorParams ro;
+		ro.angle = 0.1f;
+		videoBusPublishRotator(5, 4, ro);
+		KeyerParams ke;
+		videoBusPublishKeyer(6, 5, ke);
+		FocusParams fo;
+		videoBusPublishFocus(7, 6, fo);
+		LineFieldParams lf;
+		videoBusPublishLineField(8, 7, lf);
+		for (int n = 0; n < 3; ++n) tick(8);
+		clearBuses(8);
+		break;
+	}
+	case 9: {
+		// A good picture, a cycle that must hold it, a bus with nothing on it, then the good picture again.
+		publishOsc(1, 0.2f, 1);
+		publishColor(2, 1, false);
+		tick(2);
+		publishColor(2, 2, false);  // bus 2 reads itself
+		tick(2);
+		tick(2);
+		videoBusClear(2);
+		tick(2);
+		publishColor(2, 1, true);
+		tick(2);
+		clearBuses(2);
+		break;
+	}
+	}
+	return out;
+}
+
+void testRenderServiceGate() {
+	std::printf("render service: a lone consumer gets exactly the frames a private renderer gave it\n");
+	for (int g = 0; g < kGateGraphs; ++g) {
+		std::vector<uint64_t> direct;
+		std::vector<uint64_t> served;
+		{
+			GateEnv env(false);
+			direct = gateRun(g, env);
+		}
+		{
+			GateEnv env(true);
+			served = gateRun(g, env);
+		}
+		const bool same = !direct.empty() && direct == served;
+		if (!same) {
+			std::printf("  gate graph: %s\n", kGateNames[g]);
+		}
+		check(same, "service frames equal a private renderer's, tick for tick");
+	}
+	// Other picture sizes: the Probe's 320 x 240, a small one, and a taller one.
+	const int sizes[3][2] = {{320, 240}, {96, 54}, {256, 192}};
+	for (const auto& sz : sizes) {
+		std::vector<uint64_t> direct, served;
+		{
+			GateEnv env(false);
+			env.width = sz[0];
+			env.height = sz[1];
+			direct = gateRun(5, env);
+		}
+		{
+			GateEnv env(true);
+			env.width = sz[0];
+			env.height = sz[1];
+			served = gateRun(5, env);
+		}
+		check(!direct.empty() && direct == served, "service frames equal a private renderer's at other sizes");
+	}
+}
+
+void testRenderServiceSharing() {
+	std::printf("render service: consumers share one picture per tick\n");
+	gGateTick = 1;
+	ServiceRig rig;
+	rig.build();
+	RenderService svc;
+	svc.setTickSource(gateTickSource);
+
+	// Same bus, same size, same tick: one render, the same buffer.
+	const RenderService::Result first = svc.frame(4, kSvcW, kSvcH);
+	check(svc.busRenderCount(4, kSvcW, kSvcH) == 1, "the first request renders the bus");
+	const uint64_t before = sharedHash(*first.pixels);
+	const RenderService::Result second = svc.frame(4, kSvcW, kSvcH);
+	check(second.pixels == first.pixels && svc.busRenderCount(4, kSvcW, kSvcH) == 1 && sharedHash(*second.pixels) == before,
+		"a second request for the same bus gets the same picture with no render");
+
+	// Another bus at the same size, same tick: it joins the pass, and nothing renders a second time.
+	const RenderService::Result other = svc.frame(3, kSvcW, kSvcH);
+	check(svc.busRenderCount(4, kSvcW, kSvcH) == 1 && svc.busRenderCount(3, kSvcW, kSvcH) == 1 && svc.busRenderCount(1, kSvcW, kSvcH) == 1 &&
+		svc.busRenderCount(2, kSvcW, kSvcH) == 1, "a bus the first root already drew is copied, not drawn again");
+	check(other.signal && other.pixels != first.pixels, "the other bus has a picture of its own");
+	// A different size has a renderer of its own.
+	svc.frame(4, 128, 72);
+	check(svc.sizeCount() == 2 && svc.busRenderCount(4, 128, 72) == 1, "a new size gets its own renderer");
+	check(svc.tickSerial() == 1, "all of that was one tick");
+
+	// Next tick draws again.
+	rig.nextTick();
+	++gGateTick;
+	const uint64_t pic4 = sharedHash(*svc.frame(4, kSvcW, kSvcH).pixels);
+	check(pic4 != before && svc.tickSerial() == 2, "a new tick draws a new picture");
+	rig.release();
+
+	// Two buses on one renderer match the lone consumer of each, over several ticks and in either order.
+	std::vector<uint64_t> lone4, lone3;
+	{
+		GateEnv env(false);
+		lone4 = gateRun(5, env);
+	}
+	{
+		GateEnv env(false);
+		lone3 = gateRun(6, env);
+	}
+	for (int order = 0; order < 2; ++order) {
+		GateEnv env(true);
+		ServiceRig rig2;
+		rig2.build();
+		std::vector<uint64_t> got4, got3;
+		for (int n = 0; n < 6; ++n) {
+			uint64_t h4 = 0, h3 = 0;
+			if (order == 0) {
+				h4 = env.get(4, 1469598103934665603ull);
+				h3 = env.get(3, 1469598103934665603ull);
+			}
+			else {
+				h3 = env.get(3, 1469598103934665603ull);
+				h4 = env.get(4, 1469598103934665603ull);
+			}
+			got4.push_back(h4);
+			got3.push_back(h3);
+			env.nextTick();
+			rig2.nextTick();
+		}
+		rig2.release();
+		check(got4 == lone4, "a bus asked for next to an overlapping bus gets what a lone consumer of it gets (mixer)");
+		check(got3 == lone3, "a bus asked for next to an overlapping bus gets what a lone consumer of it gets (yoke)");
+	}
+
+	// No tick source: every request is a tick of its own, as a private renderer did.
+	{
+		RenderService bare;
+		VideoGraphRenderer priv;
+		ServiceRig rig3;
+		rig3.build();
+		bool same = true;
+		for (int n = 0; n < 4; ++n) {
+			const RenderService::Result r = bare.frame(4, kSvcW, kSvcH);
+			same = same && sharedHash(*r.pixels) == sharedHash(priv.renderBus(4, kSvcW, kSvcH));
+			rig3.nextTick();
+		}
+		rig3.release();
+		check(same && bare.tickSerial() == 4, "with no tick source each request is a tick");
+	}
+}
+
+void testRenderServiceSizes() {
+	std::printf("render service: sizes are capped and idle sizes are dropped\n");
+	gGateTick = 1;
+	publishOsc(1, 0.2f, 1);
+	RenderService svc;
+	svc.setTickSource(gateTickSource);
+	// A zoom sweep: a new size every tick. Never more than kMaxSizes renderers.
+	size_t most = 0;
+	for (int n = 0; n < 40; ++n) {
+		svc.frame(1, 64 + n, 36);
+		most = std::max(most, svc.sizeCount());
+		++gGateTick;
+	}
+	check(most <= RenderService::kMaxSizes, "a long zoom sweep keeps at most kMaxSizes renderers");
+	// Several consumers in one tick are never dropped, even past the cap.
+	for (int n = 0; n < 8; ++n) {
+		svc.frame(1, 200 + n, 100);
+	}
+	check(svc.sizeCount() >= 8, "sizes in use this tick are kept");
+	// Idle sizes age out after kIdleTicks ticks; the size in use stays.
+	for (uint64_t n = 1; n <= RenderService::kIdleTicks + 1; ++n) {
+		++gGateTick;
+		svc.frame(1, 64, 36);
+		if (n == RenderService::kIdleTicks / 2) {
+			check(svc.sizeCount() > 1, "a size idle for half the limit is still kept");
+		}
+	}
+	check(svc.sizeCount() == 1, "sizes idle for the limit are dropped and the size in use remains");
+	svc.clear();
+	check(svc.sizeCount() == 0, "clear frees every renderer");
+	videoBusClear(1);
+}
+
+// ---- Render service, stage 3 (issue 6): what a Display that is not drawn does today ----
+// A UI consumer that nobody draws never asks the service for a picture. Its service ticks do not happen, so the
+// beam trails (Scope Trace, Deflection Yoke) and the generators stop where they were, while Feedback's frame
+// counter and the signal rings keep moving on the audio thread. When the picture comes back it jumps.
+struct HiddenResult {
+	uint64_t hash4 = 0;  // bus 4: Yoke and Scope Trace beams, mixed
+	uint64_t hash5 = 0;  // bus 5: Feedback
+	uint64_t serial = 0;  // the service's own tick count at the end
+};
+
+// Runs `uiTicks` UI frames. The audio side advances on every one of them. The picture is asked for only on the
+// ticks where drawnOn(tick) is true; the last tick is always drawn. Returns the hashes of the last picture.
+template <class Drawn>
+HiddenResult hiddenScenario(int uiTicks, Drawn drawnOn) {
+	gGateTick = 1;
+	ServiceRig rig;
+	rig.build();
+	FeedbackParams fb;
+	fb.ringSlotId = frameRingAllocateSlot();
+	fb.gain = 0.7f;
+	RenderService svc;
+	svc.setTickSource(gateTickSource);
+	HiddenResult out;
+	for (int t = 1; t <= uiTicks; ++t) {
+		if (t > 1) {
+			rig.nextTick();
+			++gGateTick;
+		}
+		fb.frameCounter = static_cast<uint32_t>(t);
+		videoBusPublishFeedback(5, 1, fb);
+		if (t == uiTicks || drawnOn(t)) {
+			const RenderService::Result a = svc.frame(4, kSvcW, kSvcH);
+			const RenderService::Result b = svc.frame(5, kSvcW, kSvcH);
+			if (t == uiTicks) {
+				out.hash4 = sharedHash(*a.pixels);
+				out.hash5 = sharedHash(*b.pixels);
+			}
+		}
+	}
+	out.serial = svc.tickSerial();
+	frameRingReleaseSlot(fb.ringSlotId);
+	rig.release();
+	videoBusClear(5);
+	return out;
+}
+
+void testHiddenConsumerCharacterization() {
+	std::printf("render service characterization: ticks nobody draws\n");
+	const HiddenResult always = hiddenScenario(8, [](int) { return true; });
+	const HiddenResult gap = hiddenScenario(8, [](int t) { return t == 1; });
+	check(always.serial == 8, "a consumer drawn on every tick advances the service eight times");
+	check(gap.serial == 2, "a consumer drawn on the first and last tick only advances the service twice: the seven hidden ticks leave the trails where they were");
+	check(gap.hash4 != always.hash4, "after the gap the beam picture differs from the one drawn throughout: it jumps");
+	check(gap.hash5 != always.hash5, "after the gap the Feedback picture differs: its frame counter ran on while the picture did not");
+	const HiddenResult again = hiddenScenario(8, [](int t) { return t == 1; });
+	check(again.hash4 == gap.hash4 && again.hash5 == gap.hash5, "the jump is repeatable");
+}
+
+// ---- Render service, stage 3: the picture keeps advancing when nothing is drawn ----
+double gSimTime = 0.0;
+double simTimeSource() {
+	return gSimTime;
+}
+
+// The same run as hiddenScenario, with registrations. `dt` is the seconds between UI frames. The consumer touches the
+// service every UI frame (its step()); it draws only on the ticks where drawnOn(tick) is true (and the last tick).
+// `keepOn` is the plugin setting. Returns the hashes of the picture drawn on the last tick.
+template <class Drawn>
+HiddenResult registeredScenario(int uiTicks, Drawn drawnOn, bool keepOn, double dt, uint64_t* rendersOut = nullptr) {
+	gGateTick = 1;
+	gSimTime = 100.0;
+	ServiceRig rig;
+	rig.build();
+	FeedbackParams fb;
+	fb.ringSlotId = frameRingAllocateSlot();
+	fb.gain = 0.7f;
+	RenderService svc;
+	svc.setTickSource(gateTickSource);
+	svc.setTimeSource(simTimeSource);
+	svc.setHiddenRendering(keepOn);
+	HiddenResult out;
+	int owner4 = 0, owner5 = 0;
+	fb.frameCounter = 1;
+	videoBusPublishFeedback(5, 1, fb);
+	for (int t = 1; t <= uiTicks; ++t) {
+		if (t > 1) {
+			++gGateTick;
+			gSimTime += dt;
+		}
+		// step(): every tick. The first call of a tick closes the one before, so the hidden render of tick t - 1 runs
+		// here, before this tick's audio moves on (in Rack the audio thread runs on its own; this order is what makes
+		// the two runs comparable).
+		svc.touch(&owner4, 4, kSvcW, kSvcH);
+		svc.touch(&owner5, 5, kSvcW, kSvcH);
+		if (t > 1) {
+			rig.nextTick();
+			fb.frameCounter = static_cast<uint32_t>(t);
+			videoBusPublishFeedback(5, 1, fb);
+		}
+		if (t == uiTicks || drawnOn(t)) {  // draw(): only when on screen
+			const RenderService::Result a = svc.frame(4, kSvcW, kSvcH);
+			const RenderService::Result b = svc.frame(5, kSvcW, kSvcH);
+			if (t == uiTicks) {
+				out.hash4 = sharedHash(*a.pixels);
+				out.hash5 = sharedHash(*b.pixels);
+			}
+		}
+	}
+	out.serial = svc.tickSerial();
+	if (rendersOut) {
+		*rendersOut = svc.renderTotal();
+	}
+	frameRingReleaseSlot(fb.ringSlotId);
+	rig.release();
+	videoBusClear(5);
+	return out;
+}
+
+void testHiddenKeepsRunning() {
+	std::printf("render service: a consumer that is not drawn gets the picture of one drawn on every tick\n");
+	const double dt = 0.04;  // 25 UI frames a second: slower than the cap, so the cap never skips a tick
+	const HiddenResult always = registeredScenario(8, [](int) { return true; }, true, dt);
+	const HiddenResult hiddenThenDrawn = registeredScenario(8, [](int) { return false; }, true, dt);
+	const HiddenResult sparse = registeredScenario(8, [](int t) { return t == 1 || t == 4; }, true, dt);
+	check(always.hash4 != 0 && always.hash5 != 0, "the drawn run made pictures");
+	check(hiddenThenDrawn.hash4 == always.hash4, "beams, generators: hidden for seven ticks then drawn equals drawn throughout");
+	check(hiddenThenDrawn.hash5 == always.hash5, "Feedback: hidden for seven ticks then drawn equals drawn throughout");
+	check(sparse.hash4 == always.hash4 && sparse.hash5 == always.hash5, "drawn now and then equals drawn throughout");
+	check(hiddenThenDrawn.serial == 8, "the service ticked on every UI frame");
+	// The pre-change characterization held for a consumer that does not register.
+	const HiddenResult stage2 = hiddenScenario(8, [](int t) { return t == 1; });
+	check(hiddenThenDrawn.hash4 != stage2.hash4, "with the service keeping it running, the jump of the old behaviour is gone");
+
+	// With the setting off the old characterization holds exactly, whatever the consumers do.
+	const HiddenResult offGap = registeredScenario(8, [](int t) { return t == 1; }, false, dt);
+	const HiddenResult plainGap = hiddenScenario(8, [](int t) { return t == 1; });
+	check(offGap.serial == 2 && offGap.hash4 == plainGap.hash4 && offGap.hash5 == plainGap.hash5,
+		"setting off: a hidden consumer behaves exactly as before (two service ticks, the same jump)");
+	const HiddenResult offAlways = registeredScenario(8, [](int) { return true; }, false, dt);
+	check(offAlways.hash4 == always.hash4 && offAlways.hash5 == always.hash5, "setting off: a drawn consumer gets the same pictures either way");
+}
+
+void testHiddenDrawnConsumerUnchanged() {
+	std::printf("render service: a drawn consumer's frames do not change when another bus is only registered\n");
+	std::vector<uint64_t> lone3;
+	{
+		GateEnv env(false);
+		lone3 = gateRun(6, env);
+	}
+	for (int keepOn = 0; keepOn < 2; ++keepOn) {
+		gGateTick = 1;
+		gSimTime = 100.0;
+		ServiceRig rig;
+		rig.build();
+		RenderService svc;
+		svc.setTickSource(gateTickSource);
+		svc.setTimeSource(simTimeSource);
+		svc.setHiddenRendering(keepOn != 0);
+		int hiddenOwner = 0;
+		std::vector<uint64_t> got;
+		for (int n = 0; n < 6; ++n) {
+			svc.touch(&hiddenOwner, 4, kSvcW, kSvcH);  // bus 4 overlaps bus 3 and is never drawn
+			const RenderService::Result d = svc.frame(3, kSvcW, kSvcH);
+			uint64_t h = sharedHash(*d.pixels, 1469598103934665603ull);
+			got.push_back((h ^ (d.signal ? 1u : 0u) ^ (d.cycle ? 2u : 0u)) * 1099511628211ull);
+			++gGateTick;
+			gSimTime += 0.017;
+			rig.nextTick();
+		}
+		rig.release();
+		check(got == lone3, "a drawn bus gets what a lone consumer gets, with an overlapping hidden bus registered");
+	}
+}
+
+void testHiddenCap() {
+	std::printf("render service: hidden renders are capped at 30 a second, drawn ticks are not\n");
+	const double dt = 1.0 / 60.0;
+	uint64_t hiddenRenders = 0;
+	registeredScenario(120, [](int) { return false; }, true, dt, &hiddenRenders);
+	// Two buses (4 and 5) are registered; each hidden pass renders both roots, plus what they read. Count passes via the
+	// busRenderCount of bus 4 instead, below. Here: two seconds of nothing drawn must be about 60 passes, not 120.
+	uint64_t drawnRenders = 0;
+	registeredScenario(120, [](int) { return true; }, true, dt, &drawnRenders);
+	check(hiddenRenders > 0 && hiddenRenders < drawnRenders, "nothing drawn renders less than drawing every tick");
+	const double ratio = static_cast<double>(hiddenRenders) / static_cast<double>(drawnRenders);
+	check(ratio > 0.45 && ratio < 0.55, "nothing drawn at 60 ticks a second renders on every other tick");
+	// One consumer on one bus: count the renders directly over three seconds.
+	gGateTick = 1;
+	gSimTime = 100.0;
+	publishOsc(1, 0.2f, 1);
+	RenderService svc;
+	svc.setTickSource(gateTickSource);
+	svc.setTimeSource(simTimeSource);
+	int owner = 0;
+	for (int n = 0; n < 180; ++n) {
+		svc.touch(&owner, 1, 64, 36);
+		++gGateTick;
+		gSimTime += dt;
+	}
+	check(svc.renderTotal() >= 85 && svc.renderTotal() <= 91, "three seconds of nothing drawn at 60 Hz make about 90 renders, 30 a second");
+	// One draw in a tick lifts the cap for that tick: a drawn tick renders even right after a hidden one.
+	svc.frame(1, 64, 36);  // a drawn tick to start from
+	++gGateTick;
+	gSimTime += dt;
+	svc.touch(&owner, 1, 64, 36);
+	const uint64_t before = svc.renderTotal();
+	for (int n = 0; n < 10; ++n) {
+		svc.frame(1, 64, 36);
+		++gGateTick;
+		gSimTime += dt;
+		svc.touch(&owner, 1, 64, 36);
+	}
+	check(svc.renderTotal() - before == 10, "drawn ticks render on every tick, and the registration adds no second render");
+	// A consumer that stops touching stops costing anything, and forget() drops it at once.
+	check(svc.registrationCount() == 1, "one registration");
+	++gGateTick;
+	gSimTime += dt;
+	svc.touch(nullptr, 1, 64, 36);  // closes the last tick the consumer touched
+	const uint64_t idle = svc.renderTotal();
+	for (int n = 0; n < 30; ++n) {
+		++gGateTick;
+		gSimTime += dt;
+		svc.touch(nullptr, 1, 64, 36);
+	}
+	check(svc.renderTotal() == idle && svc.registrationCount() == 0, "a consumer that does not renew its registration is dropped and costs nothing");
+	svc.touch(&owner, 1, 64, 36);
+	svc.forget(&owner);
+	check(svc.registrationCount() == 0, "forget drops a registration");
+	videoBusClear(1);
+}
+
+// What Video Probe and Display do with the pictures touch() hands back, with nothing ever drawn.
+void testHiddenProbeAndDisplayFeed() {
+	std::printf("render service: Video Probe's frame hand-off and Display's picture feed run with no draw\n");
+	constexpr int W = video_probe::kW;
+	constexpr int H = video_probe::kH;
+	gGateTick = 1;
+	gSimTime = 100.0;
+	ServiceRig rig;
+	rig.build();
+	RenderService svc;
+	svc.setTickSource(gateTickSource);
+	svc.setTimeSource(simTimeSource);
+	std::unique_ptr<video_probe::Frame[]> frames(new video_probe::Frame[3]());
+	video_probe::TripleBuffer handOff;
+	video_probe::Analyzer analyzer;
+	int probe = 0, display = 0;
+	uint32_t published = 0;
+	uint32_t displayPictures = 0;
+	std::vector<float> avgs;
+	std::vector<uint64_t> displayHashes;
+	for (int n = 0; n < 60; ++n) {
+		// step() of the Probe widget
+		const RenderService::Taken p = svc.touch(&probe, 4, W, H);
+		if (p.fresh && p.signal && p.pixels->size() == static_cast<size_t>(W) * H * 4u) {
+			video_probe::Frame& slot = frames[handOff.writeIndex()];
+			analyzer.analyze(p.pixels->data(), slot);
+			handOff.publish();
+			++published;
+			avgs.push_back(frames[handOff.readIndex()].avg);
+		}
+		// step() of the Display widget (another size)
+		const RenderService::Taken d = svc.touch(&display, 4, kSvcW, kSvcH);
+		if (d.fresh && d.signal) {
+			++displayPictures;
+			displayHashes.push_back(sharedHash(*d.pixels));
+		}
+		++gGateTick;
+		gSimTime += 1.0 / 60.0;
+		rig.nextTick();
+	}
+	rig.release();
+	check(svc.renderTotal() > 0, "the service rendered with no draw() at all");
+	check(published >= 25 && published <= 31, "the Probe's published frame advances about 30 times a second with nothing drawn");
+	check(displayPictures >= 25 && displayPictures <= 31, "the Display's SHOT and REC feed gets a new picture about 30 times a second with nothing drawn");
+	bool moves = false;
+	for (size_t i = 1; i < avgs.size(); ++i) {
+		moves = moves || avgs[i] != avgs[i - 1];
+	}
+	check(moves, "the published frames differ from one another (the picture moves)");
+	bool distinct = displayHashes.size() > 1;
+	for (size_t i = 1; i < displayHashes.size(); ++i) {
+		distinct = distinct && displayHashes[i] != displayHashes[i - 1];
+	}
+	check(distinct, "every picture the Display feed gets is new");
+}
+
+// ---- Render service, stage 4: the render thread ----
+
+// Aborts the program when a test that should finish in `seconds` does not (a deadlock must not hang the run).
+struct Watchdog {
+	std::atomic<bool> done {false};
+	std::thread watcher;
+	Watchdog(const char* what, int seconds) {
+		watcher = std::thread([this, what, seconds]() {
+			for (int i = 0; i < seconds * 20; ++i) {
+				if (done.load()) {
+					return;
+				}
+				std::this_thread::sleep_for(std::chrono::milliseconds(50));
+			}
+			std::fprintf(stderr, "WATCHDOG: %s did not finish in %d s\n", what, seconds);
+			std::abort();
+		});
+	}
+	~Watchdog() {
+		done.store(true);
+		watcher.join();
+	}
+};
+
+// The thread-mode twin of registeredScenario with everything drawn: one synchronous thread tick per UI frame.
+HiddenResult threadScenario(int ticks) {
+	gGateTick = 1;
+	gThreadTime = 1000.0;
+	ServiceRig rig;
+	rig.build();
+	FeedbackParams fb;
+	fb.ringSlotId = frameRingAllocateSlot();
+	fb.gain = 0.7f;
+	RenderService svc;
+	svc.setTimeSource(threadTimeSource);
+	svc.setThreadAutoStart(false);
+	svc.setThreadMode(true);
+	HiddenResult out;
+	int owner4 = 0, owner5 = 0;
+	fb.frameCounter = 1;
+	videoBusPublishFeedback(5, 1, fb);
+	for (int t = 1; t <= ticks; ++t) {
+		if (t > 1) {
+			gThreadTime += 1.0 / 60.0;
+		}
+		svc.touch(&owner4, 4, kSvcW, kSvcH);
+		svc.touch(&owner5, 5, kSvcW, kSvcH);
+		if (t > 1) {
+			rig.nextTick();
+			fb.frameCounter = static_cast<uint32_t>(t);
+			videoBusPublishFeedback(5, 1, fb);
+		}
+		svc.runTickForTest();
+		const RenderService::Result a = svc.frame(&owner4, 4, kSvcW, kSvcH);
+		const RenderService::Result b = svc.frame(&owner5, 5, kSvcW, kSvcH);
+		if (t == ticks) {
+			out.hash4 = sharedHash(*a.pixels);
+			out.hash5 = sharedHash(*b.pixels);
+		}
+	}
+	out.serial = svc.threadTickCount();
+	frameRingReleaseSlot(fb.ringSlotId);
+	rig.release();
+	videoBusClear(5);
+	return out;
+}
+
+void testThreadEquivalence() {
+	std::printf("render thread: synchronous thread ticks give the frames UI ticks with everything drawn give\n");
+	for (int g = 0; g < kGateGraphs; ++g) {
+		std::vector<uint64_t> served;
+		std::vector<uint64_t> threaded;
+		{
+			GateEnv env(true);
+			served = gateRun(g, env);
+		}
+		{
+			GateEnv env(false, true);
+			threaded = gateRun(g, env);
+		}
+		const bool same = !served.empty() && served == threaded;
+		if (!same) {
+			std::printf("  gate graph: %s\n", kGateNames[g]);
+		}
+		check(same, "thread-mode frames equal UI-mode frames, tick for tick");
+	}
+	const int sizes[3][2] = {{320, 240}, {96, 54}, {256, 192}};
+	for (const auto& sz : sizes) {
+		std::vector<uint64_t> served, threaded;
+		{
+			GateEnv env(true);
+			env.width = sz[0];
+			env.height = sz[1];
+			served = gateRun(5, env);
+		}
+		{
+			GateEnv env(false, true);
+			env.width = sz[0];
+			env.height = sz[1];
+			threaded = gateRun(5, env);
+		}
+		check(!served.empty() && served == threaded, "thread-mode frames equal UI-mode frames at other sizes");
+	}
+	// Two roots at once (beams, generators and Feedback share passes).
+	const HiddenResult ui = registeredScenario(24, [](int) { return true; }, true, 1.0 / 60.0);
+	const HiddenResult th = threadScenario(24);
+	check(ui.hash4 != 0 && ui.hash5 != 0, "the UI run made pictures");
+	check(th.hash4 == ui.hash4 && th.hash5 == ui.hash5, "two roots with beams, generators and Feedback: thread-mode pictures equal UI-mode pictures");
+	check(th.serial == 24, "one thread tick per UI frame");
+}
+
+void testThreadSemantics() {
+	std::printf("render thread: handing frames to consumers\n");
+	gThreadTime = 1000.0;
+	ServiceRig rig;
+	rig.build();
+	RenderService svc;
+	svc.setTimeSource(threadTimeSource);
+	svc.setThreadAutoStart(false);
+	svc.setThreadMode(true);
+	check(svc.threadMode() && svc.feedsFromStep(), "thread mode is on");
+	int owner = 0;
+	const RenderService::Result first = svc.frame(&owner, 4, kSvcW, kSvcH);
+	check(first.pending && !first.signal && !first.fresh && first.pixels->empty(), "before the first tick the picture is pending, not NO VIDEO");
+	check(svc.renderTotal() == 0, "frame() renders nothing");
+	svc.runTickForTest();
+	check(svc.renderTotal() > 0, "the tick renders the registered bus");
+	const uint64_t afterTick = svc.renderTotal();
+	const RenderService::Result a = svc.frame(&owner, 4, kSvcW, kSvcH);
+	check(!a.pending && a.signal && a.fresh && !a.pixels->empty(), "after the tick a new picture arrives");
+	const RenderService::Result b = svc.frame(&owner, 4, kSvcW, kSvcH);
+	check(!b.fresh && b.signal && b.pixels == a.pixels, "asking again with no tick between says nothing new and gives the same picture");
+	check(svc.renderTotal() == afterTick, "frame() never renders");
+	gThreadTime += 1.0 / 60.0;
+	rig.nextTick();
+	svc.runTickForTest();
+	const uint64_t hashA = sharedHash(*a.pixels);
+	const RenderService::Result c = svc.frame(&owner, 4, kSvcW, kSvcH);
+	check(c.fresh && c.pixels != a.pixels && sharedHash(*a.pixels) == hashA, "the next tick publishes a new picture and the old one a consumer holds stays intact");
+	// touch() has its own memory.
+	const RenderService::Taken t1 = svc.touch(&owner, 4, kSvcW, kSvcH);
+	const RenderService::Taken t2 = svc.touch(&owner, 4, kSvcW, kSvcH);
+	check(t1.fresh && t1.signal && !t2.fresh, "touch() hands the newest picture once");
+
+	// The public API's read: never renders; an unregistered size registers itself and is served one tick late.
+	std::vector<unsigned char> dst(static_cast<size_t>(64) * 36 * 4, 7);
+	const uint64_t beforeRead = svc.renderTotal();
+	check(!svc.readCopy(4, 64, 36, dst.data(), 64 * 4), "a size nobody registered has no picture on the first read");
+	check(svc.renderTotal() == beforeRead, "readCopy() never renders on the caller's thread");
+	check(svc.registrationCount() == 0, "(the UI-driven registration list stays out of thread mode)");
+	svc.runTickForTest();
+	check(svc.readCopy(4, 64, 36, dst.data(), 64 * 4), "the read registered the size, so the next tick makes a picture for it");
+	std::vector<unsigned char> again(dst.size(), 0);
+	check(svc.readCopy(4, 64, 36, again.data(), 64 * 4) && again == dst, "a second read with no tick between copies the same picture");
+	// The size that has a registered consumer is read without waiting.
+	std::vector<unsigned char> big(static_cast<size_t>(kSvcW) * kSvcH * 4);
+	const RenderService::Result latest = svc.frame(&owner, 4, kSvcW, kSvcH);
+	check(svc.readCopy(4, kSvcW, kSvcH, big.data(), kSvcW * 4) && std::equal(big.begin(), big.end(), latest.pixels->begin()), "the API gets a copy of the newest finished picture of a registered size");
+
+	// Registrations expire; a picture nobody asks for is dropped.
+	check(svc.sizeCount() == 2, "two sizes are in use");
+	gThreadTime += 2.5;
+	svc.runTickForTest();
+	check(!svc.readCopy(4, kSvcW, kSvcH, big.data(), kSvcW * 4), "a registration that was not renewed has expired, and its picture is gone");
+	const RenderService::Result gone = svc.frame(&owner, 4, kSvcW, kSvcH);
+	check(gone.pending, "a consumer that returns after the expiry is registered again and waits for the next tick");
+
+	// Switching the setting off hands the renderers back to the UI-driven path.
+	svc.setThreadMode(false);
+	check(!svc.threadMode() && !svc.threadRunning(), "thread mode off");
+	svc.setTickSource(gateTickSource);
+	gGateTick = 500;
+	const RenderService::Result ui = svc.frame(4, kSvcW, kSvcH);
+	check(ui.signal && ui.fresh && !ui.pending && svc.renderTotal() > afterTick, "with the mode off frame() renders on the caller's thread again");
+	svc.setThreadMode(true);
+	const RenderService::Result back = svc.frame(&owner, 4, kSvcW, kSvcH);
+	check(back.pending, "switching on again starts with nothing published");
+	rig.release();
+}
+
+// Waits (bounded) until `pred` is true.
+template <class Pred>
+bool waitFor(Pred pred, int milliseconds) {
+	for (int i = 0; i < milliseconds; ++i) {
+		if (pred()) {
+			return true;
+		}
+		std::this_thread::sleep_for(std::chrono::milliseconds(1));
+	}
+	return pred();
+}
+
+void testThreadStartStop() {
+	std::printf("render thread: start and stop\n");
+	Watchdog dog("testThreadStartStop", 120);
+	publishOsc(1, 0.2f, 1);
+	int deadlockFree = 0;
+	// 200 cycles, alternating the three ways it can end: the setting goes off, the service is destroyed while the
+	// thread runs, and the thread is stopped by hand.
+	for (int cycle = 0; cycle < 200; ++cycle) {
+		auto svc = std::make_unique<RenderService>();
+		svc->setThreadMode(true);
+		int owner = 0;
+		bool got = false;
+		for (int tries = 0; tries < 2000 && !got; ++tries) {
+			const RenderService::Taken t = svc->touch(&owner, 1, 64, 36);
+			got = t.fresh && t.signal;
+			if (!got) {
+				std::this_thread::sleep_for(std::chrono::milliseconds(1));
+			}
+		}
+		if (!got || !svc->threadRunning()) {
+			check(false, "the thread started and published a picture");
+			break;
+		}
+		switch (cycle % 3) {
+		case 0: svc->setThreadMode(false); break;
+		case 1: svc->stopThread(); break;
+		default: break;  // the destructor stops it
+		}
+		if (cycle % 3 != 2) {
+			if (svc->threadRunning()) {
+				check(false, "the thread has stopped when the call returns");
+				break;
+			}
+		}
+		svc.reset();
+		++deadlockFree;
+	}
+	check(deadlockFree == 200, "200 start and stop cycles ran with no hang");
+	// One service, toggled on and off while consumers keep asking, and a thread that restarts after stopping.
+	RenderService svc;
+	int owner = 0;
+	for (int cycle = 0; cycle < 30; ++cycle) {
+		svc.setThreadMode(true);
+		for (int n = 0; n < 5; ++n) {
+			svc.touch(&owner, 1, 64, 36);
+			svc.frame(&owner, 1, 64, 36);
+			std::this_thread::sleep_for(std::chrono::milliseconds(2));
+		}
+		svc.setThreadMode(false);
+		const RenderService::Result r = svc.frame(1, 64, 36);
+		if (!r.signal) {
+			check(false, "the UI-driven path gives a picture right after switching off");
+			break;
+		}
+	}
+	check(svc.threadStarts() >= 30 && !svc.threadRunning(), "toggling the setting 30 times started the thread each time and left it stopped");
+	// The thread stops itself when the last registration has expired, and starts again for the next consumer.
+	RenderService idle;
+	idle.setTimeSource(threadTimeSource);
+	gThreadTime = 5000.0;
+	idle.setThreadMode(true);
+	idle.touch(&owner, 1, 64, 36);
+	check(waitFor([&]() { return idle.threadTickCount() > 2; }, 2000), "the thread is ticking");
+	gThreadTime += 10.0;  // every registration has expired and nothing has been live for longer than the idle limit
+	check(waitFor([&]() { return !idle.threadRunning(); }, 2000), "the thread stops itself when nothing has been registered for a few seconds");
+	idle.touch(&owner, 1, 64, 36);
+	check(idle.threadRunning() && idle.threadStarts() == 2, "the next consumer starts it again");
+	idle.stopThread();
+	idle.stopThread();
+	check(!idle.threadRunning(), "stopThread() is idempotent");
+	// The thread keeps its schedule: at 60 Hz it makes about 60 ticks a second.
+	RenderService paced;
+	paced.setThreadMode(true);
+	paced.touch(&owner, 1, 64, 36);
+	const auto begin = std::chrono::steady_clock::now();
+	const uint64_t startTicks = paced.threadTickCount();
+	while (std::chrono::steady_clock::now() - begin < std::chrono::milliseconds(1000)) {
+		paced.touch(&owner, 1, 64, 36);
+		std::this_thread::sleep_for(std::chrono::milliseconds(5));
+	}
+	const uint64_t ticks = paced.threadTickCount() - startTicks;
+	paced.stopThread();
+	std::printf("  ticks in one second: %llu\n", static_cast<unsigned long long>(ticks));
+	check(ticks >= 45 && ticks <= 65, "the render thread runs at about 60 ticks a second");
+	videoBusClear(1);
+}
+
 int main(int argc, char** argv) {
 	if (argc > 1) {
 		gProofDir = argv[1];
@@ -7824,6 +9890,8 @@ int main(int argc, char** argv) {
 	testVideoMixerDissolveAndAdd();
 	testVideoMixerWipe();
 	testVideoMixerColor();
+	testVideoMixerGradient();
+	testVideoMixerAll();
 	testVideoMixerKey();
 	testVideoMixerGraph();
 	testVideoMixerReference();
@@ -7839,6 +9907,7 @@ int main(int argc, char** argv) {
 	testSignalRingConcurrent();
 	testExpHz();
 	testDeflectionYokeRipples();
+	testFieldWindowStep();
 	testDeflectionYokeNoGaps();
 	testDeflectionYokeEdges();
 	testDeflectionYokeMath();
@@ -7877,6 +9946,10 @@ int main(int argc, char** argv) {
 	testScopeBeamBrightness();
 	testScopeBeamPipeline();
 	testLorenz();
+	testScanProcessorGoldens();
+	testScanProcessorLiftInSamePicture();
+	testScanProcessorLiftInShapesLines();
+	testScanProcessorScanTimePinned();
 	testScanProcessorFlatLines();
 	testScanProcessorLift();
 	testScanProcessorBunching();
@@ -7894,7 +9967,26 @@ int main(int argc, char** argv) {
 	testPairFinePitch();
 	testPairWave();
 	testPairClockContinuity();
+	testPairLockEnds();
+	testPairHold();
+	testPairScanInputs();
 	testPairProofs();
+	testSharedTapsUnchanged();
+	testSharedTapsRenderOnce();
+	testBeamTrailsPinned();
+	testFreezeTwoRenderersPinned();
+	testAlternatingRootsPinned();
+	testRenderServiceGate();
+	testRenderServiceSharing();
+	testRenderServiceSizes();
+	testHiddenConsumerCharacterization();
+	testHiddenKeepsRunning();
+	testHiddenDrawnConsumerUnchanged();
+	testHiddenCap();
+	testHiddenProbeAndDisplayFeed();
+	testThreadEquivalence();
+	testThreadSemantics();
+	testThreadStartStop();
 
 	std::printf("\n%d checks, %d failed\n", checks, failures);
 	return failures == 0 ? 0 : 1;

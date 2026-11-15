@@ -2,6 +2,7 @@
 #include "panel_style.hpp"
 #include "frame_ring.hpp"
 
+#include <atomic>
 #include <cmath>
 
 struct FeedbackZoomQuantity : ParamQuantity {
@@ -22,6 +23,11 @@ struct Feedback : Module {
 	float clearLightTime = 0.f;
 	dsp::SchmittTrigger clearTrigger;
 	dsp::SchmittTrigger clearButton;
+	// "Fade trails fully to black": the renderer keeps this module's history as float32, so a trail runs down to
+	// exact black instead of sticking at a grey. A module made new in a patch has it on. A module loaded from saved
+	// data that has no such key (every patch saved before this option) has it off, and draws exactly as it did.
+	// Initialize turns it on. Written on the UI thread, read in process().
+	std::atomic<bool> fadeToBlack {true};
 
 	Feedback() {
 		config(PARAMS_LEN, INPUTS_LEN, OUTPUTS_LEN, LIGHTS_LEN);
@@ -43,6 +49,11 @@ struct Feedback : Module {
 		configOutput(VIDEO_BUS_OUTPUT, "Video bus token");
 	}
 	~Feedback() { frameRingReleaseSlot(ringSlotId); }
+
+	void onReset(const ResetEvent& e) override {
+		Module::onReset(e);
+		fadeToBlack.store(true);
+	}
 
 	void process(const ProcessArgs& args) override {
 		tickTime += args.sampleTime;
@@ -76,6 +87,7 @@ struct Feedback : Module {
 		p.key = cv(KEY_PARAM, KEY_INPUT, 0.f, 1.f);
 		p.edge = static_cast<int>(std::round(params[EDGE_PARAM].getValue()));
 		p.mode = static_cast<int>(std::round(params[MODE_PARAM].getValue()));
+		p.fadeToBlack = fadeToBlack.load() ? 1 : 0;
 		if (active) videoBusPublishFeedback(outBus, inBus, p);
 		else videoBusClear(outBus);
 		outputs[VIDEO_BUS_OUTPUT].setVoltage(videoBus.voltage());
@@ -85,10 +97,21 @@ struct Feedback : Module {
 	json_t* dataToJson() override {
 		json_t* rootJ = json_object();
 		saveVideoBusId(rootJ, videoBus);
+		json_object_set_new(rootJ, "fadeTrailsToBlack", json_boolean(fadeToBlack.load()));
 		return rootJ;
 	}
 	void dataFromJson(json_t* rootJ) override {
 		loadVideoBusId(rootJ, videoBus, "outputBusVoltage");
+		// No key means the data was saved before the option existed: keep the old picture.
+		json_t* fadeJ = json_object_get(rootJ, "fadeTrailsToBlack");
+		fadeToBlack.store(fadeJ && json_is_true(fadeJ));
+	}
+	// A saved module whose data object is missing altogether (a hand-made patch) also reaches the old behaviour.
+	// Rack calls fromJson for every module it loads from a patch, preset or undo step, and never for a module
+	// made new from the browser, which is why the default above can be on.
+	void fromJson(json_t* rootJ) override {
+		fadeToBlack.store(false);
+		Module::fromJson(rootJ);
 	}
 };
 
@@ -136,6 +159,17 @@ struct FeedbackWidget : ModuleWidget {
 		addJackLabel(this, sig, "SIG");
 		addChild(createLightCentered<MediumLight<GreenLight>>(mm2px(sig), module, Feedback::SIGNAL_LIGHT));
 		addPlatedOutput<PJ301MPort>(this, Vec(rowX(W, 4, 3, P), 116.f), "BUS", module, Feedback::VIDEO_BUS_OUTPUT);
+	}
+
+	void appendContextMenu(ui::Menu* menu) override {
+		Feedback* feedback = dynamic_cast<Feedback*>(module);
+		if (!feedback) return;
+		menu->addChild(new MenuSeparator);
+		menu->addChild(createCheckMenuItem("Fade trails fully to black", "", [=]() {
+			return feedback->fadeToBlack.load();
+		}, [=]() {
+			feedback->fadeToBlack.store(!feedback->fadeToBlack.load());
+		}));
 	}
 };
 

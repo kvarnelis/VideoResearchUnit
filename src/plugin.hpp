@@ -53,3 +53,6 @@ extern Model* modelShapes;
 extern Model* modelVideoMixer;
 
 extern Model* modelOctoscillator;
+extern Model* modelVectorOsc;
+extern Model* modelVideoProbe;
+extern Model* modelFrameDelay;

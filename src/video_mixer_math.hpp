@@ -8,6 +8,8 @@
 // which input is live, which is next, and how far the next one has come up.
 
 constexpr int kVideoMixerInputs = 4;
+// SPAN at full travel steps a gradient's colors this many turns round the wheel (0.4 turn is 144 degrees).
+constexpr float kVideoMixerSpanTurns = 0.4f;
 
 // TIME knob (0..1) to the seconds a whole take lasts, 0.02 s to 20 s, exponential.
 inline float videoMixerTakeSeconds(float knob) {

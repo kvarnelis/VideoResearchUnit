@@ -1,0 +1,164 @@
+{
+  "version": "2.6.6",
+  "zoom": 1.0,
+  "gridOffset": [
+    0.0,
+    0.0
+  ],
+  "modules": [
+    {
+      "id": 1,
+      "plugin": "VideoResearchUnit",
+      "model": "VideoOsc",
+      "version": "2.0.0",
+      "params": [
+        {
+          "id": 0,
+          "value": 2.5868848128521846
+        },
+        {
+          "id": 2,
+          "value": 0.0
+        },
+        {
+          "id": 3,
+          "value": 0.0
+        },
+        {
+          "id": 4,
+          "value": 6
+        },
+        {
+          "id": 5,
+          "value": 0.0
+        },
+        {
+          "id": 10,
+          "value": 0
+        },
+        {
+          "id": 12,
+          "value": 0.8
+        },
+        {
+          "id": 15,
+          "value": 0
+        }
+      ],
+      "pos": [
+        0,
+        0
+      ]
+    },
+    {
+      "id": 2,
+      "plugin": "VideoResearchUnit",
+      "model": "VideoOsc",
+      "version": "2.0.0",
+      "params": [
+        {
+          "id": 0,
+          "value": 5.321928094887363
+        },
+        {
+          "id": 1,
+          "value": 0.58
+        },
+        {
+          "id": 2,
+          "value": 0.0
+        },
+        {
+          "id": 3,
+          "value": 0.0
+        },
+        {
+          "id": 4,
+          "value": 6
+        },
+        {
+          "id": 10,
+          "value": 1
+        },
+        {
+          "id": 12,
+          "value": 1.0
+        },
+        {
+          "id": 15,
+          "value": 0
+        },
+        {
+          "id": 17,
+          "value": 0.5
+        }
+      ],
+      "pos": [
+        20,
+        0
+      ]
+    },
+    {
+      "id": 3,
+      "plugin": "VideoResearchUnit",
+      "model": "Colorizer",
+      "version": "2.0.0",
+      "params": [],
+      "pos": [
+        40,
+        0
+      ]
+    },
+    {
+      "id": 4,
+      "plugin": "VideoResearchUnit",
+      "model": "Display",
+      "version": "2.0.0",
+      "params": [],
+      "pos": [
+        0,
+        1
+      ]
+    },
+    {
+      "id": 5,
+      "plugin": "Core",
+      "model": "Notes",
+      "version": "2.6.6",
+      "params": [],
+      "pos": [
+        31,
+        1
+      ],
+      "data": {
+        "text": "One oscillator bends another inside the picture.\nOscillator 1 (left) draws soft grey rows. Its picture goes into FM IN on oscillator 2. Oscillator 2 draws about 20 bars across the picture. Where oscillator 1 is bright, the bars bunch together. Where it is dark, they spread apart. So the bars bend with the shape of the rows.\nOscillator 1's LOCK A is a little below full, so its rows drift and the bend rolls down the picture.\nTry FM AMT on oscillator 2: negative reverses which parts bunch. Try FREQ A on either oscillator, and LOCK A on oscillator 1 (all the way up stops the roll).\nThe Colorizer paints the grey bars. The Display shows the Colorizer."
+      }
+    }
+  ],
+  "cables": [
+    {
+      "id": 1,
+      "outputModuleId": 1,
+      "outputId": 0,
+      "inputModuleId": 2,
+      "inputId": 10,
+      "color": "#8b4ade"
+    },
+    {
+      "id": 2,
+      "outputModuleId": 2,
+      "outputId": 0,
+      "inputModuleId": 3,
+      "inputId": 0,
+      "color": "#8b4ade"
+    },
+    {
+      "id": 3,
+      "outputModuleId": 3,
+      "outputId": 0,
+      "inputModuleId": 4,
+      "inputId": 0,
+      "color": "#3695ef"
+    }
+  ]
+}

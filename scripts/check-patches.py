@@ -17,13 +17,15 @@ RACK = os.path.expanduser("~/Library/Application Support/Rack2")
 APP = "/Applications/VCV Rack 2 Pro.app/Contents/Resources"
 # model: (params, inputs, outputs)
 COUNTS = {
-    ("VideoResearchUnit", "ScopeTrace"): (28, 18, 3), ("VideoResearchUnit", "VideoOsc"): (17, 6, 1),
+    ("VideoResearchUnit", "ScopeTrace"): (28, 18, 3), ("VideoResearchUnit", "VideoOsc"): (18, 11, 1),
     ("VideoResearchUnit", "BusMixer"): (4, 5, 1), ("VideoResearchUnit", "Colorizer"): (11, 8, 1),
-    ("VideoResearchUnit", "Display"): (3, 5, 1), ("VideoResearchUnit", "ScanProcessor"): (12, 9, 2),
+    ("VideoResearchUnit", "Display"): (3, 5, 1), ("VideoResearchUnit", "ScanProcessor"): (12, 10, 2),
     ("VideoResearchUnit", "Shapes"): (14, 10, 1), ("VideoResearchUnit", "Rotator"): (11, 8, 1),
     ("VideoResearchUnit", "Octoscillator"): (29, 3, 24), ("VideoResearchUnit", "Feedback"): (10, 9, 1),
     ("VideoResearchUnit", "DeflectionYoke"): (28, 29, 1), ("VideoResearchUnit", "DualLfoChaos"): (7, 4, 6),
-    ("VideoResearchUnit", "VideoPlayer"): (5, 4, 2),
+    ("VideoResearchUnit", "VideoPlayer"): (5, 4, 2), ("VideoResearchUnit", "Ramps"): (10, 7, 1),
+    ("VideoResearchUnit", "VectorOsc"): (9, 6, 3), ("VideoResearchUnit", "VideoProbe"): (7, 3, 8), ("VideoResearchUnit", "FrameDelay"): (2, 2, 1), ("VideoResearchUnit", "VideoMixer"): (30, 18, 5),
+    ("VideoResearchUnit", "Keyer"): (8, 6, 1), ("VideoResearchUnit", "ColorLab"): (10, 6, 1),
     ("Fundamental", "VCO"): (8, 4, 4), ("Fundamental", "LFO"): (7, 5, 4), ("Fundamental", "VCA"): (2, 6, 2), ("Fundamental", "8vert"): (8, 8, 8),
     ("Core", "AudioInterface2"): (0, 2, 2), ("Core", "Notes"): (0, 0, 0),
 }

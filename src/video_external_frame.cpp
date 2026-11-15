@@ -66,3 +66,17 @@ void videoExternalFrameClear(int frameId) {
 	active[static_cast<size_t>(frameId - 1)] = false;
 	frames[static_cast<size_t>(frameId - 1)] = ExternalVideoFrame {};
 }
+
+bool videoExternalFrameSize(int frameId, int& width, int& height) {
+	if (!validFrameId(frameId)) {
+		return false;
+	}
+	std::lock_guard<std::mutex> lock(frameMutex);
+	const ExternalVideoFrame& frame = frames[static_cast<size_t>(frameId - 1)];
+	if (!active[static_cast<size_t>(frameId - 1)] || frame.rgba.empty() || frame.width <= 0 || frame.height <= 0) {
+		return false;
+	}
+	width = frame.width;
+	height = frame.height;
+	return true;
+}

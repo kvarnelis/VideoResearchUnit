@@ -12,13 +12,47 @@ constexpr float kBar75 = 0.75f;
 float clamp01(float value) {
 	return std::clamp(value, 0.f, 1.f);
 }
+
+// The two kinds of picture the oscillator patterns can be drawn into.
+struct BytePlane {
+	unsigned char* cur;
+	const unsigned char* prev;
+	float curAt(size_t i) const {
+		return cur[i];
+	}
+	float prevAt(size_t i) const {
+		return prev[i];
+	}
+	void put(size_t i, float v) const {
+		cur[i] = storeByte<StoreRule::Truncate>(v);
+	}
+};
+struct FloatPlane {
+	float* cur;
+	const float* prev;
+	float curAt(size_t i) const {
+		return cur[i];
+	}
+	float prevAt(size_t i) const {
+		return prev[i];
+	}
+	void put(size_t i, float v) const {
+		cur[i] = std::clamp(v, 0.f, 255.f);
+	}
+};
 }
 
-const std::vector<unsigned char>& PreviewVideoEngine::render(int width, int height, const VideoParams& params) {
+const std::vector<unsigned char>& PreviewVideoEngine::render(int width, int height, const VideoParams& params, bool floatOut, const float* fmLuma) {
+	lastFloat = false;
+	activeFmAmount = std::clamp(params.fmAmount, -1.f, 1.f);
+	activeFm = fmLuma != nullptr && activeFmAmount != 0.f ? fmLuma : nullptr;
 	if (width <= 0 || height <= 0) {
 		rgba.clear();
 		return rgba;
 	}
+	const VideoPattern pattern = static_cast<VideoPattern>(params.pattern);
+	const bool testPattern = pattern == VideoPattern::Smpte75 || pattern == VideoPattern::Ebu75 || pattern == VideoPattern::Ebu100 || pattern == VideoPattern::Grayscale || pattern == VideoPattern::Grid;
+	const bool asFloat = floatOut && !testPattern;
 
 	const size_t byteCount = static_cast<size_t>(width) * static_cast<size_t>(height) * 4u;
 	if (rgba.size() != byteCount) {
@@ -26,11 +60,43 @@ const std::vector<unsigned char>& PreviewVideoEngine::render(int width, int heig
 	}
 	if (previous.size() != byteCount || previousWidth != width || previousHeight != height) {
 		previous.assign(byteCount, 0);
+		previousF.assign(byteCount, 0.f);
+		previousIsFloat = false;
 		previousWidth = width;
 		previousHeight = height;
 	}
+	// The setting may have been flipped since the last frame: carry the last picture over into the plane this frame reads.
+	if (asFloat && !previousIsFloat) {
+		previousF.resize(byteCount);
+		bytesToFloat(previous.data(), previousF.data(), byteCount);
+		previousIsFloat = true;
+	}
+	else if (!asFloat && previousIsFloat) {
+		previous.resize(byteCount);
+		floatToBytes(previousF.data(), previous.data(), byteCount);
+		previousIsFloat = false;
+	}
+	if (asFloat) {
+		rgbaF.resize(byteCount);
+	}
 
-	switch (static_cast<VideoPattern>(params.pattern)) {
+	if (asFloat) {
+		const FloatPlane plane{rgbaF.data(), previousF.data()};
+		if (pattern == VideoPattern::BarsAndRows) {
+			renderPair(width, height, params, plane);
+		}
+		else {
+			renderOscillator(width, height, params, plane);
+		}
+		applyColorControls(width, height, params, plane);
+		previousF = rgbaF;
+		lastFloat = true;
+		rgba.clear();
+		return rgba;
+	}
+
+	const BytePlane plane{rgba.data(), previous.data()};
+	switch (pattern) {
 	case VideoPattern::Smpte75:
 		renderSmpte75(width, height);
 		break;
@@ -47,24 +113,27 @@ const std::vector<unsigned char>& PreviewVideoEngine::render(int width, int heig
 		renderGrid(width, height);
 		break;
 	case VideoPattern::BarsAndRows:
-		renderPair(width, height, params);
+		renderPair(width, height, params, plane);
 		break;
 	case VideoPattern::Oscillator:
 	default:
-		renderOscillator(width, height, params);
+		renderOscillator(width, height, params, plane);
 		break;
 	}
 
-	applyColorControls(width, height, params);
+	applyColorControls(width, height, params, plane);
 	previous = rgba;
 	return rgba;
 }
 
-void PreviewVideoEngine::renderOscillator(int width, int height, const VideoParams& params) {
+template <class Plane>
+void PreviewVideoEngine::renderOscillator(int width, int height, const VideoParams& params, Plane plane) {
 	const float frequency = std::max(0.05f, params.frequency);
 	const float feedback = clamp01(params.feedback);
 	const float shape = clamp01(params.shape);
 	const float angle = params.phase * 0.19f;
+	const float* const fm = activeFm;
+	const float fmAmount = activeFmAmount;
 	const float ca = std::cos(angle);
 	const float sa = std::sin(angle);
 
@@ -76,7 +145,9 @@ void PreviewVideoEngine::renderOscillator(int width, int height, const VideoPara
 			const float v = nx * sa + ny * ca;
 			const float radial = std::sqrt(nx * nx + ny * ny);
 
-			const float carrier = std::sin((u * frequency + params.phase) * kPi);
+			// FM IN: the picture offsets the carrier's phase, up to one cycle either way at full amount.
+			const float fmOffset = fm != nullptr ? fmAmount * 4.f * (fm[static_cast<size_t>(y) * static_cast<size_t>(width) + static_cast<size_t>(x)] - 0.5f) : 0.f;
+			const float carrier = fm != nullptr ? std::sin((u * frequency + params.phase + fmOffset) * kPi) : std::sin((u * frequency + params.phase) * kPi);
 			const float folded = std::abs(fract(v * frequency * 0.5f + params.phase * 0.071f) * 2.f - 1.f);
 			const float rings = std::sin((radial * frequency * 2.6f - params.phase * 0.4f) * kPi);
 			const float mixed = carrier * (1.f - shape) + (1.f - folded * 2.f) * shape + rings * 0.25f;
@@ -88,14 +159,14 @@ void PreviewVideoEngine::renderOscillator(int width, int height, const VideoPara
 			hsvToRgb(fract(params.hue + luma * 0.18f + radial * 0.08f), 0.82f, luma, r, g, b);
 
 			const size_t index = (static_cast<size_t>(y) * static_cast<size_t>(width) + static_cast<size_t>(x)) * 4u;
-			r = r * (1.f - feedback) + (previous[index + 0] / 255.f) * feedback;
-			g = g * (1.f - feedback) + (previous[index + 1] / 255.f) * feedback;
-			b = b * (1.f - feedback) + (previous[index + 2] / 255.f) * feedback;
+			r = r * (1.f - feedback) + (plane.prevAt(index + 0) / 255.f) * feedback;
+			g = g * (1.f - feedback) + (plane.prevAt(index + 1) / 255.f) * feedback;
+			b = b * (1.f - feedback) + (plane.prevAt(index + 2) / 255.f) * feedback;
 
-			rgba[index + 0] = static_cast<unsigned char>(clamp01(r) * 255.f);
-			rgba[index + 1] = static_cast<unsigned char>(clamp01(g) * 255.f);
-			rgba[index + 2] = static_cast<unsigned char>(clamp01(b) * 255.f);
-			rgba[index + 3] = 255;
+			plane.put(index + 0, clamp01(r) * 255.f);
+			plane.put(index + 1, clamp01(g) * 255.f);
+			plane.put(index + 2, clamp01(b) * 255.f);
+			plane.put(index + 3, 255.f);
 		}
 	}
 }
@@ -289,7 +360,8 @@ float pairWaveValue(double phase, float wave, double footprint) {
 	return static_cast<float>(std::clamp(v, 0.0, 1.0));
 }
 
-void PreviewVideoEngine::renderPair(int width, int height, const VideoParams& params) {
+template <class Plane>
+void PreviewVideoEngine::renderPair(int width, int height, const VideoParams& params, Plane plane) {
 	const float feedback = clamp01(params.feedback);
 	const float spread = clamp01(params.spread);
 	const int mix = std::clamp(params.mix, 0, 3);
@@ -302,16 +374,67 @@ void PreviewVideoEngine::renderPair(int width, int height, const VideoParams& pa
 	const double cplB = PairClock::cyclesPerLine(cyclesB, params.barsB);
 	const double stepB = cplB / width;  // B's phase across one pixel (A's also takes the bend)
 
-	// Phase at the start of a scanline. Locked bars begin every line at zero; locked rows run on down the
-	// field; a free oscillator starts from the phase latched at the top of the field, and on bars the
-	// second, interlaced field starts half a line later.
-	auto lineStart = [&](bool locked, bool bars, double cpl, int line, double latched) {
-		if (locked) {
-			return bars ? 0.0 : PairClock::wrap(cpl * line);
-		}
-		const double half = bars && params.fieldOdd ? 0.5 : 0.0;
-		return PairClock::wrap(latched + cpl * (half + line));
+	// Phase at the start of every scanline, for one oscillator. Locked bars begin every line at zero; locked
+	// rows run on down the field; a free oscillator starts from the phase latched at the top of the field,
+	// and on bars the second, interlaced field starts half a line later. Those two ends are drawn exactly as
+	// the old LOCK switch drew them.
+	//
+	// In between, the hold pulls the oscillator part of the way back into step at the start of each line
+	// (each field on ROWS): `pull` is the knob squared, so the catch range is wide at the top of the knob and
+	// narrow near the bottom. The error from the locked phase, in cycles, is kept between -0.5 and 0.5. On
+	// bars each line adds the oscillator's drift (its cycles per line, wrapped), then is pulled. A drift
+	// that the pull can balance settles to a fixed error, so the bars stand upright; a drift it cannot
+	// balance makes the error jump a cycle now and then, so the pattern tears into slanted bands and slips.
+	// On rows the locked phase already runs down the field, so the only error is the field's starting
+	// phase, pulled once.
+	auto signedWrap = [](double v) {
+		const double w = v - std::floor(v);
+		return w >= 0.5 ? w - 1.0 : w;
 	};
+	auto fillLineStarts = [&](double* starts, float lock, bool bars, double cpl, double latched) {
+		const double hold = std::clamp(static_cast<double>(lock), 0.0, 1.0);
+		const double half = bars && params.fieldOdd ? 0.5 : 0.0;
+		if (hold >= 1.0) {
+			for (int line = 0; line < kPairLines; ++line) {
+				starts[line] = bars ? 0.0 : PairClock::wrap(cpl * line);
+			}
+		}
+		else if (hold <= 0.0) {
+			for (int line = 0; line < kPairLines; ++line) {
+				starts[line] = PairClock::wrap(latched + cpl * (half + line));
+			}
+		}
+		else {
+			const double keep = 1.0 - hold * hold;
+			double error = signedWrap(latched + cpl * half) * keep;
+			for (int line = 0; line < kPairLines; ++line) {
+				if (bars) {
+					if (line > 0) {
+						error = signedWrap(error + cpl) * keep;
+					}
+					starts[line] = PairClock::wrap(error);
+				}
+				else {
+					starts[line] = PairClock::wrap(cpl * line + error);
+				}
+			}
+		}
+	};
+	std::array<double, kPairLines> startsA {};
+	std::array<double, kPairLines> startsB {};
+	fillLineStarts(startsA.data(), params.lockA, params.barsA, cplA, params.latchedA);
+	fillLineStarts(startsB.data(), params.lockB, params.barsB, cplB, params.latchedB);
+
+	// Scan-time inputs: IN A and IN B push the bars of A and B sideways, and the BEND CV adds to BEND, each
+	// read at the pixel's own scan time. With nothing patched `scanInputs` is false and none of this runs.
+	const bool scanned = params.scanInputs && params.signalSlotId > 0 &&
+		signalRingReadFrame(params.signalSlotId, scanSignal, crt::fieldSeconds(kPairLines)) && scanSignal.valid();
+	const float lineSeconds = static_cast<float>(crt::lineSeconds());
+	auto scanValue = [&](int channel, float t) {
+		const float v = scanSignal.valueAtScanTime(channel, t);
+		return std::isfinite(v) ? std::clamp(v, -8.f, 8.f) : 0.f;
+	};
+
 	// One oscillator: the wave, pulled to mid level as a pixel comes to span half a cycle or more,
 	// where bars finer than the picture can show would only alias.
 	auto oscillator = [&](double phase, float wave, double footprint) {
@@ -320,17 +443,62 @@ void PreviewVideoEngine::renderPair(int width, int height, const VideoParams& pa
 		return 0.5f + (value - 0.5f) * fade;
 	};
 
+	// FM IN: the picture bends oscillator A's rate. On BARS the phase is summed along each line, pixel by pixel, at
+	// A's own rate times 1 + amount x kPairFmDepth x (luma - 0.5). On ROWS the same sum runs down each column, one
+	// pixel row at a time. Nothing here runs without a picture.
+	const float* const fm = activeFm;
+	const double fmGain = fm != nullptr ? static_cast<double>(activeFmAmount) * kPairFmDepth : 0.0;
+	if (fm != nullptr && !params.barsA) {
+		fmColumn.assign(static_cast<size_t>(width), 0.0);
+	}
 	const double uBefore = -0.5 / width;
 	for (int y = 0; y < height; ++y) {
 		const int line = std::min(kPairLines - 1, static_cast<int>((y + 0.5) * kPairLines / height));
-		const double startA = lineStart(params.lockA, params.barsA, cplA, line, params.latchedA);
-		const double startB = lineStart(params.lockB, params.barsB, cplB, line, params.latchedB);
-		const float bBefore = oscillator(startB + cplB * uBefore, waveB, stepB);
-		double phaseBefore = startA + cplA * uBefore + bend * bBefore;
+		const float* const fmRow = fm != nullptr ? fm + static_cast<size_t>(y) * static_cast<size_t>(width) : nullptr;
+		if (fmRow != nullptr && !params.barsA) {
+			const double rowStep = cplA * (static_cast<double>(kPairLines) / height) * fmGain;
+			for (int x = 0; x < width; ++x) {
+				fmColumn[static_cast<size_t>(x)] += rowStep * (fmRow[x] - 0.5);
+			}
+		}
+		double fmSum = 0.0;  // BARS: the FM phase gathered along this line so far, in cycles
+		const double startA = startsA[static_cast<size_t>(line)];
+		const double startB = startsB[static_cast<size_t>(line)];
+		// Sideways push, in cycles of each oscillator, at u = 0 and at the pixel.
+		float pushA = 0.f;
+		float pushB = 0.f;
+		double bendNow = bend;
+		const double lineT = line * lineSeconds;
+		if (scanned) {
+			const float t0 = static_cast<float>(lineT) + uBefore * lineSeconds;
+			pushA = scanValue(kVideoOscInA, t0);
+			pushB = scanValue(kVideoOscInB, t0);
+			bendNow = std::clamp(bend + scanValue(kVideoOscBend, t0), -8.0, 8.0);
+		}
+		const float bBefore = oscillator(startB + cplB * uBefore + pushB, waveB, stepB);
+		double phaseBefore = startA + cplA * uBefore + bendNow * bBefore + pushA;
+		if (fmRow != nullptr && !params.barsA) {
+			phaseBefore += fmColumn[0];
+		}
 		for (int x = 0; x < width; ++x) {
 			const double u = (x + 0.5) / width;
-			const float b = oscillator(startB + cplB * u, waveB, stepB);
-			const double phaseA = startA + cplA * u + bend * b;
+			if (scanned) {
+				const float t = static_cast<float>(lineT) + static_cast<float>(u) * lineSeconds;
+				pushA = scanValue(kVideoOscInA, t);
+				pushB = scanValue(kVideoOscInB, t);
+				bendNow = std::clamp(bend + scanValue(kVideoOscBend, t), -8.0, 8.0);
+			}
+			const float b = oscillator(startB + cplB * u + pushB, waveB, stepB);
+			double phaseA = startA + cplA * u + bendNow * b + pushA;
+			if (fmRow != nullptr) {
+				if (params.barsA) {
+					fmSum += cplA / width * fmGain * (fmRow[x] - 0.5);
+					phaseA += fmSum;
+				}
+				else {
+					phaseA += fmColumn[static_cast<size_t>(x)];
+				}
+			}
 			const float a = oscillator(phaseA, waveA, std::abs(phaseA - phaseBefore));
 			phaseBefore = phaseA;
 
@@ -351,18 +519,19 @@ void PreviewVideoEngine::renderPair(int width, int height, const VideoParams& pa
 			hsvToRgb(fract(params.hue + spread * share), 1.f, level, r, g, blue);
 
 			const size_t index = (static_cast<size_t>(y) * static_cast<size_t>(width) + static_cast<size_t>(x)) * 4u;
-			r = r * (1.f - feedback) + (previous[index + 0] / 255.f) * feedback;
-			g = g * (1.f - feedback) + (previous[index + 1] / 255.f) * feedback;
-			blue = blue * (1.f - feedback) + (previous[index + 2] / 255.f) * feedback;
-			rgba[index + 0] = static_cast<unsigned char>(clamp01(r) * 255.f);
-			rgba[index + 1] = static_cast<unsigned char>(clamp01(g) * 255.f);
-			rgba[index + 2] = static_cast<unsigned char>(clamp01(blue) * 255.f);
-			rgba[index + 3] = 255;
+			r = r * (1.f - feedback) + (plane.prevAt(index + 0) / 255.f) * feedback;
+			g = g * (1.f - feedback) + (plane.prevAt(index + 1) / 255.f) * feedback;
+			blue = blue * (1.f - feedback) + (plane.prevAt(index + 2) / 255.f) * feedback;
+			plane.put(index + 0, clamp01(r) * 255.f);
+			plane.put(index + 1, clamp01(g) * 255.f);
+			plane.put(index + 2, clamp01(blue) * 255.f);
+			plane.put(index + 3, 255.f);
 		}
 	}
 }
 
-void PreviewVideoEngine::applyColorControls(int width, int height, const VideoParams& params) {
+template <class Plane>
+void PreviewVideoEngine::applyColorControls(int width, int height, const VideoParams& params, Plane plane) {
 	const float saturation = std::max(0.f, params.saturation);
 	const float brightness = std::max(0.f, params.brightness);
 	const float contrast = std::max(0.f, params.contrast);
@@ -374,9 +543,9 @@ void PreviewVideoEngine::applyColorControls(int width, int height, const VideoPa
 	for (int y = 0; y < height; ++y) {
 		for (int x = 0; x < width; ++x) {
 			const size_t index = (static_cast<size_t>(y) * static_cast<size_t>(width) + static_cast<size_t>(x)) * 4u;
-			float r = rgba[index + 0] / 255.f;
-			float g = rgba[index + 1] / 255.f;
-			float b = rgba[index + 2] / 255.f;
+			float r = plane.curAt(index + 0) / 255.f;
+			float g = plane.curAt(index + 1) / 255.f;
+			float b = plane.curAt(index + 2) / 255.f;
 			const float luma = r * 0.2126f + g * 0.7152f + b * 0.0722f;
 
 			r = luma + (r - luma) * saturation;
@@ -387,9 +556,9 @@ void PreviewVideoEngine::applyColorControls(int width, int height, const VideoPa
 			g = (g - 0.5f) * contrast + 0.5f;
 			b = (b - 0.5f) * contrast + 0.5f;
 
-			rgba[index + 0] = static_cast<unsigned char>(clamp01(r * brightness) * 255.f);
-			rgba[index + 1] = static_cast<unsigned char>(clamp01(g * brightness) * 255.f);
-			rgba[index + 2] = static_cast<unsigned char>(clamp01(b * brightness) * 255.f);
+			plane.put(index + 0, clamp01(r * brightness) * 255.f);
+			plane.put(index + 1, clamp01(g * brightness) * 255.f);
+			plane.put(index + 2, clamp01(b * brightness) * 255.f);
 		}
 	}
 }
@@ -453,12 +622,10 @@ void PreviewVideoEngine::hsvToRgb(float h, float s, float v, float& r, float& g,
 	}
 }
 
-void renderRamps(std::vector<unsigned char>& rgba, int width, int height, const RampsParams& params) {
-	if (width <= 0 || height <= 0) {
-		rgba.clear();
-		return;
-	}
-	rgba.resize(static_cast<size_t>(width) * static_cast<size_t>(height) * 4u);
+namespace {
+// Ramps: the pixel loop, written once over a destination that is either bytes or floats.
+template <class Dest>
+void rampsInto(Dest dst, int width, int height, const RampsParams& params, const float* modLuma = nullptr) {
 	const RampsParams p = params;
 	const float cx = (width - 1) * 0.5f;
 	const float cy = (height - 1) * 0.5f;
@@ -481,39 +648,70 @@ void renderRamps(std::vector<unsigned char>& rgba, int width, int height, const 
 	};
 	for (int y = 0; y < height; ++y) {
 		for (int x = 0; x < width; ++x) {
-			const float a = layer(p.axisA, p.freqA, p.phaseA, p.waveA, x, y);
+			// MOD IN: the picture offsets layer A's phase, up to one cycle either way at full amount.
+			const float phaseA = modLuma != nullptr ? p.phaseA + p.modAmount * 2.f * (modLuma[static_cast<size_t>(y) * static_cast<size_t>(width) + static_cast<size_t>(x)] - 0.5f) : p.phaseA;
+			const float a = layer(p.axisA, p.freqA, phaseA, p.waveA, x, y);
 			const float b = layer(p.axisB, p.freqB, p.phaseB, p.waveB, x, y);
 			float v = a;
 			if (p.mix == 1) v = 0.5f * (a + b);
 			else if (p.mix == 2) v = 0.5f + 0.5f * (a - b);
 			else if (p.mix == 3) v = a * b;
-			const unsigned char grey = static_cast<unsigned char>(std::lround(255.f * clamp01(v)));
+			const float grey = 255.f * clamp01(v);
 			const size_t i = (static_cast<size_t>(y) * width + x) * 4u;
-			rgba[i] = rgba[i + 1] = rgba[i + 2] = grey;
-			rgba[i + 3] = 255;
+			dst.put(i, grey);
+			dst.put(i + 1, grey);
+			dst.put(i + 2, grey);
+			dst.put(i + 3, 255.f);
 		}
 	}
 }
+}
 
-void renderShapes(std::vector<unsigned char>& rgba, int width, int height, const ShapesParams& params) {
+void renderRamps(std::vector<unsigned char>& rgba, int width, int height, const RampsParams& params) {
 	if (width <= 0 || height <= 0) {
 		rgba.clear();
 		return;
 	}
 	rgba.resize(static_cast<size_t>(width) * static_cast<size_t>(height) * 4u);
+	rampsInto(ByteDest<StoreRule::Lround>{rgba.data()}, width, height, params);
+}
+
+void renderRamps(VideoFrame& out, int width, int height, const RampsParams& params, bool floatOut, const float* modLuma) {
+	if (width <= 0 || height <= 0) {
+		out.beginU8(0);
+		out.clear();
+		return;
+	}
+	const size_t count = static_cast<size_t>(width) * static_cast<size_t>(height) * 4u;
+	if (floatOut) {
+		out.beginF32(count);
+		rampsInto(FloatDest{out.f.data()}, width, height, params, modLuma);
+	}
+	else {
+		out.format = FrameFormat::U8;
+		out.resize(count);
+		rampsInto(ByteDest<StoreRule::Lround>{out.data()}, width, height, params, modLuma);
+	}
+}
+
+namespace {
+template <class Dest>
+void shapesInto(Dest dst, int width, int height, const ShapesParams& params) {
 	const shapes_field::Scene scene = shapes_field::makeScene(params, width, height);
 	const float aspectWorld = static_cast<float>(width) / static_cast<float>(height);
 	auto renderRows = [&](int firstRow, int endRow) {
 		for (int j = firstRow; j < endRow; ++j) {
 			const float wy = (0.5f - (static_cast<float>(j) + 0.5f) / static_cast<float>(height)) * 2.f;
-			unsigned char* row = rgba.data() + static_cast<size_t>(j) * static_cast<size_t>(width) * 4u;
+			const size_t rowStart = static_cast<size_t>(j) * static_cast<size_t>(width) * 4u;
 			for (int i = 0; i < width; ++i) {
 				const float wx = ((static_cast<float>(i) + 0.5f) / static_cast<float>(width) - 0.5f) * 2.f * aspectWorld;
 				const float v = shapes_field::shade(scene, wx, wy);
-				const unsigned char grey = static_cast<unsigned char>(std::lround(255.f * v));
-				unsigned char* px = row + static_cast<size_t>(i) * 4u;
-				px[0] = px[1] = px[2] = grey;
-				px[3] = 255;
+				const float grey = 255.f * v;
+				const size_t px = rowStart + static_cast<size_t>(i) * 4u;
+				dst.put(px, grey);
+				dst.put(px + 1, grey);
+				dst.put(px + 2, grey);
+				dst.put(px + 3, 255.f);
 			}
 		}
 	};
@@ -545,5 +743,33 @@ void renderShapes(std::vector<unsigned char>& rgba, int width, int height, const
 	worker();
 	for (std::thread& th : pool) {
 		th.join();
+	}
+}
+}
+
+void renderShapes(std::vector<unsigned char>& rgba, int width, int height, const ShapesParams& params) {
+	if (width <= 0 || height <= 0) {
+		rgba.clear();
+		return;
+	}
+	rgba.resize(static_cast<size_t>(width) * static_cast<size_t>(height) * 4u);
+	shapesInto(ByteDest<StoreRule::Lround>{rgba.data()}, width, height, params);
+}
+
+void renderShapes(VideoFrame& out, int width, int height, const ShapesParams& params, bool floatOut) {
+	if (width <= 0 || height <= 0) {
+		out.beginU8(0);
+		out.clear();
+		return;
+	}
+	const size_t count = static_cast<size_t>(width) * static_cast<size_t>(height) * 4u;
+	if (floatOut) {
+		out.beginF32(count);
+		shapesInto(FloatDest{out.f.data()}, width, height, params);
+	}
+	else {
+		out.format = FrameFormat::U8;
+		out.resize(count);
+		shapesInto(ByteDest<StoreRule::Lround>{out.data()}, width, height, params);
 	}
 }

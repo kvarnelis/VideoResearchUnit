@@ -1,0 +1,275 @@
+{
+  "version": "2.6.6",
+  "zoom": 1.0,
+  "gridOffset": [
+    0.0,
+    0.0
+  ],
+  "modules": [
+    {
+      "id": 1,
+      "plugin": "VideoResearchUnit",
+      "model": "VectorOsc",
+      "version": "2.2.0",
+      "params": [
+        {
+          "id": 0,
+          "value": -1.7
+        },
+        {
+          "id": 1,
+          "value": 8
+        },
+        {
+          "id": 2,
+          "value": 0.15
+        },
+        {
+          "id": 4,
+          "value": 4
+        },
+        {
+          "id": 5,
+          "value": 0.33
+        },
+        {
+          "id": 6,
+          "value": 0.1
+        }
+      ],
+      "pos": [
+        0,
+        0
+      ]
+    },
+    {
+      "id": 2,
+      "plugin": "VideoResearchUnit",
+      "model": "ScopeTrace",
+      "version": "2.2.0",
+      "params": [
+        {
+          "id": 0,
+          "value": 0
+        }
+      ],
+      "pos": [
+        13,
+        0
+      ]
+    },
+    {
+      "id": 3,
+      "plugin": "VideoResearchUnit",
+      "model": "Display",
+      "version": "2.2.0",
+      "params": [],
+      "pos": [
+        35,
+        0
+      ]
+    },
+    {
+      "id": 4,
+      "plugin": "VideoResearchUnit",
+      "model": "VideoOsc",
+      "version": "2.2.0",
+      "params": [
+        {
+          "id": 4,
+          "value": 6
+        },
+        {
+          "id": 12,
+          "value": 0.85
+        },
+        {
+          "id": 13,
+          "value": 1.0
+        },
+        {
+          "id": 14,
+          "value": 0.5
+        }
+      ],
+      "pos": [
+        0,
+        1
+      ]
+    },
+    {
+      "id": 5,
+      "plugin": "Fundamental",
+      "model": "LFO",
+      "version": "2.6.4",
+      "params": [
+        {
+          "id": 0,
+          "value": 0
+        },
+        {
+          "id": 2,
+          "value": -3.0
+        }
+      ],
+      "pos": [
+        21,
+        1
+      ]
+    },
+    {
+      "id": 6,
+      "plugin": "VideoResearchUnit",
+      "model": "Display",
+      "version": "2.2.0",
+      "params": [],
+      "pos": [
+        33,
+        1
+      ]
+    },
+    {
+      "id": 7,
+      "plugin": "VideoResearchUnit",
+      "model": "Ramps",
+      "version": "2.2.0",
+      "params": [],
+      "pos": [
+        0,
+        2
+      ]
+    },
+    {
+      "id": 8,
+      "plugin": "VideoResearchUnit",
+      "model": "Shapes",
+      "version": "2.2.0",
+      "params": [],
+      "pos": [
+        15,
+        2
+      ]
+    },
+    {
+      "id": 9,
+      "plugin": "VideoResearchUnit",
+      "model": "VideoMixer",
+      "version": "2.2.0",
+      "params": [
+        {
+          "id": 0,
+          "value": 0.08
+        },
+        {
+          "id": 1,
+          "value": 0.58
+        },
+        {
+          "id": 4,
+          "value": 2
+        },
+        {
+          "id": 5,
+          "value": 2
+        },
+        {
+          "id": 10,
+          "value": 0.5
+        },
+        {
+          "id": 24,
+          "value": 0.5
+        }
+      ],
+      "pos": [
+        31,
+        2
+      ]
+    },
+    {
+      "id": 10,
+      "plugin": "VideoResearchUnit",
+      "model": "Display",
+      "version": "2.2.0",
+      "params": [],
+      "pos": [
+        63,
+        2
+      ]
+    }
+  ],
+  "cables": [
+    {
+      "id": 1,
+      "outputModuleId": 1,
+      "outputId": 0,
+      "inputModuleId": 2,
+      "inputId": 0,
+      "color": "#ffb437"
+    },
+    {
+      "id": 2,
+      "outputModuleId": 1,
+      "outputId": 1,
+      "inputModuleId": 2,
+      "inputId": 1,
+      "color": "#ffb437"
+    },
+    {
+      "id": 3,
+      "outputModuleId": 1,
+      "outputId": 2,
+      "inputModuleId": 2,
+      "inputId": 2,
+      "color": "#00b56e"
+    },
+    {
+      "id": 4,
+      "outputModuleId": 2,
+      "outputId": 0,
+      "inputModuleId": 3,
+      "inputId": 0,
+      "color": "#3695ef"
+    },
+    {
+      "id": 5,
+      "outputModuleId": 5,
+      "outputId": 0,
+      "inputModuleId": 4,
+      "inputId": 8,
+      "color": "#00b56e"
+    },
+    {
+      "id": 6,
+      "outputModuleId": 4,
+      "outputId": 0,
+      "inputModuleId": 6,
+      "inputId": 0,
+      "color": "#3695ef"
+    },
+    {
+      "id": 7,
+      "outputModuleId": 7,
+      "outputId": 0,
+      "inputModuleId": 9,
+      "inputId": 0,
+      "color": "#ffb437"
+    },
+    {
+      "id": 8,
+      "outputModuleId": 8,
+      "outputId": 0,
+      "inputModuleId": 9,
+      "inputId": 1,
+      "color": "#00b56e"
+    },
+    {
+      "id": 9,
+      "outputModuleId": 9,
+      "outputId": 0,
+      "inputModuleId": 10,
+      "inputId": 0,
+      "color": "#3695ef"
+    }
+  ]
+}

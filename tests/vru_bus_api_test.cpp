@@ -42,7 +42,7 @@ static std::vector<uint8_t> pattern(int w, int h, size_t stride) {
 
 int main() {
 	CHECK(vruBusGetApi(0) == nullptr);
-	CHECK(vruBusGetApi(2) == nullptr);
+	CHECK(vruBusGetApi(3) == nullptr);
 	CHECK(vruBusGetApi(0xFFFFFFFFu) == nullptr);
 	const VruBusApiV1* api = vruBusGetApi(VRU_BUS_API_VERSION);
 	CHECK(api != nullptr);

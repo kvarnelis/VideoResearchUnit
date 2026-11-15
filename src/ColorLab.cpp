@@ -6,8 +6,8 @@
 #include <cmath>
 
 struct ColorLab : Module {
-	enum ParamId { HUE_PARAM, SAT_PARAM, BRIGHT_PARAM, CONTRAST_PARAM, POSTER_PARAM, SOLAR_PARAM, CHANNEL_PARAM, INVERT_PARAM, MIX_PARAM, PARAMS_LEN };
-	enum InputId { VIDEO_BUS_INPUT, HUE_INPUT, SAT_INPUT, BRIGHT_INPUT, MIX_INPUT, INPUTS_LEN };
+	enum ParamId { HUE_PARAM, SAT_PARAM, BRIGHT_PARAM, CONTRAST_PARAM, POSTER_PARAM, SOLAR_PARAM, CHANNEL_PARAM, INVERT_PARAM, MIX_PARAM, MOD_AMOUNT_PARAM, PARAMS_LEN };
+	enum InputId { VIDEO_BUS_INPUT, HUE_INPUT, SAT_INPUT, BRIGHT_INPUT, MIX_INPUT, MOD_INPUT, INPUTS_LEN };
 	enum OutputId { VIDEO_BUS_OUTPUT, OUTPUTS_LEN };
 	enum LightId { SIGNAL_LIGHT, LIGHTS_LEN };
 	VideoBusOwner videoBus;
@@ -23,6 +23,10 @@ struct ColorLab : Module {
 		configSwitch(INVERT_PARAM, 0.f, 1.f, 0.f, "Invert", {"Off", "On"});
 		configParam(MIX_PARAM, 0.f, 1.f, 1.f, "Mix");
 		configInput(VIDEO_BUS_INPUT, "Video bus token"); configInput(HUE_INPUT, "Hue CV"); configInput(SAT_INPUT, "Saturation CV"); configInput(BRIGHT_INPUT, "Brightness CV"); configInput(MIX_INPUT, "Mix CV");
+		configParam(MOD_AMOUNT_PARAM, -1.f, 1.f, 0.f, "Mod amount");
+		paramQuantities[MOD_AMOUNT_PARAM]->description = "How far the MOD IN picture shifts the hue. 0 is none. At full, a black pixel shifts the hue half a turn one way and a white pixel half a turn the other way; mid grey shifts nothing.";
+		configInput(MOD_INPUT, "Mod In (video bus)");
+		inputInfos[MOD_INPUT]->description = "A second picture. Its brightness, at each pixel, shifts the hue at that pixel, on top of the HUE knob. Unpatched, or with AMT at zero, nothing changes.";
 		configOutput(VIDEO_BUS_OUTPUT, "Video bus token");
 	}
 	void process(const ProcessArgs& args) override {
@@ -39,6 +43,13 @@ struct ColorLab : Module {
 		p.channelMode = static_cast<int>(std::round(params[CHANNEL_PARAM].getValue()));
 		p.invert = params[INVERT_PARAM].getValue() > 0.5f;
 		p.mix = clamp(params[MIX_PARAM].getValue() + inputs[MIX_INPUT].getVoltage() * 0.1f, 0.f, 1.f);
+		if (inputs[MOD_INPUT].isConnected()) {
+			const int modBus = videoBusIdFromVoltage(inputs[MOD_INPUT].getVoltage());
+			if (modBus != outBus && videoBusIsActive(modBus)) {
+				p.modBusId = modBus;
+				p.modAmount = clamp(params[MOD_AMOUNT_PARAM].getValue(), -1.f, 1.f);
+			}
+		}
 		if (active) videoBusPublishColorLab(outBus, inBus, p); else videoBusClear(outBus);
 		outputs[VIDEO_BUS_OUTPUT].setVoltage(videoBus.voltage()); lights[SIGNAL_LIGHT].setBrightnessSmooth(active ? 1.f : 0.f, args.sampleTime);
 	}
@@ -86,6 +97,12 @@ struct ColorLabWidget : ModuleWidget {
 
 		addJackLabel(this, Vec(rowX(W, 4, 0, P), 102), "MIX");
 		addInput(createInputCentered<PJ301MPort>(mm2px(Vec(rowX(W, 4, 0, P), 102)), module, ColorLab::MIX_INPUT));
+
+		// MOD IN and its amount beside MIX: a picture that shifts the hue.
+		addJackLabel(this, Vec(rowX(W, 4, 1, P), 102), "MOD IN");
+		addInput(createInputCentered<PJ301MPort>(mm2px(Vec(rowX(W, 4, 1, P), 102)), module, ColorLab::MOD_INPUT));
+		addKnobLabel(this, Vec(rowX(W, 4, 2, P), 102), "AMT", R_SMALL);
+		addParam(createParamCentered<RoundSmallBlackKnob>(mm2px(Vec(rowX(W, 4, 2, P), 102)), module, ColorLab::MOD_AMOUNT_PARAM));
 
 		addPlatedOutput<PJ301MPort>(this, Vec(rowX(W, 4, 1, P), 114), "BUS", module, ColorLab::VIDEO_BUS_OUTPUT);
 		addJackLabel(this, Vec(rowX(W, 4, 2, P), 114), "SIG");

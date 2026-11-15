@@ -1,6 +1,8 @@
 #pragma once
 
 #include "crt_beam.hpp"
+#include "signal_ring.hpp"
+#include "video_frame.hpp"
 
 #include <algorithm>
 #include <array>
@@ -49,11 +51,37 @@ struct VideoParams {
 	float spread = 0.33f;
 	bool barsA = true;
 	bool barsB = false;
-	bool lockA = true;
-	bool lockB = true;
+	// LOCK is a hold, 0 to 1. 0 is free (the old switch down), 1 is locked to the scan (the old switch up).
+	// In between, the oscillator is pulled part of the way back into step at the start of each line (each
+	// field on ROWS). See docs/architecture.md, "Bars and Rows".
+	float lockA = 1.f;
+	float lockB = 1.f;
 	bool fieldOdd = false;
 	double latchedA = 0.0;
 	double latchedB = 0.0;
+	// Scan-time inputs. signalSlotId names the signal ring that holds VideoOscSignalChannel values; 0 means
+	// none, and then the picture is drawn without them. bend above is the knob alone; the BEND CV comes from
+	// the ring when `scanInputs` is true.
+	int signalSlotId = 0;
+	bool scanInputs = false;
+	// FM IN (picture as modulation, docs/architecture.md, "Picture as modulation"). fmBusId is the bus whose brightness,
+	// at each pixel, bends oscillator A; 0 means none. fmAmount is -1..1. The renderer draws that bus and hands the
+	// engine its luma; with no luma, or fmAmount 0, the picture is drawn exactly as before.
+	int fmBusId = 0;
+	float fmAmount = 0.f;
+};
+
+// How hard FM IN bends oscillator A. At full amount the rate of A's phase runs from 1 - kPairFmDepth / 2 (a black
+// picture) to 1 + kPairFmDepth / 2 (a white one) times its own rate: 0.25 to 1.75 at 1.5.
+constexpr double kPairFmDepth = 1.5;
+
+// Video Oscillator's signal ring. The module pushes these once per audio sample; the renderer reads them
+// at each pixel's scan time (docs/architecture.md, "Scan-time signal model").
+enum VideoOscSignalChannel : int {
+	kVideoOscInA = 0,   // IN A, volts / 5: 1.0 pushes A's bars sideways one cycle of A
+	kVideoOscInB = 1,   // IN B, volts / 5: 1.0 pushes B's bars sideways one cycle of B
+	kVideoOscBend = 2,  // BEND CV in cycles (0.4 per volt), added to the BEND knob
+	kVideoOscSpare = 3, // not used yet; always 0
 };
 
 // The scan clock for Bars and Rows. The module advances it once per audio sample. A free oscillator
@@ -167,6 +195,7 @@ struct ScanProcessorParams {
 	float persist = 0.35f;   // phosphor persistence, 0..1
 	float glow = 0.25f;      // glow (bloom) amount, 0..2
 	int signalSlotId = 0;    // signal ring holding the ScanProcessorSignalChannel values; 0 = none
+	int liftBusId = 0;       // LIFT IN: bus whose luma supplies the lift; 0 = the main picture lifts itself
 };
 
 struct LineFieldParams {
@@ -199,6 +228,10 @@ struct ColorLabParams {
 	int channelMode = 0;
 	bool invert = false;
 	float mix = 1.f;
+	// MOD IN (picture as modulation): the bus whose brightness, at each pixel, shifts the hue by modAmount (-1..1)
+	// times (luma - 0.5) turns. 0 means none.
+	int modBusId = 0;
+	float modAmount = 0.f;
 };
 
 struct KeyerParams {
@@ -209,6 +242,10 @@ struct KeyerParams {
 	bool invert = false;
 	float hue = 0.33f;
 	float mix = 1.f;
+	// MOD IN (picture as modulation): the bus whose brightness, at each pixel, moves the threshold by modAmount (-1..1)
+	// times 2 x (luma - 0.5). 0 means none.
+	int modBusId = 0;
+	float modAmount = 0.f;
 };
 
 struct BusMixerParams {
@@ -284,15 +321,35 @@ inline float scopeBeamSigmaPx(float beam, int heightPx) {
 
 class PreviewVideoEngine {
 public:
-	const std::vector<unsigned char>& render(int width, int height, const VideoParams& params);
-	// Frame produced by the most recent render() call.
+	// floatOut: the Video Oscillator and Bars and Rows patterns are drawn into a float picture (outputF()) with no
+	// rounding, and their own feedback reads the float picture of the last frame. The test patterns, which are exact
+	// bytes, stay bytes, and so does every frame when floatOut is false.
+	// fmLuma: width x height values in 0..1, the brightness of the FM IN picture at each pixel (Video Oscillator only;
+	// see VideoParams::fmAmount). nullptr draws without it.
+	const std::vector<unsigned char>& render(int width, int height, const VideoParams& params, bool floatOut = false, const float* fmLuma = nullptr);
+	// Frame produced by the most recent render() call (bytes; empty when that frame was drawn as floats).
 	const std::vector<unsigned char>& output() const {
 		return rgba;
+	}
+	// True when the most recent render() drew floats. The picture is outputF(), 0..255 units, RGBA.
+	bool outputIsFloat() const {
+		return lastFloat;
+	}
+	const std::vector<float>& outputF() const {
+		return rgbaF;
 	}
 
 private:
 	std::vector<unsigned char> rgba;
 	std::vector<unsigned char> previous;
+	std::vector<float> rgbaF;
+	std::vector<float> previousF;
+	bool lastFloat = false;
+	bool previousIsFloat = false;  // which of previous / previousF holds the last frame
+	SignalWindow scanSignal;  // Bars and Rows: the newest field of the Video Oscillator's inputs
+	const float* activeFm = nullptr;  // this render's FM IN luma (null when there is none or the amount is 0)
+	float activeFmAmount = 0.f;
+	std::vector<double> fmColumn;  // Bars and Rows on ROWS: the FM phase gathered down each column
 	int previousWidth = 0;
 	int previousHeight = 0;
 
@@ -302,14 +359,19 @@ private:
 		float b = 0.f;
 	};
 
-	void renderOscillator(int width, int height, const VideoParams& params);
+	// The Video Oscillator and Bars and Rows loops and the colour controls, written once over a plane that is bytes
+	// (BytePlane: stores cut off, the old rule) or floats (FloatPlane: stores clamped, not rounded).
+	template <class Plane>
+	void renderOscillator(int width, int height, const VideoParams& params, Plane plane);
 	void renderSmpte75(int width, int height);
 	void renderEbu75(int width, int height);
 	void renderEbu100(int width, int height);
 	void renderGrayscale(int width, int height);
 	void renderGrid(int width, int height);
-	void renderPair(int width, int height, const VideoParams& params);
-	void applyColorControls(int width, int height, const VideoParams& params);
+	template <class Plane>
+	void renderPair(int width, int height, const VideoParams& params, Plane plane);
+	template <class Plane>
+	void applyColorControls(int width, int height, const VideoParams& params, Plane plane);
 	void setPixel(int width, int x, int y, Color color);
 
 	static float fract(float value);
@@ -337,10 +399,18 @@ struct RampsParams {
 	float phaseB = 0.f;
 	float waveB = 0.f;
 	int mix = 0;
+	// MOD IN (picture as modulation): the bus whose brightness offsets layer A's phase at each pixel, by modAmount (-1..1)
+	// times 2 x (luma - 0.5) cycles. 0 means none.
+	int modBusId = 0;
+	float modAmount = 0.f;
 };
 
 // Shared by the bus renderer and the small panel preview; controls are sampled per frame.
 void renderRamps(std::vector<unsigned char>& rgba, int width, int height, const RampsParams& params);
+// The same picture into a VideoFrame: bytes (each grey rounded, as the vector form does) or, with floatOut, float
+// greys that are not rounded, so a stretched ramp has no steps. modLuma: width x height values in 0..1 (see
+// RampsParams::modAmount); nullptr draws without it.
+void renderRamps(VideoFrame& out, int width, int height, const RampsParams& params, bool floatOut, const float* modLuma = nullptr);
 
 struct FeedbackParams {
 	int ringSlotId = 0;
@@ -355,6 +425,21 @@ struct FeedbackParams {
 	float gain = 0.9f;
 	float key = 0.f;
 	int mode = 0;
+	// 1: Feedback keeps its own history as float32 (0..255 units) so a trail fades fully to black. 0: the history
+	// is the 8-bit picture, as in every version before this field, and a trail sticks at a grey. Appended last.
+	int fadeToBlack = 0;
+};
+
+// Frame Delay (VRU-27). The picture is its source as it was `frames` ticks ago, from a ring of stored pictures
+// (frame_ring.hpp, slot ringSlotId). A tick is one count of frameCounter, which the module advances 60 times a
+// second of audio time, exactly as Feedback does. clearCounter changes when the module is reset. frames is 1 to
+// kFrameDelayMaxFrames. Before the ring holds a picture that old, the output is black.
+constexpr int kFrameDelayMaxFrames = 30;
+struct FrameDelayParams {
+	int ringSlotId = 0;
+	int frameCounter = 0;
+	int clearCounter = 0;
+	int frames = 1;
 };
 
 // Rotator (VRU-20). Angle is in turns, already wrapped by rotatorAngle() in rotator_math.hpp; positive turns
@@ -415,16 +500,18 @@ struct ShapesParams {
 // Renders on several threads; each pixel depends only on the parameters, so the picture is the same however
 // many threads run. Called by the bus renderer.
 void renderShapes(std::vector<unsigned char>& rgba, int width, int height, const ShapesParams& params);
+// As renderRamps above: bytes, or float greys with floatOut.
+void renderShapes(VideoFrame& out, int width, int height, const ShapesParams& params, bool floatOut);
 
 // Video Mixer (VRU-22). Four picture buses, A to D, of which one is live and one is next; fader is how far the
 // next picture has come up over the live one (0 = live only, 1 = next only). A bus id of 0 means the picture is
-// absent and reads as black. mode: 0 dissolve, 1 add, 2 wipe. A wipe sweeps a threshold through the greys of the
+// absent and reads as black. mode: 0 dissolve, 1 add, 2 wipe, 3 all (see level). A wipe sweeps a threshold through the greys of the
 // pattern picture (or, with no pattern bus, through the next picture's own greys); soft is the width of its edge in
 // grey levels. Colour: with colorOn[i] the picture i is read as grey and its brightness takes hue[i] (turns, any
 // value, wrapped by the renderer; the SHIFT input is already added); sat is the strength of all colours, 0 = plain
 // grey. The key lays keyBus over the mix (after the transition, before black): its hole is cut by matteBus when that
 // is patched, else by keyBus itself, with the Keyer's threshold and softness; keyFill 0 shows the key picture in the
-// hole, 1 a flat colour from keyHue. black fades the whole picture to black, last of all.
+// hole, 1 a flat colour from keyHue. black fades the whole picture to black, last of all. mode 3 is ALL: see level.
 struct VideoMixerParams {
 	int inputBus[4] = {0, 0, 0, 0};
 	int onAir = 0;   // the live input, 0 to 3 for A to D (the code keeps this older name)
@@ -439,10 +526,19 @@ struct VideoMixerParams {
 	bool colorOn[4] = {false, false, false, false};
 	float hue[4] = {0.f, 0.25f, 0.5f, 0.75f};
 	float sat = 1.f;
+	// GRADIENT colouring (checked before colorOn): the picture's brightness runs through black, hue[i], hue[i] plus span
+	// turns, then white, built by the Colorizer's own gradient code. span 0 is one hue from black up to white.
+	bool gradientOn[4] = {false, false, false, false};
+	float span = 0.f;
 	bool keyOn = false;
 	float keyThresh = 0.5f;
 	float keySoft = 0.12f;
 	float keyHue = 0.33f;
 	int keyFill = 0;
 	bool keyInvert = false;
+	// ALL (mode 3): every picture with a bus is live at once, each scaled by its level (0 to 1) after its own tint, and
+	// the sum is clamped at white, or divided by the number of patched pictures when average is set. The other modes
+	// ignore these fields.
+	float level[4] = {1.f, 1.f, 1.f, 1.f};
+	bool average = false;
 };
