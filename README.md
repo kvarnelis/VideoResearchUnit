@@ -29,6 +29,12 @@ This is version 2.4.0. It has been tested only on Apple silicon Macs.
 - The Video Oscillator panel is 29 HP wide, up from 20 HP. Oscillators A, B and C are three identical rows;
   the jacks are a table with columns A, B, C. Patches saved with the old panel load unchanged, and Rack
   moves the modules beside it along the row.
+- The [Display](#vru16-display) has a Picture size choice in its right-click menu: 1080, 720 or 540 lines.
+  A new Display starts at 720; a patch saved before 2.4.0 keeps 1080. Fewer lines draw faster.
+- Pictures are made faster: the work for each picture is shared across a pool of threads that stays running,
+  the Scope Trace beam is drawn more cheaply, and Shapes no longer starts threads for every picture.
+- New patches: demo `9 - A Picture Through A Signal.vcv`, the self-playing `70s V slow tide.vcv`, and a
+  test patch for the video clock, `VRU-2.4.0-clock-test.vcv` (see [Demo patches](#demo-patches)).
 
 ## New in 2.3.0
 
@@ -564,6 +570,9 @@ Shows a bus inside Rack. It has three video inputs, A, B and C.
 
 - The SEL button, or the right-click Input menu, picks which input is on screen. THRU repeats the
   selected input's voltage, so you can keep patching from it.
+- Picture size, in the right-click menu, sets the most lines the picture may have: 1080 (1440 x 1080),
+  720 (960 x 720) or 540 (720 x 540). A new Display starts at 720. Fewer lines draw faster, so pick 720 or
+  540 when a heavy patch stutters. A patch saved before 2.4.0 loads at 1080, as it was.
 - SHOT saves a PNG. REC records an H.264 .mov, and a second press stops it. Files go to
   `~/Pictures/Video Research Unit` unless you pick another folder in the right-click menu. REC needs
   macOS.
@@ -787,7 +796,7 @@ Display.
 
 The numbered demo patches are not inside the plugin. They are ordinary patch files in a separate
 download on the release page, `VideoResearchUnit-demos-<version>.zip` (in this repository they are in
-`patches/`). Unzip it and open any patch with File > Open in VCV Rack. The demos use only VRU and the
+`patches/`). Unzip it and open any patch with File > Open in VCV Rack. The numbered demos use only VRU and the
 free VCV Fundamental and Core modules. Each patch has a Notes module that says what to try.
 
 | Patch | What it shows |
@@ -800,12 +809,16 @@ free VCV Fundamental and Core modules. Each patch has a Notes module that says w
 | `6 - Muybridge on the Scan Processor.vcv` | A film clip drawn as lines by a Scan Processor. It needs a video (see below). |
 | `7 - Loop Through A Delay.vcv` | A Video Mixer, Rotator and Frame Delay in a loop leave a spiralling trail behind a moving shape. |
 | `8 - One Oscillator Bends Another.vcv` | One Video Oscillator sends its picture into FM IN of a second, so the second one's bars bunch and spread. |
+| `9 - A Picture Through A Signal.vcv` | A Video Probe with SCAN on reads a Shapes picture as a signal, and a Raster paints that signal back into a picture. |
+| `70s V slow tide.vcv` | A patch that plays itself for leaving running: one film through a Frame Delay, Feedback and a Rotator, moved by slow LFOs. It needs a video (see below) and the free Marbles module from Audible Instruments. |
 
 `Folded-Aurora.vcv` and `Scan-Landscape.vcv` are two older patches in `patches/` that are not in the
 download. Two test patches, `VRU-2.2.0-test.vcv` and `VRU-2.3.0-test.vcv`, hold one row for each
 feature added in those versions: Vector Osc, the Video Oscillator hold knobs and the Video Mixer gradient
 for 2.2.0, and Video Probe, a Frame Delay loop, FM IN, LIFT IN and Feedback's fade option for 2.3.0.
-Each row ends in its own Display.
+Each row ends in its own Display. `VRU-2.4.0-clock-test.vcv` has three rows that show the video clock: a Deflection Yoke driven by
+Scan Sync stands still, driven by a free-running LFO it rolls, and with Scan Sync resetting that LFO it
+stands still again.
 
 The demo `6 - Muybridge on the Scan Processor.vcv` needs a video. The same zip has a `clip` folder
 with Eadweard Muybridge's "The Horse in Motion" (1878, public domain) as an MP4, plus its credits.
