@@ -15,6 +15,7 @@ This is version 2.4.0. It has been tested only on Apple silicon Macs.
 - Every oscillator has a V/OCT input and a sound output, so the picture and the tone come from the same
   oscillator.
 - A new SNOW position on PATTERN draws television static.
+- Double-click the picture on a [Display](#vru16-display) to see it full screen. Click or press Esc to come back.
 - A picture can become a signal and a signal can become a picture, on the video clock. [Video Probe](#vru26-video-probe)
   has a new SCAN switch and LINES knob: with SCAN on and nothing in X and Y it reads the picture as a raster, one
   sample at a time, left to right and top to bottom. A new module, [Raster](#vru29-raster) (VRU–29), paints
@@ -573,6 +574,10 @@ Shows a bus inside Rack. It has three video inputs, A, B and C.
 - Picture size, in the right-click menu, sets the most lines the picture may have: 1080 (1440 x 1080),
   720 (960 x 720) or 540 (720 x 540). A new Display starts at 720. Fewer lines draw faster, so pick 720 or
   540 when a heavy patch stutters. A patch saved before 2.4.0 loads at 1080, as it was.
+- Double-click the picture to fill your whole screen with it, scaled to fit with black around it. Click
+  anywhere or press Esc to go back. Rack's own window returns to how it was. Full screen uses the screen
+  Rack is on; it does not use a second display. If your Mac sleeps while the picture is full screen, it
+  goes back to Rack when the Mac wakes.
 - SHOT saves a PNG. REC records an H.264 .mov, and a second press stops it. Files go to
   `~/Pictures/Video Research Unit` unless you pick another folder in the right-click menu. REC needs
   macOS.

@@ -697,11 +697,135 @@ struct DisplayBezelWidget : Widget {
 	}
 };
 
+#ifdef __APPLE__
+void* displayWatchWake(GLFWwindow* window, std::function<void()> leaveFullscreen);
+void displayUnwatchWake(void* handle);
+#endif
+
+struct FullscreenPicture : OpaqueWidget {
+#ifdef __APPLE__
+	void* wakeWatch = nullptr;
+#endif
+	std::function<void(const DrawArgs&)> paint;
+	bool restoreWindow = false;
+	std::function<void()> closed;
+
+	// Wall time includes time spent asleep on macOS.
+	std::chrono::system_clock::time_point lastStep = std::chrono::system_clock::now();
+	std::chrono::steady_clock::time_point hintUntil = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+
+	void step() override {
+		const auto now = std::chrono::system_clock::now();
+		if (now - lastStep >= std::chrono::seconds(10)) {
+			requestDelete();
+			return;
+		}
+		lastStep = now;
+		box.size = parent->box.size;
+		OpaqueWidget::step();
+	}
+
+	void draw(const DrawArgs& args) override {
+		nvgBeginPath(args.vg);
+		nvgRect(args.vg, 0, 0, box.size.x, box.size.y);
+		nvgFillColor(args.vg, nvgRGB(0, 0, 0));
+		nvgFill(args.vg);
+		if (paint) paint(args);
+		if (std::chrono::steady_clock::now() < hintUntil) {
+			const char* text = "Click anywhere or press Esc to return to Rack";
+			rasterlab_panel::useLabelFont(args.vg);
+			nvgFontSize(args.vg, 14.f);
+			nvgTextAlign(args.vg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
+			const float x = box.size.x * .5f;
+			const float y = box.size.y - 30.f;
+			const float width = nvgTextBounds(args.vg, 0.f, 0.f, text, nullptr, nullptr) + 24.f;
+			nvgBeginPath(args.vg);
+			nvgRoundedRect(args.vg, x - width * .5f, y - 13.f, width, 26.f, 5.f);
+			nvgFillColor(args.vg, nvgRGBA(0, 0, 0, 195));
+			nvgFill(args.vg);
+			nvgFillColor(args.vg, nvgRGB(255, 255, 255));
+			nvgText(args.vg, x, y, text, nullptr);
+		}
+	}
+
+	void onHover(const HoverEvent& e) override {
+		if (e.mouseDelta.x != 0.f || e.mouseDelta.y != 0.f)
+			hintUntil = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+		OpaqueWidget::onHover(e);
+	}
+
+	void onButton(const ButtonEvent& e) override {
+		OpaqueWidget::onButton(e);
+		if (e.button == GLFW_MOUSE_BUTTON_LEFT && e.action == GLFW_PRESS)
+			requestDelete();
+	}
+
+	void onHoverKey(const HoverKeyEvent& e) override {
+		if (e.key == GLFW_KEY_ESCAPE && e.action == GLFW_PRESS) {
+			e.consume(this);
+			requestDelete();
+		}
+		else OpaqueWidget::onHoverKey(e);
+	}
+
+	void onRemove(const RemoveEvent& e) override {
+		#ifdef __APPLE__
+		displayUnwatchWake(wakeWatch);
+		wakeWatch = nullptr;
+#endif
+		if (closed) closed();
+		if (restoreWindow && APP && APP->window) APP->window->setFullScreen(false);
+		OpaqueWidget::onRemove(e);
+	}
+};
+
 struct DisplayFrameWidget : TransparentWidget {
 	Display* module = nullptr;
 	int nvgImage = 0;
 	int imageWidth = 0;
 	int imageHeight = 0;
+
+	std::shared_ptr<int> lifetime = std::make_shared<int>(0);
+	bool presenting = false;
+
+	void onButton(const ButtonEvent& e) override {
+		if (module && e.button == GLFW_MOUSE_BUTTON_LEFT) e.consume(this);
+	}
+
+	void onDoubleClick(const DoubleClickEvent& e) override {
+		if (!module || presenting) return;
+		e.consume(this);
+		auto* overlay = new FullscreenPicture;
+		overlay->restoreWindow = !APP->window->isFullScreen();
+		presenting = true;
+		std::weak_ptr<int> alive = lifetime;
+		overlay->paint = [this, alive, overlay](const DrawArgs& args) {
+			if (alive.expired()) {
+				overlay->requestDelete();
+				return;
+			}
+			const float scale = std::min(overlay->box.size.x / box.size.x, overlay->box.size.y / box.size.y);
+			nvgSave(args.vg);
+			nvgTranslate(args.vg, (overlay->box.size.x - box.size.x * scale) / 2.f,
+				(overlay->box.size.y - box.size.y * scale) / 2.f);
+			nvgScale(args.vg, scale, scale);
+			drawPicture(args, true);
+			nvgRestore(args.vg);
+		};
+		overlay->closed = [this, alive]() { if (!alive.expired()) presenting = false; };
+		APP->scene->addChild(overlay);
+		if (overlay->restoreWindow) APP->window->setFullScreen(true);
+#ifdef __APPLE__
+		auto* window = APP->window;
+		overlay->wakeWatch = displayWatchWake(window->win, [overlay, window]() {
+			if (overlay->restoreWindow) {
+				overlay->restoreWindow = false;
+				window->setFullScreen(false);
+			}
+			overlay->requestDelete();
+		});
+#endif
+	}
 
 	DisplayFrameWidget() = default;
 	~DisplayFrameWidget() override {
@@ -745,24 +869,26 @@ struct DisplayFrameWidget : TransparentWidget {
 	}
 
 	// Rounded picture outline, used for the background, the image and the edge stroke.
-	void picturePath(const DrawArgs& args) {
+	void picturePath(const DrawArgs& args, bool fullscreen) {
 		nvgBeginPath(args.vg);
-		nvgRoundedRect(args.vg, 0.f, 0.f, box.size.x, box.size.y, mm2px(kScreenCornerMm));
+		if (fullscreen) nvgRect(args.vg, 0.f, 0.f, box.size.x, box.size.y);
+		else nvgRoundedRect(args.vg, 0.f, 0.f, box.size.x, box.size.y, mm2px(kScreenCornerMm));
 	}
 
 	void draw(const DrawArgs& args) override {
-		drawPicture(args);
+		if (presenting) return;
+		drawPicture(args, false);
 		drawRecBadge(args);
 	}
 
-	void drawPicture(const DrawArgs& args) {
-		picturePath(args);
+	void drawPicture(const DrawArgs& args, bool fullscreen) {
+		picturePath(args, fullscreen);
 		nvgFillColor(args.vg, nvgRGB(4, 6, 9));
 		nvgFill(args.vg);
 
 		if (!module) {
-			drawLabel(args, "NO VIDEO");
-			drawFrame(args);
+			if (!fullscreen) drawLabel(args, "NO VIDEO");
+			if (!fullscreen) drawFrame(args);
 			return;
 		}
 
@@ -779,19 +905,19 @@ struct DisplayFrameWidget : TransparentWidget {
 			// picture if there is one at this size, otherwise the dark screen, and no label: this is not NO VIDEO.
 			if (nvgImage && width == imageWidth && height == imageHeight) {
 				NVGpaint paint = nvgImagePattern(args.vg, 0.f, 0.f, box.size.x, box.size.y, 0.f, nvgImage, 1.f);
-				picturePath(args);
+				picturePath(args, fullscreen);
 				nvgFillPaint(args.vg, paint);
 				nvgFill(args.vg);
 			}
-			drawFrame(args);
+			if (!fullscreen) drawFrame(args);
 			return;
 		}
 		if (!picture.signal) {
 			if (drawFeeds) {
 				module->onNoSignal();
 			}
-			drawLabel(args, "NO VIDEO");
-			drawFrame(args);
+			if (!fullscreen) drawLabel(args, "NO VIDEO");
+			if (!fullscreen) drawFrame(args);
 			return;
 		}
 
@@ -818,16 +944,16 @@ struct DisplayFrameWidget : TransparentWidget {
 
 		if (nvgImage) {
 			NVGpaint paint = nvgImagePattern(args.vg, 0.f, 0.f, box.size.x, box.size.y, 0.f, nvgImage, 1.f);
-			picturePath(args);
+			picturePath(args, fullscreen);
 			nvgFillPaint(args.vg, paint);
 			nvgFill(args.vg);
 		}
 
 		// The bus graph loops back on itself (or is too deep). The last good frame is shown.
-		if (picture.cycle) {
+		if (picture.cycle && !fullscreen) {
 			drawLabel(args, "CYCLE");
 		}
-		drawFrame(args);
+		if (!fullscreen) drawFrame(args);
 	}
 
 	void onRemove(const RemoveEvent& e) override {

@@ -60,7 +60,7 @@ endif
 ifdef ARCH_MAC
 SOURCES := $(filter-out src/video_player_decoder_stub.cpp,$(SOURCES))
 SOURCES += src/video_player_decoder_mac.mm
-LDFLAGS += -framework AVFoundation -framework CoreMedia -framework CoreVideo -framework Foundation
+LDFLAGS += -framework Cocoa -framework AVFoundation -framework CoreMedia -framework CoreVideo -framework Foundation
 endif
 
 # Display recorder (the REC button): the same split. AVFoundation writes the movie on macOS
@@ -68,7 +68,7 @@ endif
 # src/display_recorder_stub.cpp, which the wildcard above already picked up and which is empty on macOS.
 ifdef ARCH_MAC
 SOURCES := $(filter-out src/display_recorder_stub.cpp,$(SOURCES))
-SOURCES += src/display_recorder_mac.mm
+SOURCES += src/display_recorder_mac.mm src/display_wake_mac.mm
 endif
 
 DISTRIBUTABLES += $(wildcard res/*)
@@ -275,11 +275,11 @@ $(DISPLAY_SMOKE): $(DISPLAY_SMOKE_SOURCES) $(wildcard src/*.hpp)
 		-o $@
 # The Display module's "Picture size" choice (its JSON, defaults and sizes), against Rack's real Module code.
 DISPLAY_SIZE_TEST = build/display_picture_size_test
-DISPLAY_SIZE_TEST_SOURCES = src/video_bus.cpp src/video_graph_renderer.cpp src/video_engine.cpp src/freeze_frame_store.cpp src/frame_ring.cpp src/video_external_frame.cpp src/signal_ring.cpp src/crt_beam.cpp src/render_service.cpp src/display_capture.cpp src/display_png.cpp src/display_recorder.cpp src/display_recorder_mac.mm
+DISPLAY_SIZE_TEST_SOURCES = src/video_bus.cpp src/video_graph_renderer.cpp src/video_engine.cpp src/freeze_frame_store.cpp src/frame_ring.cpp src/video_external_frame.cpp src/signal_ring.cpp src/crt_beam.cpp src/render_service.cpp src/display_capture.cpp src/display_png.cpp src/display_recorder.cpp src/display_recorder_mac.mm src/display_wake_mac.mm
 $(DISPLAY_SIZE_TEST): tests/display_picture_size_test.cpp src/Display.cpp $(DISPLAY_SIZE_TEST_SOURCES) $(wildcard src/*.hpp)
 	mkdir -p build
 	$(CXX) -std=c++17 -O2 -mmacosx-version-min=12.0 -I$(RACK_DIR)/include -I$(RACK_DIR)/dep/include -Isrc tests/display_picture_size_test.cpp $(DISPLAY_SIZE_TEST_SOURCES) \
-		-framework AVFoundation -framework CoreMedia -framework CoreVideo -framework CoreGraphics -framework ImageIO -framework Foundation \
+		-framework Cocoa -framework AVFoundation -framework CoreMedia -framework CoreVideo -framework CoreGraphics -framework ImageIO -framework Foundation \
 		-L$(RACK_DIR) -lRack -o $@
 TEST_DISPLAY_DEP = $(DISPLAY_SMOKE) $(DISPLAY_SIZE_TEST)
 TEST_DISPLAY_RUN = ./$(DISPLAY_SMOKE) && DYLD_LIBRARY_PATH="$(abspath $(RACK_DIR))" ./$(DISPLAY_SIZE_TEST)

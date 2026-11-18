@@ -12,12 +12,34 @@ int main() {
 
 	rack::Context context;
 	context.engine = new rack::engine::Engine;
+	context.event = new rack::widget::EventState;
 	rack::contextSet(&context);
 
 	Plugin plugin;
 	plugin.slug = "VideoResearchUnit";
 	modelDisplay->plugin = &plugin;
 	modelDisplay->slug = "Display";
+
+	// A release from the opening double-click must leave the overlay up. A fresh click or a wake closes it.
+	{
+		Widget scene;
+		auto* overlay = new FullscreenPicture;
+		scene.addChild(overlay);
+		Widget::ButtonEvent click{};
+		click.button = GLFW_MOUSE_BUTTON_LEFT;
+		click.action = GLFW_RELEASE;
+		overlay->onButton(click);
+		overlay->step();
+		check(!overlay->requestedDelete, "opening release and regular frames keep the fullscreen picture");
+		click.action = GLFW_PRESS;
+		overlay->onButton(click);
+		check(overlay->requestedDelete, "one click exits fullscreen");
+		auto* sleeping = new FullscreenPicture;
+		scene.addChild(sleeping);
+		sleeping->lastStep -= std::chrono::seconds(11);
+		sleeping->step();
+		check(sleeping->requestedDelete, "first frame after suspension exits fullscreen");
+	}
 
 	// A Display added now is 720 lines.
 	Display fresh;
