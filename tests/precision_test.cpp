@@ -1133,7 +1133,7 @@ void testPinnedSpatial() {
 		Bytes (*make)();
 		uint64_t pinned;
 	} pictures[] = {
-		{"rotator, focus, line field, yoke chain, on", renderSpatialChain, 1517269472881208964ull},
+		{"rotator, focus, line field, yoke chain, on", renderSpatialChain, 2077890795361136342ull},
 		{"scope trace through two gains, on", renderBeamChain, 7310387028945889410ull},
 		{"feedback, eight ticks, on", renderFeedbackRun, 17009853618987073673ull},
 	};

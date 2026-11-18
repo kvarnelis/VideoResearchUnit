@@ -8,10 +8,10 @@ VRU, FUND, CORE = "VideoResearchUnit", "Fundamental", "Core"
 VER = {VRU: "2.0.0", FUND: "2.6.4", CORE: "2.6.6"}
 # Rack's default cable colours.
 RED, YEL, GREEN, BLUE, PURPLE = "#f3374b", "#ffb437", "#00b56e", "#3695ef", "#8b4ade"
-HP = {"ScopeTrace": 20, "VideoOsc": 20, "BusMixer": 8, "Colorizer": 12, "Display": 30, "ScanProcessor": 13,
-      "Shapes": 14, "VideoProbe": 20, "Ramps": 14, "Rotator": 14, "VideoMixer": 30, "FrameDelay": 7, "Octoscillator": 36, "Feedback": 12, "DeflectionYoke": 20,
+HP = {"ScopeTrace": 20, "VideoOsc": 29, "BusMixer": 8, "Colorizer": 12, "Display": 30, "ScanProcessor": 13,
+      "Shapes": 14, "VideoProbe": 20, "Raster": 10, "Ramps": 14, "Rotator": 14, "VideoMixer": 30, "FrameDelay": 7, "Octoscillator": 36, "Feedback": 12, "DeflectionYoke": 20,
       "DualLfoChaos": 8, "VCO": 9, "LFO": 9, "VCA": 5, "8vert": 8, "VideoPlayer": 12,
-      "AudioInterface2": 12, "Notes": 16}
+      "AudioInterface2": 12, "Notes": 16, "ScanSync": 10}
 
 def hz_norm(hz):  # Dual LFO Chaos rate knob: exponential, 0.01 to 20 Hz
     return math.log(hz / 0.01) / math.log(2000.0)
@@ -72,9 +72,9 @@ def lissajous():
 def oscillators():
     p = Patch()
     a = p.add(VRU, "VideoOsc", 0, 0, {0: 3.0, 1: 0.5, 2: 0.3, 3: 0.5})
-    b = p.add(VRU, "VideoOsc", 20, 0, {0: 5.0, 1: 0.05, 2: 0.2, 3: 0.25})
-    mx = p.add(VRU, "BusMixer", 40, 0, {0: 0.5, 1: 4})
-    co = p.add(VRU, "Colorizer", 48, 0)
+    b = p.add(VRU, "VideoOsc", 30, 0, {0: 5.0, 1: 0.05, 2: 0.2, 3: 0.25})
+    mx = p.add(VRU, "BusMixer", 60, 0, {0: 0.5, 1: 4})
+    co = p.add(VRU, "Colorizer", 68, 0)
     dp = p.add(VRU, "Display", 0, 1)
     lf = p.add(VRU, "DualLfoChaos", 30, 1, {0: hz_norm(0.11), 1: 0.25, 2: hz_norm(0.07), 3: 0.25})
     sl = p.add(FUND, "LFO", 38, 1, {0: 0, 2: -5.0})
@@ -123,9 +123,9 @@ def tunnel():
 def slow_scan():
     p = Patch()
     vo = p.add(VRU, "VideoOsc", 0, 0, {0: 2.5, 1: 0.5, 2: 0.35})
-    sh = p.add(VRU, "Shapes", 20, 0, {0: 6.0, 1: 0.6, 3: 0.4, 12: 0.8})
-    mx = p.add(VRU, "BusMixer", 34, 0, {0: 0.5, 1: 0})
-    re = p.add(VRU, "ScanProcessor", 42, 0, {0: 0.3, 3: 0.1, 4: 0.8, 5: 1, 6: 0.8, 8: 1, 9: 0.5, 10: 0.5, 11: 0.4})
+    sh = p.add(VRU, "Shapes", 30, 0, {0: 6.0, 1: 0.6, 3: 0.4, 12: 0.8})
+    mx = p.add(VRU, "BusMixer", 44, 0, {0: 0.5, 1: 0})
+    re = p.add(VRU, "ScanProcessor", 52, 0, {0: 0.3, 3: 0.1, 4: 0.8, 5: 1, 6: 0.8, 8: 1, 9: 0.5, 10: 0.5, 11: 0.4})
     dp = p.add(VRU, "Display", 0, 1)
     lf = p.add(VRU, "DualLfoChaos", 30, 1, {0: hz_norm(0.01), 1: 0.08, 2: hz_norm(0.0137), 3: 0.06})
     l1 = p.add(FUND, "LFO", 38, 1, {0: 0, 2: -7.6})    # 193 s
@@ -134,7 +134,7 @@ def slow_scan():
     l4 = p.add(FUND, "LFO", 65, 1, {0: 0, 2: -5.4})    # 42 s
     # 8vert (attenuverter) rows: each LFO is turned down before it reaches a destination with no attenuverter.
     av = p.add(FUND, "8vert", 74, 1, {0: 0.15, 1: 0.2, 2: 0.5})
-    notes(p, 55, 0, "This patch is slow on purpose. Leave it running and come back in ten minutes.\n"
+    notes(p, 65, 0, "This patch is slow on purpose. Leave it running and come back in ten minutes.\n"
           "Scan Processor draws the picture as bright lines that are pushed up by how bright it is underneath.\n"
           "The picture underneath is a video oscillator mixed with a soft grey shape.\n"
           "Six very slow LFOs, with cycles between 40 seconds and 3 minutes, bend the lines, the stripes, "
@@ -236,8 +236,8 @@ def bend():
     # Oscillator 1 is the modulator: a grey picture of soft rows, no feedback, A alone.
     o1 = p.add(VRU, "VideoOsc", 0, 0, {0: OSC1_FREQ, 2: 0.0, 3: 0.0, 4: 6, 5: 0.0, 10: 0, 12: 0.8, 15: 0})
     # Oscillator 2 is bent by it: about 20 bars across, A alone, FM AMT well up.
-    o2 = p.add(VRU, "VideoOsc", 20, 0, {0: OSC2_FREQ, 1: 0.58, 2: 0.0, 3: 0.0, 4: 6, 10: 1, 12: 1.0, 15: 0, 17: 0.5})
-    co = p.add(VRU, "Colorizer", 40, 0)
+    o2 = p.add(VRU, "VideoOsc", 30, 0, {0: OSC2_FREQ, 1: 0.58, 2: 0.0, 3: 0.0, 4: 6, 10: 1, 12: 1.0, 15: 0, 17: 0.5})
+    co = p.add(VRU, "Colorizer", 60, 0)
     dp = p.add(VRU, "Display", 0, 1)
     notes(p, 31, 1, "One oscillator bends another inside the picture.\n"
           "Oscillator 1 (left) draws soft grey rows. Its picture goes into FM IN on oscillator 2. "
@@ -251,6 +251,31 @@ def bend():
     p.cable(o2, 0, co, 0, PURPLE)       # oscillator 2 -> Colorizer
     p.cable(co, 0, dp, 0, BLUE)         # Colorizer -> Display
     p.save("8 - One Oscillator Bends Another.vcv")
+
+# ---------------------------------------------------------------- 9. A picture through a signal and back
+def raster_loop():
+    p = Patch()
+    # Shapes ids: 0 SIDES, 1 ROUND, 3 SIZE, 13 MATTE. Video Probe ids: 7 SCAN, 8 LINES, 9 SLOW. Raster ids: 0 LINES, 1 FILL, 2 SLOW.
+    sh = p.add(VRU, "Shapes", 0, 0, {0: 5.0, 1: 0.25, 3: 0.35})
+    pr = p.add(VRU, "VideoProbe", 14, 0, {7: 1.0, 8: 120.0, 9: 5.0})
+    rs = p.add(VRU, "Raster", 34, 0, {0: 120.0, 1: 1.0, 2: 5.0})
+    d1 = p.add(VRU, "Display", 0, 1)
+    d2 = p.add(VRU, "Display", 30, 1)
+    notes(p, 44, 0, "A picture becomes a signal and the signal becomes a picture again.\n"
+          "The Video Probe has SCAN on and nothing in X or Y, so it reads the Shapes picture as a raster on the video clock: "
+          "left to right, top to bottom, one picture at a time. Its LUMA output carries that scan as an ordinary 0 to 10 V signal. "
+          "LUMA goes into BRIGHT on the Raster, which paints each sample where the clock says it belongs.\n"
+          "Both are set to 120 lines and SLOW x32, and the settings must match.\n"
+          "SLOW makes a picture take 32 fields of the video clock instead of one, so each line lasts 32 times longer and gets about 98 samples at 48 kHz "
+          "instead of 3. A picture comes round every 0.3 seconds. The right-hand Display shows the shape being redrawn from the top down, about 98 columns wide. "
+          "Sharper means slower: at SLOW x1 the same patch gives a picture 3 columns wide, 110 times a second. It is a way to hear and process a picture, not a full-resolution path.\n"
+          "Try patching LUMA through other modules on its way to BRIGHT (a VCA, a filter, an inverting attenuator), "
+          "try FILL on the Raster, and try 60 or 240 lines on both.")
+    p.cable(sh, 0, pr, 0, PURPLE)       # Shapes -> Video Probe BUS IN
+    p.cable(sh, 0, d1, 0, PURPLE)       # Shapes -> left Display
+    p.cable(pr, 0, rs, 0, YEL)          # LUMA -> Raster BRIGHT
+    p.cable(rs, 0, d2, 0, PURPLE)       # Raster -> right Display
+    p.save("9 - A Picture Through A Signal.vcv")
 
 # ---------------------------------------------------------------- VRU-2.3.0-test: everything new in 2.3.0, one row each
 def test_230():
@@ -316,6 +341,46 @@ def test_230():
           "Each row ends in its own Display.")
     p.save("VRU-2.3.0-test.vcv")
 
+# ---------------------------------------------------------------- VRU-2.4.0-clock-test: Scan Sync against a free LFO, side by side
+def clock_test_240():
+    """Three rows, each Video Oscillator (test bars) -> Deflection Yoke -> Display. Only what drives the Yoke's H coil
+    input (X_BEND_INPUT, 1) differs. A: Scan Sync DOWN. B: Fundamental LFO saw, free. C: the same LFO, RESET by Scan Sync TOP.
+    Ids: ScanSync LINES param 0, outputs TOP 0, DOWN 1. LFO params OFFSET 0 (1 is 0 to 10 V, as DOWN), FREQ 2 (log2 Hz),
+    saw output 2, RESET input 2 (read from the installed Fundamental 2.6.4). Yoke: X_BEND 0, Y_BEND 1, DEPTH 2, LINES 14,
+    PERSIST 17, GLOW 18, S_BEND 19."""
+    p = Patch("2.4.0")
+    LFO_HZ = 60.5     # a little off the 59.94 Hz picture rate: a free LFO beats against it about once every 1.8 s
+    lfo_params = {0: 1, 2: math.log2(LFO_HZ)}
+    yoke_params = {0: 0.5, 1: 0.0, 2: 1.0, 14: 240.0, 17: 0.0}
+    osc_params = {4: 5}   # PATTERN 5, Grid
+    sync = p.add(VRU, "ScanSync", 16, 0, {0: 240.0})
+    for row in range(3):
+        if row == 0:
+            drv = sync
+        else:
+            drv = p.add(FUND, "LFO", 16, row, lfo_params)
+        osc = p.add(VRU, "VideoOsc", 27, row, osc_params)
+        yk = p.add(VRU, "DeflectionYoke", 56, row, yoke_params)
+        dp = p.add(VRU, "Display", 76, row)
+        p.cable(osc, 0, yk, 0, PURPLE)
+        p.cable(yk, 0, dp, 0, BLUE)
+        if row == 0:
+            p.cable(sync, 1, yk, 1, YEL)      # DOWN -> H coil in
+        else:
+            p.cable(drv, 2, yk, 1, YEL)       # LFO saw -> H coil in
+        if row == 2:
+            p.cable(sync, 0, drv, 2, GREEN)   # TOP -> LFO RESET
+    notes(p, 0, 0, "Clock test: three rows, the same test picture and the same Deflection Yoke in each. "
+          "Only what drives the Yoke's H coil input is different.\n"
+          "A, top row. Scan Sync DOWN into the Yoke. Expect: the picture stands still, sheared the same way every picture.\n"
+          "B, middle row. A free-running Fundamental LFO saw at 60.5 Hz into the same input. "
+          "Expect: the picture rolls, because 60.5 Hz is not the picture rate (59.94 Hz).\n"
+          "C, bottom row. The same LFO, but Scan Sync TOP goes into its RESET input, which restarts the saw at the top of every picture. "
+          "Expect: the picture stands still.\n"
+          "Scan Sync LINES and the Yoke LINES are both 240.\n"
+          "Known: DOWN through the Yoke is unsteady in the top rows.")
+    p.save("VRU-2.4.0-clock-test.vcv")
+
 if __name__ == "__main__":
     os.makedirs(os.path.join(ROOT, "patches"), exist_ok=True)
-    lissajous(); oscillators(); tunnel(); slow_scan(); garden(); muybridge(); delay_loop(); bend(); test_230()
+    lissajous(); oscillators(); tunnel(); slow_scan(); garden(); muybridge(); delay_loop(); bend(); raster_loop(); test_230(); clock_test_240()

@@ -56,3 +56,5 @@ extern Model* modelOctoscillator;
 extern Model* modelVectorOsc;
 extern Model* modelVideoProbe;
 extern Model* modelFrameDelay;
+extern Model* modelRaster;
+extern Model* modelScanSync;

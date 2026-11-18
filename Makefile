@@ -129,9 +129,11 @@ build/render_pool_stress_test_tsan: tests/render_pool_stress_test.cpp $(API_CORE
 	mkdir -p build
 	$(CXX) -std=c++17 -O1 -g -fsanitize=thread -Wall -Wextra -Wno-unused-parameter -Isrc -Iinclude tests/render_pool_stress_test.cpp $(API_CORE_SOURCES) -pthread -o $@
 
-tsan: build/vru_bus_api_service_test_tsan build/render_pool_stress_test_tsan
+tsan: build/vru_bus_api_service_test_tsan build/render_pool_stress_test_tsan build/video_clock_test_tsan build/raster_scan_test_tsan
 	./build/vru_bus_api_service_test_tsan
 	./build/render_pool_stress_test_tsan
+	./build/video_clock_test_tsan thread
+	./build/raster_scan_test_tsan thread
 
 # Version 2 of the interface: layout, float read, tick, native size, bad arguments, both service modes.
 build/vru_bus_api_precision_test: tests/vru_bus_api_precision_test.cpp $(API_CORE_SOURCES) include/vru_bus.h $(wildcard src/*.hpp)
@@ -161,6 +163,31 @@ SHAPES_TEST_SOURCES = tests/shapes_test.cpp src/video_bus.cpp src/video_graph_re
 build/shapes_test: $(SHAPES_TEST_SOURCES) $(wildcard src/*.hpp)
 	mkdir -p build
 	$(CXX) -std=c++17 -O2 -Wall -Wextra -Wno-unused-parameter -Isrc $(SHAPES_TEST_SOURCES) -pthread -o $@
+
+# Offline checks for the video clock (VRU-28 Scan Sync's time base): the round trip, a tone locked to the field rate
+# standing still for 600 fields at three sample rates, the same picture at every rate, and the field rule. No Rack SDK.
+VIDEO_CLOCK_TEST_SOURCES = tests/video_clock_test.cpp src/video_bus.cpp src/video_graph_renderer.cpp src/video_engine.cpp src/freeze_frame_store.cpp src/frame_ring.cpp src/video_external_frame.cpp src/signal_ring.cpp src/crt_beam.cpp
+
+build/video_clock_test: $(VIDEO_CLOCK_TEST_SOURCES) $(wildcard src/*.hpp)
+	mkdir -p build
+	$(CXX) -std=c++17 -O2 -Wall -Wextra -Wno-unused-parameter -Isrc $(VIDEO_CLOCK_TEST_SOURCES) -pthread -o $@
+
+# The signal ring's frame-stamped writer and field reader (src/signal_ring.cpp) under ThreadSanitizer.
+build/video_clock_test_tsan: $(VIDEO_CLOCK_TEST_SOURCES) $(wildcard src/*.hpp)
+	mkdir -p build
+	$(CXX) -std=c++17 -O1 -g -fsanitize=thread -Wall -Wextra -Wno-unused-parameter -Isrc $(VIDEO_CLOCK_TEST_SOURCES) -pthread -o $@
+
+# Offline checks for the raster rule (Video Probe's SCAN, VRU-29 Raster): fixed points, bars, the round trip at three sample
+# rates and three line counts out to field 600, inversion, placed points. No Rack SDK. `make tsan` runs the thread part.
+RASTER_SCAN_TEST_SOURCES = tests/raster_scan_test.cpp src/video_bus.cpp src/video_graph_renderer.cpp src/video_engine.cpp src/freeze_frame_store.cpp src/frame_ring.cpp src/video_external_frame.cpp src/signal_ring.cpp src/crt_beam.cpp
+
+build/raster_scan_test: $(RASTER_SCAN_TEST_SOURCES) $(wildcard src/*.hpp)
+	mkdir -p build
+	$(CXX) -std=c++17 -O2 -Wall -Wextra -Wno-unused-parameter -Isrc $(RASTER_SCAN_TEST_SOURCES) -pthread -o $@
+
+build/raster_scan_test_tsan: $(RASTER_SCAN_TEST_SOURCES) $(wildcard src/*.hpp)
+	mkdir -p build
+	$(CXX) -std=c++17 -O1 -g -fsanitize=thread -Wall -Wextra -Wno-unused-parameter -Isrc $(RASTER_SCAN_TEST_SOURCES) -pthread -o $@
 
 # Offline checks for Focus (VRU-24): each control against its tooltip, zero cost and zero change at rest, the
 # bus node, and the contact sheet. Needs no Rack SDK. Run `build/focus_test <dir> bench` for timings.
@@ -246,8 +273,16 @@ $(DISPLAY_SMOKE): $(DISPLAY_SMOKE_SOURCES) $(wildcard src/*.hpp)
 		$(DISPLAY_SMOKE_SOURCES) -pthread \
 		-framework AVFoundation -framework CoreMedia -framework CoreVideo -framework CoreGraphics -framework ImageIO -framework Foundation \
 		-o $@
-TEST_DISPLAY_DEP = $(DISPLAY_SMOKE)
-TEST_DISPLAY_RUN = ./$(DISPLAY_SMOKE)
+# The Display module's "Picture size" choice (its JSON, defaults and sizes), against Rack's real Module code.
+DISPLAY_SIZE_TEST = build/display_picture_size_test
+DISPLAY_SIZE_TEST_SOURCES = src/video_bus.cpp src/video_graph_renderer.cpp src/video_engine.cpp src/freeze_frame_store.cpp src/frame_ring.cpp src/video_external_frame.cpp src/signal_ring.cpp src/crt_beam.cpp src/render_service.cpp src/display_capture.cpp src/display_png.cpp src/display_recorder.cpp src/display_recorder_mac.mm
+$(DISPLAY_SIZE_TEST): tests/display_picture_size_test.cpp src/Display.cpp $(DISPLAY_SIZE_TEST_SOURCES) $(wildcard src/*.hpp)
+	mkdir -p build
+	$(CXX) -std=c++17 -O2 -mmacosx-version-min=12.0 -I$(RACK_DIR)/include -I$(RACK_DIR)/dep/include -Isrc tests/display_picture_size_test.cpp $(DISPLAY_SIZE_TEST_SOURCES) \
+		-framework AVFoundation -framework CoreMedia -framework CoreVideo -framework CoreGraphics -framework ImageIO -framework Foundation \
+		-L$(RACK_DIR) -lRack -o $@
+TEST_DISPLAY_DEP = $(DISPLAY_SMOKE) $(DISPLAY_SIZE_TEST)
+TEST_DISPLAY_RUN = ./$(DISPLAY_SMOKE) && DYLD_LIBRARY_PATH="$(abspath $(RACK_DIR))" ./$(DISPLAY_SIZE_TEST)
 else
 TEST_DISPLAY_DEP =
 TEST_DISPLAY_RUN = @echo "Display capture smoke test skipped: needs macOS."
@@ -382,6 +417,16 @@ build/scope_trace_module_test: tests/scope_trace_module_test.cpp src/ScopeTrace.
 build/feedback_module_test: tests/feedback_module_test.cpp src/Feedback.cpp $(SCOPE_MODULE_SOURCES) $(wildcard src/*.hpp)
 	mkdir -p build
 	$(CXX) -std=c++17 -O2 -I$(RACK_DIR)/include -I$(RACK_DIR)/dep/include -Isrc tests/feedback_module_test.cpp $(SCOPE_MODULE_SOURCES) -L$(RACK_DIR) -lRack -o $@
+build/scan_sync_module_test: tests/scan_sync_module_test.cpp src/ScanSync.cpp src/DeflectionYoke.cpp $(SCOPE_MODULE_SOURCES) $(wildcard src/*.hpp)
+	mkdir -p build
+	$(CXX) -std=c++17 -O2 -I$(RACK_DIR)/include -I$(RACK_DIR)/dep/include -Isrc tests/scan_sync_module_test.cpp $(SCOPE_MODULE_SOURCES) -L$(RACK_DIR) -lRack -o $@
+TEST_SYNC_MODULE_DEP = build/scan_sync_module_test
+TEST_SYNC_MODULE_RUN = DYLD_LIBRARY_PATH="$(abspath $(RACK_DIR))" ./build/scan_sync_module_test
+build/video_osc_module_test: tests/video_osc_module_test.cpp src/VideoOsc.cpp src/video_osc_audio.hpp $(SCOPE_MODULE_SOURCES) $(wildcard src/*.hpp)
+	mkdir -p build
+	$(CXX) -std=c++17 -O2 -I$(RACK_DIR)/include -I$(RACK_DIR)/dep/include -Isrc tests/video_osc_module_test.cpp $(SCOPE_MODULE_SOURCES) -L$(RACK_DIR) -lRack -o $@
+TEST_VIDEOOSC_MODULE_DEP = build/video_osc_module_test
+TEST_VIDEOOSC_MODULE_RUN = DYLD_LIBRARY_PATH="$(abspath $(RACK_DIR))" ./build/video_osc_module_test
 TEST_FEEDBACK_MODULE_DEP = build/feedback_module_test
 TEST_FEEDBACK_MODULE_RUN = DYLD_LIBRARY_PATH="$(abspath $(RACK_DIR))" ./build/feedback_module_test
 TEST_SCOPE_MODULE_DEP = build/scope_trace_module_test
@@ -398,15 +443,23 @@ TEST_V2_CLIENT_DEP =
 TEST_V2_CLIENT_RUN = @echo "vru_bus_client_test skipped: needs the macOS Rack SDK."
 endif
 
-test: $(TEST_OCT_MODULE_DEP) $(TEST_SCOPE_MODULE_DEP) $(TEST_FEEDBACK_MODULE_DEP) build/octoscillator_test build/vector_osc_test build/video_probe_test build/bus_test build/shapes_test build/focus_test build/frame_delay_test build/picture_mod_test build/feedback_fade_test build/precision_test build/demo_patch_render_test build/video_player_test build/video_player_engine_test build/vru_bus_api_test build/vru_bus_api_golden_test build/vru_bus_api_service_test build/render_pool_stress_test build/vru_bus_api_v2_test build/vru_bus_api_precision_test build/vru_bus_v1_header_test $(TEST_V2_CLIENT_DEP) build/vru_bus_dylib_test $(API_TEST_DYLIB) $(TEST_SYPHON_DEP) $(TEST_DISPLAY_DEP) $(TEST_RENDER_DEP)
+test: $(TEST_SYNC_MODULE_DEP) $(TEST_VIDEOOSC_MODULE_DEP) $(TEST_OCT_MODULE_DEP) $(TEST_SCOPE_MODULE_DEP) $(TEST_FEEDBACK_MODULE_DEP) build/octoscillator_test build/vector_osc_test build/video_probe_test build/raster_scan_test build/bus_test build/shapes_test build/video_clock_test build/focus_test build/frame_delay_test build/picture_mod_test build/feedback_fade_test build/precision_test build/demo_patch_render_test build/video_player_test build/video_player_engine_test build/vru_bus_api_test build/vru_bus_api_golden_test build/vru_bus_api_service_test build/render_pool_stress_test build/vru_bus_api_v2_test build/vru_bus_api_precision_test build/vru_bus_v1_header_test $(TEST_V2_CLIENT_DEP) build/vru_bus_dylib_test $(API_TEST_DYLIB) $(TEST_SYPHON_DEP) $(TEST_DISPLAY_DEP) $(TEST_RENDER_DEP)
 	./build/octoscillator_test
 	./build/vector_osc_test
 	./build/video_probe_test
+	./build/raster_scan_test
+	$(TEST_VIDEOOSC_MODULE_RUN)
+	python3 scripts/check-video-osc-panel.py
+	python3 scripts/check-panel.py --header src/scan_sync_layout.hpp --width kScanSyncPanelWidth --macro SCAN_SYNC_LAYOUT --title "SCAN SYNC"
+	python3 scripts/check-panel.py --header src/raster_layout.hpp --width kRasterPanelWidth --macro RASTER_LAYOUT --title RASTER
+	python3 scripts/check-panel.py --header src/video_probe_layout.hpp --width kVideoProbePanelWidth --macro VIDEO_PROBE_LAYOUT --title "VIDEO PROBE" --preview kVideoProbePreview
 	$(TEST_OCT_MODULE_RUN)
+	$(TEST_SYNC_MODULE_RUN)
 	$(TEST_SCOPE_MODULE_RUN)
 	$(TEST_FEEDBACK_MODULE_RUN)
 	./build/bus_test $(TEST_PROOF_DIR)
 	./build/shapes_test $(TEST_PROOF_DIR)
+	./build/video_clock_test
 	./build/focus_test $(TEST_PROOF_DIR)
 	./build/frame_delay_test
 	./build/picture_mod_test

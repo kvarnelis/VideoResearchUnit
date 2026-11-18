@@ -23,7 +23,7 @@ struct VectorOsc : Module {
 		configParam(VOICES_PARAM, 1.f, 8.f, 3.f, "Voices per side");
 		paramQuantities[VOICES_PARAM]->snapEnabled = true;
 		configParam(DETUNE_PARAM, 0.f, 1.f, .3f, "Detune: spread of the voices (0 is one clean line)", "%", 0.f, 100.f);
-		configParam(WAVE_PARAM, 0.f, 1.f, 0.f, "Wave shape: sine, triangle, saw, square");
+		configParam(WAVE_PARAM, 0.f, vector_osc::kWaveMax, 0.f, "Wave shape: sine, triangle, saw, square");
 		configParam(WAVE_Y_PARAM, -1.f, 1.f, 0.f, "Wave shape of Y compared with X");
 		configParam(LEVEL_PARAM, 0.f, 1.f, 1.f, "Level of X and Y", "%", 0.f, 100.f);
 		configInput(VOCT_INPUT, "Pitch (1 V per octave)");
@@ -51,7 +51,10 @@ struct VectorOsc : Module {
 		s.phase = params[PHASE_PARAM].getValue() + sane(inputs[PHASE_INPUT].getVoltage(), -20.f, 20.f) * .1f;
 		s.voices = static_cast<int>(std::lround(params[VOICES_PARAM].getValue()));
 		s.detune = sane(params[DETUNE_PARAM].getValue() + sane(inputs[DETUNE_INPUT].getVoltage(), -20.f, 20.f) * .1f, 0.f, 1.f);
-		s.wave = sane(params[WAVE_PARAM].getValue() + sane(inputs[WAVE_INPUT].getVoltage(), -20.f, 20.f) * .1f, 0.f, 1.f);
+		// A WAVE knob up to 1 (every saved patch) is limited to 1 as it always was, CV included; only a knob turned
+		// past 1, towards the letters, has the extra range.
+		const float waveKnob = params[WAVE_PARAM].getValue();
+		s.wave = sane(waveKnob + sane(inputs[WAVE_INPUT].getVoltage(), -20.f, 20.f) * .1f, 0.f, waveKnob > 1.f ? kWaveMax : 1.f);
 		s.waveOffsetY = params[WAVE_Y_PARAM].getValue();
 		s.level = params[LEVEL_PARAM].getValue();
 		const vector_osc::Output o = engine.process(s, args.sampleTime);

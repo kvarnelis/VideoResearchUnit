@@ -1,5 +1,6 @@
 #include "video_engine.hpp"
 
+#include "render_pool.hpp"
 #include "shapes_field.hpp"
 
 #include <atomic>
@@ -85,6 +86,9 @@ const std::vector<unsigned char>& PreviewVideoEngine::render(int width, int heig
 		if (pattern == VideoPattern::BarsAndRows) {
 			renderPair(width, height, params, plane);
 		}
+		else if (pattern == VideoPattern::Snow) {
+			renderSnow(width, height, params, plane);
+		}
 		else {
 			renderOscillator(width, height, params, plane);
 		}
@@ -114,6 +118,9 @@ const std::vector<unsigned char>& PreviewVideoEngine::render(int width, int heig
 		break;
 	case VideoPattern::BarsAndRows:
 		renderPair(width, height, params, plane);
+		break;
+	case VideoPattern::Snow:
+		renderSnow(width, height, params, plane);
 		break;
 	case VideoPattern::Oscillator:
 	default:
@@ -373,6 +380,13 @@ void PreviewVideoEngine::renderPair(int width, int height, const VideoParams& pa
 	const double cplA = PairClock::cyclesPerLine(cyclesA, params.barsA);
 	const double cplB = PairClock::cyclesPerLine(cyclesB, params.barsB);
 	const double stepB = cplB / width;  // B's phase across one pixel (A's also takes the bend)
+	// Oscillator C joins only when its LEVEL is above zero; at zero none of C's work is done.
+	const float levelC = clamp01(params.levelC);
+	const bool cOn = levelC > 0.f;
+	const float waveC = clamp01(params.waveC);
+	const double cyclesC = std::clamp(static_cast<double>(params.cyclesC), kPairMinCycles, kPairMaxCycles);
+	const double cplC = PairClock::cyclesPerLine(cyclesC, params.barsC);
+	const double stepC = cplC / width;
 
 	// Phase at the start of every scanline, for one oscillator. Locked bars begin every line at zero; locked
 	// rows run on down the field; a free oscillator starts from the phase latched at the top of the field,
@@ -422,14 +436,18 @@ void PreviewVideoEngine::renderPair(int width, int height, const VideoParams& pa
 	};
 	std::array<double, kPairLines> startsA {};
 	std::array<double, kPairLines> startsB {};
+	std::array<double, kPairLines> startsC {};
 	fillLineStarts(startsA.data(), params.lockA, params.barsA, cplA, params.latchedA);
 	fillLineStarts(startsB.data(), params.lockB, params.barsB, cplB, params.latchedB);
+	if (cOn) {
+		fillLineStarts(startsC.data(), params.lockC, params.barsC, cplC, params.latchedC);
+	}
 
 	// Scan-time inputs: IN A and IN B push the bars of A and B sideways, and the BEND CV adds to BEND, each
 	// read at the pixel's own scan time. With nothing patched `scanInputs` is false and none of this runs.
 	const bool scanned = params.scanInputs && params.signalSlotId > 0 &&
-		signalRingReadFrame(params.signalSlotId, scanSignal, crt::fieldSeconds(kPairLines)) && scanSignal.valid();
-	const float lineSeconds = static_cast<float>(crt::lineSeconds());
+		signalRingReadField(params.signalSlotId, scanSignal, kPairLines) && scanSignal.valid();
+	const float lineSeconds = static_cast<float>(vclock::Clock(48000.0, kPairLines).lineSeconds());
 	auto scanValue = [&](int channel, float t) {
 		const float v = scanSignal.valueAtScanTime(channel, t);
 		return std::isfinite(v) ? std::clamp(v, -8.f, 8.f) : 0.f;
@@ -464,15 +482,18 @@ void PreviewVideoEngine::renderPair(int width, int height, const VideoParams& pa
 		double fmSum = 0.0;  // BARS: the FM phase gathered along this line so far, in cycles
 		const double startA = startsA[static_cast<size_t>(line)];
 		const double startB = startsB[static_cast<size_t>(line)];
+		const double startC = startsC[static_cast<size_t>(line)];
 		// Sideways push, in cycles of each oscillator, at u = 0 and at the pixel.
 		float pushA = 0.f;
 		float pushB = 0.f;
+		float pushC = 0.f;
 		double bendNow = bend;
 		const double lineT = line * lineSeconds;
 		if (scanned) {
 			const float t0 = static_cast<float>(lineT) + uBefore * lineSeconds;
 			pushA = scanValue(kVideoOscInA, t0);
 			pushB = scanValue(kVideoOscInB, t0);
+			pushC = cOn ? scanValue(kVideoOscInC, t0) : 0.f;
 			bendNow = std::clamp(bend + scanValue(kVideoOscBend, t0), -8.0, 8.0);
 		}
 		const float bBefore = oscillator(startB + cplB * uBefore + pushB, waveB, stepB);
@@ -486,6 +507,7 @@ void PreviewVideoEngine::renderPair(int width, int height, const VideoParams& pa
 				const float t = static_cast<float>(lineT) + static_cast<float>(u) * lineSeconds;
 				pushA = scanValue(kVideoOscInA, t);
 				pushB = scanValue(kVideoOscInB, t);
+				pushC = cOn ? scanValue(kVideoOscInC, t) : 0.f;
 				bendNow = std::clamp(bend + scanValue(kVideoOscBend, t), -8.0, 8.0);
 			}
 			const float b = oscillator(startB + cplB * u + pushB, waveB, stepB);
@@ -512,7 +534,25 @@ void PreviewVideoEngine::renderPair(int width, int height, const VideoParams& pa
 			else if (mix == 3) {
 				level = a * b;
 			}
-			const float share = mix == 0 ? 0.f : b / (a + b + 1e-4f);
+			float share = mix == 0 ? 0.f : b / (a + b + 1e-4f);
+			if (cOn) {
+				// Oscillator C joins the way B joins A, then LEVEL fades it in: A crossfades to C, the sum averages
+				// all three, the difference takes C away too, the product multiplies it in. Its colour sits two
+				// SPREADs round the wheel from A's, in proportion to how much of the picture it makes.
+				const float c = oscillator(startC + cplC * u + pushC, waveC, stepC);
+				float joined = c;
+				if (mix == 1) {
+					joined = (2.f * level + c) * (1.f / 3.f);
+				}
+				else if (mix == 2) {
+					joined = level - 0.5f * c;
+				}
+				else if (mix == 3) {
+					joined = level * c;
+				}
+				level += levelC * (clamp01(joined) - level);
+				share += 2.f * levelC * c / (a + b + c + 1e-4f);
+			}
 			float r = 0.f;
 			float g = 0.f;
 			float blue = 0.f;
@@ -525,6 +565,34 @@ void PreviewVideoEngine::renderPair(int width, int height, const VideoParams& pa
 			plane.put(index + 0, clamp01(r) * 255.f);
 			plane.put(index + 1, clamp01(g) * 255.f);
 			plane.put(index + 2, clamp01(blue) * 255.f);
+			plane.put(index + 3, 255.f);
+		}
+	}
+}
+
+// Snow: television static. Every pixel gets its own grey from an integer hash of its place and the field count
+// (`snowTick`), so the same tick always draws the same picture and each new tick draws a new one, on any machine and
+// at any size. FEEDBACK holds the last picture in, which smears the grain into drifting flecks.
+template <class Plane>
+void PreviewVideoEngine::renderSnow(int width, int height, const VideoParams& params, Plane plane) {
+	const float feedback = clamp01(params.feedback);
+	const uint32_t tick = params.snowTick * 0x9E3779B1u + 0x7F4A7C15u;
+	for (int y = 0; y < height; ++y) {
+		for (int x = 0; x < width; ++x) {
+			uint32_t h = static_cast<uint32_t>(x) * 0x85EBCA6Bu ^ (static_cast<uint32_t>(y) + 0x165667B1u) * 0xC2B2AE35u ^ tick;
+			h ^= h >> 16;
+			h *= 0x7FEB352Du;
+			h ^= h >> 15;
+			h *= 0x846CA68Bu;
+			h ^= h >> 16;
+			const float level = static_cast<float>(h >> 8) * (1.f / 16777216.f);
+			const size_t index = (static_cast<size_t>(y) * static_cast<size_t>(width) + static_cast<size_t>(x)) * 4u;
+			const float r = level * (1.f - feedback) + (plane.prevAt(index + 0) / 255.f) * feedback;
+			const float g = level * (1.f - feedback) + (plane.prevAt(index + 1) / 255.f) * feedback;
+			const float b = level * (1.f - feedback) + (plane.prevAt(index + 2) / 255.f) * feedback;
+			plane.put(index + 0, clamp01(r) * 255.f);
+			plane.put(index + 1, clamp01(g) * 255.f);
+			plane.put(index + 2, clamp01(b) * 255.f);
 			plane.put(index + 3, 255.f);
 		}
 	}
@@ -646,7 +714,9 @@ void rampsInto(Dest dst, int width, int height, const RampsParams& params, const
 		const float t = morph - segment;
 		return shapes[segment] + (shapes[segment + 1] - shapes[segment]) * t;
 	};
-	for (int y = 0; y < height; ++y) {
+	// Rows are independent, so bands of rows go to the pool; every pixel is computed exactly as before.
+	render_pool::parallelSpan(static_cast<size_t>(height), 8u, [&](size_t rowBegin, size_t rowEnd) {
+	for (int y = static_cast<int>(rowBegin); y < static_cast<int>(rowEnd); ++y) {
 		for (int x = 0; x < width; ++x) {
 			// MOD IN: the picture offsets layer A's phase, up to one cycle either way at full amount.
 			const float phaseA = modLuma != nullptr ? p.phaseA + p.modAmount * 2.f * (modLuma[static_cast<size_t>(y) * static_cast<size_t>(width) + static_cast<size_t>(x)] - 0.5f) : p.phaseA;
@@ -664,6 +734,7 @@ void rampsInto(Dest dst, int width, int height, const RampsParams& params, const
 			dst.put(i + 3, 255.f);
 		}
 	}
+	});
 }
 }
 
@@ -716,34 +787,17 @@ void shapesInto(Dest dst, int width, int height, const ShapesParams& params) {
 		}
 	};
 	const int pixels = width * height;
-	int threads = static_cast<int>(std::thread::hardware_concurrency());
-	threads = std::clamp(threads, 1, 8);
 	constexpr int kChunkRows = 8;
 	const int chunks = (height + kChunkRows - 1) / kChunkRows;
-	if (pixels < 24000 || threads == 1 || chunks < 2) {
+	if (pixels < 24000 || chunks < 2) {
 		renderRows(0, height);
 		return;
 	}
-	// Workers take bands of rows in turn, so the busy middle of the picture is shared out evenly.
-	std::atomic<int> nextChunk{0};
-	auto worker = [&]() {
-		for (;;) {
-			const int c = nextChunk.fetch_add(1);
-			if (c >= chunks) {
-				return;
-			}
-			renderRows(c * kChunkRows, std::min(height, (c + 1) * kChunkRows));
-		}
-	};
-	std::vector<std::thread> pool;
-	pool.reserve(static_cast<size_t>(threads - 1));
-	for (int t = 1; t < threads; ++t) {
-		pool.emplace_back(worker);
-	}
-	worker();
-	for (std::thread& th : pool) {
-		th.join();
-	}
+	// Bands of rows are taken in turn by the calling thread and the shared helper threads (src/render_pool.hpp), so
+	// the busy middle of the picture is shared out evenly. The scene is only read; each band writes its own rows.
+	render_pool::parallelChunks(chunks, [&](int c) {
+		renderRows(c * kChunkRows, std::min(height, (c + 1) * kChunkRows));
+	});
 }
 }
 

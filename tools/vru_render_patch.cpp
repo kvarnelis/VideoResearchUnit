@@ -17,6 +17,9 @@
 #include "video_graph_renderer.hpp"
 
 #include <algorithm>
+#include <atomic>
+#include <chrono>
+#include <thread>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -312,7 +315,7 @@ std::vector<RealModel> realModels() {
 		{"LineField", modelLineField}, {"VideoOsc", modelVideoOsc}, {"Ramps", modelRamps}, {"ColorLab", modelColorLab},
 		{"Colorizer", modelColorizer}, {"WaveShaper", modelWaveShaper}, {"Keyer", modelKeyer}, {"BusMixer", modelBusMixer},
 		{"Feedback", modelFeedback}, {"FreezeFrame", modelFreezeFrame}, {"DualLfoChaos", modelDualLfoChaos},
-		{"OneVoltCvOut", modelOneVoltCvOut}, {"Rotator", modelRotator}, {"Focus", modelFocus}, {"FrameDelay", modelFrameDelay}, {"Shapes", modelShapes},
+		{"OneVoltCvOut", modelOneVoltCvOut}, {"Rotator", modelRotator}, {"Focus", modelFocus}, {"FrameDelay", modelFrameDelay}, {"ScanSync", modelScanSync}, {"Shapes", modelShapes},
 		{"VideoMixer", modelVideoMixer}, {"Octoscillator", modelOctoscillator}, {"VectorOsc", modelVectorOsc},
 		{"VideoProbe", modelVideoProbe},
 	};
@@ -334,6 +337,8 @@ struct Options {
 	uint64_t seed = 1;
 	int fps = 60;
 	bool precision = false;  // turn the plugin setting "Full precision between modules" on
+	bool hash = false;  // print an FNV-1a hash of every displayed picture, and the render tick times
+	int spin = 0;       // busy-spinning background threads, imitating Rack's audio engine threads
 	bool threadMode = false;  // drive the render service's thread-mode tick (synchronously) instead of the UI-driven one
 };
 
@@ -380,6 +385,14 @@ bool parseArgs(int argc, char** argv, Options& o) {
 		}
 		else if (a == "--precision") {
 			o.precision = true;
+		}
+		else if (a == "--hash") {
+			o.hash = true;
+		}
+		else if (a == "--spin") {
+			const char* v = need("--spin");
+			if (!v) return false;
+			o.spin = std::atoi(v);
 		}
 		else if (a == "--thread-mode") {
 			o.threadMode = true;
@@ -728,11 +741,23 @@ int main(int argc, char** argv) {
 		captureAt.push_back(std::max(1L, std::lround(total * static_cast<double>(k + 1) / opt.frames)));
 	}
 	size_t nextCapture = 0;
+	std::vector<double> tickMs;
+	std::atomic<bool> stopSpin{false};
+	std::vector<std::thread> spinners;
+	for (int k = 0; k < opt.spin; ++k) {
+		spinners.emplace_back([&stopSpin] {
+			volatile uint64_t x = 0;
+			while (!stopSpin.load(std::memory_order_relaxed)) {
+				x = x + 1;
+			}
+		});
+	}
 	int written = 0;
 
 	auto outVoltage = [](Node& n, int id) -> float { return n.module ? n.module->outputs[id].getVoltage() : n.out[id]; };
 
 	for (long s = 1; s <= total; ++s) {
+		args.frame = s - 1;  // Rack's frame counter; the scan modules stamp their signal rings with it (src/video_clock.hpp)
 		for (auto& np : nodes) {
 			Node& n = *np;
 			if (n.module) {
@@ -766,7 +791,9 @@ int main(int argc, char** argv) {
 				for (DisplayRun& d : displays) {
 					renderService().touch(&d, busOf(d), opt.width, opt.height);
 				}
+				const auto tick0 = std::chrono::steady_clock::now();
 				renderService().runTickForTest();
+				tickMs.push_back(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - tick0).count());
 			}
 			for (DisplayRun& d : displays) {
 				const int busId = busOf(d);
@@ -774,6 +801,13 @@ int main(int argc, char** argv) {
 				const RenderService::Frame& frame = *picture.pixels;
 				const bool hasPicture = picture.signal && frame.size() == static_cast<size_t>(opt.width) * opt.height * 4u;
 				d.everSignal = d.everSignal || hasPicture;
+				if (opt.hash && hasPicture) {
+					uint64_t h = 1469598103934665603ull;
+					for (unsigned char b : frame) {
+						h = (h ^ b) * 1099511628211ull;
+					}
+					std::printf("HASH %llu %016llx\n", static_cast<unsigned long long>(renderTick), static_cast<unsigned long long>(h));
+				}
 				if (capture && hasPicture) {
 					std::vector<unsigned char> png;
 					std::string perr;
@@ -798,6 +832,17 @@ int main(int argc, char** argv) {
 		}
 	}
 
+	stopSpin = true;
+	for (std::thread& t : spinners) {
+		t.join();
+	}
+	if (opt.hash && !tickMs.empty()) {
+		std::vector<double> v = tickMs;
+		std::sort(v.begin(), v.end());
+		double sum = 0;
+		for (double x : v) sum += x;
+		std::printf("TICK n=%zu mean %.2f median %.2f p95 %.2f max %.2f ms\n", v.size(), sum / v.size(), v[v.size() / 2], v[v.size() * 95 / 100], v.back());
+	}
 	// Report.
 	std::vector<std::string> lines;
 	char head[256];

@@ -2689,6 +2689,121 @@ void testSpeed() {
 	checkAtMost(4.0 * c, framedOldMs, "and with REPEAT off the frame table makes it at least four times as quick as the old kernel");
 }
 
+// ---- the threaded renderer against a plain single-threaded loop ----
+
+struct SerialPicture {
+	std::vector<unsigned char> bytes;
+	std::vector<float> floats;
+};
+
+// The picture one pixel at a time on this thread: nothing shared, nothing split.
+SerialPicture serialPicture(const ShapesParams& p, int w, int h) {
+	const sf::Scene scene = sf::makeScene(p, w, h);
+	SerialPicture out;
+	out.bytes.resize(static_cast<size_t>(w) * static_cast<size_t>(h) * 4u);
+	out.floats.resize(out.bytes.size());
+	const float aspectWorld = static_cast<float>(w) / static_cast<float>(h);
+	for (int j = 0; j < h; ++j) {
+		const float wy = (0.5f - (static_cast<float>(j) + 0.5f) / static_cast<float>(h)) * 2.f;
+		for (int i = 0; i < w; ++i) {
+			const float wx = ((static_cast<float>(i) + 0.5f) / static_cast<float>(w) - 0.5f) * 2.f * aspectWorld;
+			const float grey = 255.f * sf::shade(scene, wx, wy);
+			const size_t px = (static_cast<size_t>(j) * static_cast<size_t>(w) + static_cast<size_t>(i)) * 4u;
+			for (size_t k = 0; k < 3; ++k) {
+				out.floats[px + k] = grey;
+				out.bytes[px + k] = static_cast<unsigned char>(std::lround(grey));
+			}
+			out.floats[px + 3] = 255.f;
+			out.bytes[px + 3] = 255;
+		}
+	}
+	return out;
+}
+
+std::vector<std::pair<std::string, ShapesParams>> identityCases() {
+	std::vector<std::pair<std::string, ShapesParams>> v;
+	ShapesParams a = shape(6.f, 0.5f, 0.2f);
+	a.round = 0.3f;
+	v.push_back({"a rounded hexagon", a});
+	ShapesParams b = shape(7.5f, 0.3f, 2.f);
+	b.round = 0.5f;
+	b.repeat = 8;
+	b.copies = 8;
+	b.melt = 0.5f;
+	b.aspect = 2.f;
+	v.push_back({"REPEAT 8, 8 COPIES, MELT, ROUND, ASPECT 2", b});
+	ShapesParams c = b;
+	c.repeat = 1;
+	v.push_back({"8 COPIES with REPEAT off", c});
+	ShapesParams d = shape(3.f, 0.4f, 0.3f);
+	d.copies = 8;
+	d.melt = 0.8f;
+	d.turn = 0.2f;
+	d.x = 0.1f;
+	v.push_back({"8 COPIES, MELT .8, a turned triangle", d});
+	ShapesParams e = shape(5.f, 0.45f, 0.1f);
+	e.point = 0.4f;
+	e.repeat = 4;
+	e.matte = 1;
+	v.push_back({"a pointed pentagon, REPEAT 4, matte", e});
+	return v;
+}
+
+void testThreadedIdentity() {
+	std::printf("Shapes: the threaded renderer draws exactly what one thread draws\n");
+	const int sizes[][2] = {{960, 540}, {1440, 1080}, {200, 120}, {160, 100}, {97, 301}};
+	size_t pixels = 0;
+	int scenes = 0;
+	size_t differing = 0;
+	for (const auto& cs : identityCases()) {
+		for (const auto& sz : sizes) {
+			const int w = sz[0], h = sz[1];
+			const SerialPicture ref = serialPicture(cs.second, w, h);
+			Frame bytes;
+			renderShapes(bytes, w, h, cs.second);
+			VideoFrame vf;
+			renderShapes(vf, w, h, cs.second, true);
+			VideoFrame vb;
+			renderShapes(vb, w, h, cs.second, false);
+			const bool sameBytes = bytes == ref.bytes;
+			bool sameFloats = vf.f.size() == ref.floats.size() && std::memcmp(vf.f.data(), ref.floats.data(), ref.floats.size() * sizeof(float)) == 0;
+			bool sameVb = vb.size() == ref.bytes.size() && std::memcmp(vb.data(), ref.bytes.data(), ref.bytes.size()) == 0;
+			differing += sameBytes ? 0 : 1;
+			differing += sameFloats ? 0 : 1;
+			differing += sameVb ? 0 : 1;
+			check(sameBytes && sameFloats && sameVb, cs.first + " at " + std::to_string(w) + "x" + std::to_string(h) + " is the same on every thread count");
+			pixels += static_cast<size_t>(w) * static_cast<size_t>(h) * 3u;
+			++scenes;
+		}
+	}
+	std::printf("  %d scenes, %zu pixel pictures compared byte for byte, %zu differences\n", scenes, pixels, differing);
+
+	// Several threads asking for pictures at once: the helpers serve one at a time and the rest draw alone. Every
+	// picture is still the same.
+	const auto cases = identityCases();
+	std::vector<SerialPicture> refs;
+	for (const auto& cs : cases) {
+		refs.push_back(serialPicture(cs.second, 480, 270));
+	}
+	std::atomic<int> bad{0};
+	std::vector<std::thread> callers;
+	for (size_t t = 0; t < cases.size(); ++t) {
+		callers.emplace_back([&, t] {
+			for (int rep = 0; rep < 20; ++rep) {
+				Frame bytes;
+				renderShapes(bytes, 480, 270, cases[t].second);
+				if (bytes != refs[t].bytes) {
+					++bad;
+				}
+			}
+		});
+	}
+	for (std::thread& th : callers) {
+		th.join();
+	}
+	check(bad == 0, "five threads drawing different shapes at once each get exactly their own picture");
+}
+
 // ---- the presets and the registration ----
 
 std::string readFile(const std::string& path) {
@@ -3170,6 +3285,7 @@ int main(int argc, char** argv) {
 	testSmoothness();
 	testExtremes();
 	testSpeed();
+	testThreadedIdentity();
 	testPresets();
 	testDownstream();
 	testProofSheets();

@@ -1,4 +1,5 @@
 #include "video_graph_renderer.hpp"
+#include "video_clock.hpp"
 #include "video_bus.hpp"
 #include "video_external_frame.hpp"
 #include "freeze_frame_store.hpp"
@@ -7,6 +8,8 @@
 #include "cv_param.hpp"
 #include "deflection_yoke_math.hpp"
 #include "focus_filter.hpp"
+#include "raster_scan.hpp"
+#include "render_pool.hpp"
 
 #include <algorithm>
 #include <array>
@@ -278,6 +281,33 @@ VideoGraphRenderer::Status VideoGraphRenderer::renderNodeBody(int busId, const V
 	case VideoBusNodeType::Shapes:
 		renderShapes(out, width, height, node.shapes, passFloat);
 		return Status::Ok;
+
+	case VideoBusNodeType::Raster: {
+		// A picture built from the module's signal ring: the newest complete field of the video clock (VRU-29).
+		// A read that fails (no field yet, or the writer wrapped onto the copy) keeps the last good picture.
+		if (node.raster.slow > 1) {
+			// SLOW: each pass paints the samples that arrived since the last one into the held picture.
+			raster_scan::Held& held = rasterSlow[static_cast<size_t>(busId) % rasterSlow.size()];
+			if (signalRingReadSince(node.raster.slotId, held.lastFrame, 8192, scopeWindow)) {
+				raster_scan::paintSince(held, width, height, scopeWindow, node.raster);
+			}
+			else {
+				raster_scan::paintSince(held, width, height, SignalWindow(), node.raster);
+			}
+			out.assign(held.pic.begin(), held.pic.end());
+			return Status::Ok;
+		}
+		std::vector<unsigned char>& hold = rasterHold[static_cast<size_t>(busId) % rasterHold.size()];
+		const size_t bytes = static_cast<size_t>(width) * static_cast<size_t>(height) * 4u;
+		if (signalRingReadField(node.raster.slotId, scopeWindow, std::max(node.raster.lines, 1))) {
+			raster_scan::render(hold, width, height, scopeWindow, node.raster);
+		}
+		else if (hold.size() != bytes) {
+			raster_scan::render(hold, width, height, SignalWindow(), node.raster);
+		}
+		out.assign(hold.begin(), hold.end());
+		return Status::Ok;
+	}
 
 	case VideoBusNodeType::ExternalFrame: {
 		if (!videoExternalFrameRead(node.externalFrameId, externalFrame)) {
@@ -568,7 +598,8 @@ void VideoGraphRenderer::renderColorLabFrame(Frame& source, Frame& out, int widt
 		withDest<StoreRule::Truncate>(out, [&](auto dst) {
 			// In a float picture the colour is not cut to a byte between the HSV step and the contrast step.
 			constexpr bool toFloat = std::is_same<decltype(dst), FloatDest>::value;
-			for (size_t i = 0; i < byteCount; i += 4u) {
+			render_pool::parallelSpan(byteCount, 4u * 8192u, [&](size_t spanBegin, size_t spanEnd) {
+			for (size_t i = spanBegin; i < spanEnd; i += 4u) {
 				float r = src[i + 0] / 255.f;
 				float g = src[i + 1] / 255.f;
 				float b = src[i + 2] / 255.f;
@@ -609,6 +640,7 @@ void VideoGraphRenderer::renderColorLabFrame(Frame& source, Frame& out, int widt
 				dst.put(i + 2, src[i + 2] * (1.f - mix) + b * 255.f * mix);
 				dst.put(i + 3, 255.f);
 			}
+			});
 		});
 	});
 }
@@ -652,7 +684,8 @@ void VideoGraphRenderer::renderBusMixerFrame(const Frame& a, const Frame& b, con
 	const bool hasMatte = matte != nullptr && matte->count() == byteCount;
 	auto run = [&](auto srcA, auto srcB, auto srcM) {
 		withDest<StoreRule::Truncate>(out, [&](auto dst) {
-			for (size_t i = 0; i < byteCount; i += 4u) {
+			render_pool::parallelSpan(byteCount, 4u * 16384u, [&](size_t spanBegin, size_t spanEnd) {
+			for (size_t i = spanBegin; i < spanEnd; i += 4u) {
 				// Factor is how much of B shows through. Matte mode (6) keys on the MAT BUS luma.
 				// Without a MAT BUS, Matte mode falls back to the MIX knob.
 				float factor = baseMix;
@@ -679,6 +712,7 @@ void VideoGraphRenderer::renderBusMixerFrame(const Frame& a, const Frame& b, con
 				}
 				dst.put(i + 3, 255.f);
 			}
+			});
 		});
 	};
 	if (!a.isFloat() && !b.isFloat() && (!hasMatte || !matte->isFloat())) {
@@ -710,7 +744,8 @@ void VideoGraphRenderer::renderWaveShaperFrame(Frame& source, Frame& out, int wi
 	};
 	withSource(source, [&](auto src) {
 		withDest<StoreRule::Truncate>(out, [&](auto dst) {
-			for (size_t i = 0; i < byteCount; i += 4u) {
+			render_pool::parallelSpan(byteCount, 4u * 16384u, [&](size_t spanBegin, size_t spanEnd) {
+			for (size_t i = spanBegin; i < spanEnd; i += 4u) {
 				if (params.mode == 1) {
 					const float l = shape((src[i + 0] * 0.2126f + src[i + 1] * 0.7152f + src[i + 2] * 0.0722f) / 255.f);
 					for (int c = 0; c < 3; ++c) dst.put(i + c, src[i + c] * (1.f - mix) + l * 255.f * mix);
@@ -723,6 +758,7 @@ void VideoGraphRenderer::renderWaveShaperFrame(Frame& source, Frame& out, int wi
 				}
 				dst.put(i + 3, 255.f);
 			}
+			});
 		});
 	});
 }
@@ -1083,16 +1119,10 @@ void parallelRanges(int count, int threads, Fn fn) {
 		fn(0, count);
 		return;
 	}
-	std::vector<std::thread> pool;
-	pool.reserve(static_cast<size_t>(threads));
-	for (int t = 0; t < threads; ++t) {
-		const int begin = count * t / threads;
-		const int end = count * (t + 1) / threads;
-		pool.emplace_back([&fn, begin, end] { fn(begin, end); });
-	}
-	for (std::thread& th : pool) {
-		th.join();
-	}
+	// The same split as always, but run on the persistent helpers instead of threads started and joined every frame.
+	render_pool::parallelChunks(threads, [&fn, count, threads](int t) {
+		fn(count * t / threads, count * (t + 1) / threads);
+	});
 }
 
 }  // namespace
@@ -1106,7 +1136,7 @@ void VideoGraphRenderer::renderDeflectionYokeFrame(int busId, Frame& source, Fra
 	// is dimmer and a slow one brighter. Strokes are splatted with a Gaussian spot across the line.
 	// No raster signal yet: pass the source through.
 	const int lines = std::clamp(params.lines, crt::kMinLines, crt::kMaxLines);
-	if (!signalRingReadFrame(params.signalSlotId, wobbleSignal, crt::fieldSeconds(lines)) || !wobbleSignal.valid()) {
+	if (!signalRingReadField(params.signalSlotId, wobbleSignal, lines) || !wobbleSignal.valid()) {
 		out.swap(source);
 		return;
 	}
@@ -1144,10 +1174,13 @@ void VideoGraphRenderer::renderDeflectionYokeFrame(int busId, Frame& source, Fra
 	const bool curled = lineCurl * depth != 0.f;
 	const int threads = std::clamp(static_cast<int>(std::thread::hardware_concurrency()), 1, 8);
 
-	// Deflection and zoom over one field window. Table entry i is window sample i.
-	const int fieldSamples = wobbleSignal.framePeriodSamples;
-	const double samplesPerLine = static_cast<double>(fieldSamples) / (static_cast<double>(N) + crt::kBlankingLines);
-	const int tableLength = fieldSamples + 2;
+	// Deflection and zoom over one field window. Table entry i is window sample i; the field begins
+	// `startFraction` of a sample after entry 0, on the video clock (src/video_clock.hpp), and a line is
+	// the clock's fractional number of samples long, so nothing here is fitted to a whole sample.
+	const vclock::Clock fieldClock(static_cast<double>(wobbleSignal.sampleRate), lines);
+	const double samplesPerLine = fieldClock.samplesPerLine();
+	const float fieldStart = static_cast<float>(wobbleSignal.startFraction);
+	const int tableLength = wobbleSignal.length;
 	std::vector<float> xTable(static_cast<size_t>(tableLength));
 	std::vector<float> yTable(static_cast<size_t>(tableLength));
 	std::vector<float> zTable(static_cast<size_t>(tableLength));
@@ -1320,7 +1353,7 @@ void VideoGraphRenderer::renderDeflectionYokeFrame(int busId, Frame& source, Fra
 			for (int c = 0; c < Wc; ++c) {
 				const int x = c - extraX;
 				const float gx0 = static_cast<float>(x) / fw;
-				const float pos = static_cast<float>((static_cast<float>(kEdge) + gx0) * samplesPerLine);
+				const float pos = static_cast<float>((static_cast<float>(kEdge) + gx0) * samplesPerLine) + fieldStart;
 				const float dx = tableAt(xTable, pos);
 				const float dy = tableAt(yTable, pos);
 				const float zoom = std::clamp(1.f + tableAt(zTable, pos), kZoomMin, kZoomMax);
@@ -1438,7 +1471,7 @@ void VideoGraphRenderer::renderDeflectionYokeFrame(int busId, Frame& source, Fra
 	const std::array<float, 2>* corners = wobbleCorners.data();
 	const std::array<float, 2>* bounds = wobbleBounds.data();
 	crt::EnergyField& energy = bs.energy;
-	parallelRanges(height, threads, [&](int bandY0, int bandY1) {
+	parallelRanges(height, threads > 1 ? threads * 4 : 1, [&](int bandY0, int bandY1) {
 		const float y0 = static_cast<float>(bandY0);
 		const float y1 = static_cast<float>(bandY1);
 		for (int s = 0; s < Ntot; ++s) {
@@ -1475,6 +1508,11 @@ void VideoGraphRenderer::renderDeflectionYokeFrame(int busId, Frame& source, Fra
 					const std::array<float, 2>& a = corners[static_cast<size_t>(s) * static_cast<size_t>(Wc) + static_cast<size_t>(c)];
 					const std::array<float, 2>& b = corners[static_cast<size_t>(s) * static_cast<size_t>(Wc) + static_cast<size_t>(c) + 1u];
 					if (!wrap) {
+						// A stroke that misses this band adds nothing to it (the same test the wrap case makes below), so
+						// it is not walked once per band.
+						if (std::max(a[1], b[1]) + pad < y0 || std::min(a[1], b[1]) - pad >= y1) {
+							continue;
+						}
 						crt::depositPath(energy, spot, a[0], a[1], b[0], b[1], rgb, gain, bandY0, bandY1);
 						continue;
 					}
@@ -1532,7 +1570,7 @@ void VideoGraphRenderer::renderScanProcessorFrame(int busId, Frame& source, Fram
 	// Luma is the source averaged over the rows of the line's band and bilinear in x, so there are no steps.
 	// DEFLECT X, DEFLECT Y, BLANK and beam Z are read from the signal ring at each point's scan time, (k + r) x line time.
 	const int lines = std::clamp(params.lines, 16, 2048);
-	const bool haveSignal = signalRingReadFrame(params.signalSlotId, scanProcessorSignal, crt::fieldSeconds(lines)) && scanProcessorSignal.valid();
+	const bool haveSignal = signalRingReadField(params.signalSlotId, scanProcessorSignal, lines) && scanProcessorSignal.valid();
 
 	BeamState& bs = beam[static_cast<size_t>(busId)];
 	if (!bs.energy.matches(width, height)) {
@@ -1571,7 +1609,7 @@ void VideoGraphRenderer::renderScanProcessorFrame(int busId, Frame& source, Fram
 	const int P = S + 1;   // points per line
 	scanProcessorPoints.resize(static_cast<size_t>(lines) * static_cast<size_t>(P));
 	scanProcessorBounds.resize(static_cast<size_t>(lines));
-	const float lineSec = static_cast<float>(crt::lineSeconds());
+	const float lineSec = static_cast<float>(vclock::Clock(48000.0, lines).lineSeconds());  // the clock's line time; the rate does not enter it
 	const float bandH = static_cast<float>(height) / static_cast<float>(lines);
 	// LIFT IN picture, or null: then the main picture supplies the lift as well as the brightness and colour.
 	// Either picture may be bytes or floats (0..255 units); the pixel readers below follow its format.
@@ -1700,7 +1738,7 @@ void VideoGraphRenderer::renderScanProcessorFrame(int busId, Frame& source, Fram
 	const ScanProcessorPoint* points = scanProcessorPoints.data();
 	const std::array<float, 2>* bounds = scanProcessorBounds.data();
 	crt::EnergyField& field = scanField;
-	parallelRanges(SH, threads, [&](int bandY0, int bandY1) {
+	parallelRanges(SH, threads > 1 ? threads * 4 : 1, [&](int bandY0, int bandY1) {
 		const float y0 = static_cast<float>(bandY0);
 		const float y1 = static_cast<float>(bandY1);
 		for (int k = 0; k < lines; ++k) {
@@ -1716,6 +1754,10 @@ void VideoGraphRenderer::renderScanProcessorFrame(int busId, Frame& source, Fram
 				const float e = 0.5f * (a.energy + b.energy);
 				if (e <= 0.f) {
 					continue;  // blanked: no energy
+				}
+				// A stroke that misses this band adds nothing to it; do not walk it once per band.
+				if (std::max(a.y, b.y) + static_cast<float>(pad) < y0 || std::min(a.y, b.y) - static_cast<float>(pad) >= y1) {
+					continue;
 				}
 				const float rgb[3] = {0.5f * (a.r + b.r), 0.5f * (a.g + b.g), 0.5f * (a.b + b.b)};
 				crt::depositPath(field, spot, a.x, a.y, b.x, b.y, rgb, gain * e, bandY0, bandY1);

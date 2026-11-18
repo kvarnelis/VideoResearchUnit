@@ -2,6 +2,7 @@
 
 #include "video_bus.hpp"
 #include "video_engine.hpp"
+#include "raster_scan.hpp"
 #include "freeze_frame_store.hpp"
 #include "frame_ring.hpp"
 #include "video_external_frame.hpp"
@@ -211,6 +212,8 @@ private:
 	std::array<BeamState, kVideoBusCount + 1> beam;
 	crt::Glow glow;
 	SignalWindow scopeWindow;
+	std::vector<raster_scan::Held> rasterSlow = std::vector<raster_scan::Held>(65);   // slow Raster pictures, painted a slice at a time
+	std::vector<std::vector<unsigned char>> rasterHold = std::vector<std::vector<unsigned char>>(65);   // last good Raster picture per bus
 	SignalWindow scopeSpan;  // trigger search span: the newest W + S samples
 	// Scope Trace polyline scratch: the decimated window as screen pixels (trace A, trace B for Dual
 	// Trace, and Z), so a first pass can measure the mean segment length before any stroke is drawn.

@@ -1,0 +1,152 @@
+{
+  "version": "2.6.6",
+  "zoom": 1.0,
+  "gridOffset": [
+    0.0,
+    0.0
+  ],
+  "modules": [
+    {
+      "id": 1,
+      "plugin": "VideoResearchUnit",
+      "model": "Shapes",
+      "version": "2.0.0",
+      "params": [
+        {
+          "id": 0,
+          "value": 5.0
+        },
+        {
+          "id": 1,
+          "value": 0.25
+        },
+        {
+          "id": 3,
+          "value": 0.35
+        }
+      ],
+      "pos": [
+        0,
+        0
+      ]
+    },
+    {
+      "id": 2,
+      "plugin": "VideoResearchUnit",
+      "model": "VideoProbe",
+      "version": "2.0.0",
+      "params": [
+        {
+          "id": 7,
+          "value": 1.0
+        },
+        {
+          "id": 8,
+          "value": 120.0
+        },
+        {
+          "id": 9,
+          "value": 5.0
+        }
+      ],
+      "pos": [
+        14,
+        0
+      ]
+    },
+    {
+      "id": 3,
+      "plugin": "VideoResearchUnit",
+      "model": "Raster",
+      "version": "2.0.0",
+      "params": [
+        {
+          "id": 0,
+          "value": 120.0
+        },
+        {
+          "id": 1,
+          "value": 1.0
+        },
+        {
+          "id": 2,
+          "value": 5.0
+        }
+      ],
+      "pos": [
+        34,
+        0
+      ]
+    },
+    {
+      "id": 4,
+      "plugin": "VideoResearchUnit",
+      "model": "Display",
+      "version": "2.0.0",
+      "params": [],
+      "pos": [
+        0,
+        1
+      ]
+    },
+    {
+      "id": 5,
+      "plugin": "VideoResearchUnit",
+      "model": "Display",
+      "version": "2.0.0",
+      "params": [],
+      "pos": [
+        30,
+        1
+      ]
+    },
+    {
+      "id": 6,
+      "plugin": "Core",
+      "model": "Notes",
+      "version": "2.6.6",
+      "params": [],
+      "pos": [
+        44,
+        0
+      ],
+      "data": {
+        "text": "A picture becomes a signal and the signal becomes a picture again.\nThe Video Probe has SCAN on and nothing in X or Y, so it reads the Shapes picture as a raster on the video clock: left to right, top to bottom, one picture at a time. Its LUMA output carries that scan as an ordinary 0 to 10 V signal. LUMA goes into BRIGHT on the Raster, which paints each sample where the clock says it belongs.\nBoth are set to 120 lines and SLOW x32, and the settings must match.\nSLOW makes a picture take 32 fields of the video clock instead of one, so each line lasts 32 times longer and gets about 98 samples at 48 kHz instead of 3. A picture comes round every 0.3 seconds. The right-hand Display shows the shape being redrawn from the top down, about 98 columns wide. Sharper means slower: at SLOW x1 the same patch gives a picture 3 columns wide, 110 times a second. It is a way to hear and process a picture, not a full-resolution path.\nTry patching LUMA through other modules on its way to BRIGHT (a VCA, a filter, an inverting attenuator), try FILL on the Raster, and try 60 or 240 lines on both."
+      }
+    }
+  ],
+  "cables": [
+    {
+      "id": 1,
+      "outputModuleId": 1,
+      "outputId": 0,
+      "inputModuleId": 2,
+      "inputId": 0,
+      "color": "#8b4ade"
+    },
+    {
+      "id": 2,
+      "outputModuleId": 1,
+      "outputId": 0,
+      "inputModuleId": 4,
+      "inputId": 0,
+      "color": "#8b4ade"
+    },
+    {
+      "id": 3,
+      "outputModuleId": 2,
+      "outputId": 0,
+      "inputModuleId": 3,
+      "inputId": 0,
+      "color": "#ffb437"
+    },
+    {
+      "id": 4,
+      "outputModuleId": 3,
+      "outputId": 0,
+      "inputModuleId": 5,
+      "inputId": 0,
+      "color": "#8b4ade"
+    }
+  ]
+}

@@ -2,6 +2,7 @@
 
 #include "crt_beam.hpp"
 #include "signal_ring.hpp"
+#include "video_clock.hpp"
 #include "video_frame.hpp"
 
 #include <algorithm>
@@ -18,6 +19,7 @@ enum class VideoPattern : int {
 	Grayscale = 4,
 	Grid = 5,
 	BarsAndRows = 6,
+	Snow = 7,
 };
 
 // Bars and Rows (pattern 6): two oscillators, A and B, run against a television scan. Each pixel row
@@ -69,6 +71,17 @@ struct VideoParams {
 	// engine its luma; with no luma, or fmAmount 0, the picture is drawn exactly as before.
 	int fmBusId = 0;
 	float fmAmount = 0.f;
+	// Snow (pattern 7): the field count the module's scan clock has reached. Each value draws a different, repeatable
+	// picture of television static; the same value always draws the same one.
+	uint32_t snowTick = 0;
+	// Oscillator C (Bars and Rows): the same controls as A and B. levelC 0..1 is how much of C joins the picture; at 0 C
+	// is not drawn at all and the picture is byte for byte what A and B alone draw.
+	float cyclesC = 3.f;
+	float waveC = 0.f;
+	bool barsC = false;
+	float lockC = 1.f;
+	double latchedC = 0.0;
+	float levelC = 0.f;
 };
 
 // How hard FM IN bends oscillator A. At full amount the rate of A's phase runs from 1 - kPairFmDepth / 2 (a black
@@ -81,7 +94,7 @@ enum VideoOscSignalChannel : int {
 	kVideoOscInA = 0,   // IN A, volts / 5: 1.0 pushes A's bars sideways one cycle of A
 	kVideoOscInB = 1,   // IN B, volts / 5: 1.0 pushes B's bars sideways one cycle of B
 	kVideoOscBend = 2,  // BEND CV in cycles (0.4 per volt), added to the BEND knob
-	kVideoOscSpare = 3, // not used yet; always 0
+	kVideoOscInC = 3,   // IN C, volts / 5: 1.0 pushes C's bars sideways one cycle of C (was the spare; 0 when unpatched)
 };
 
 // The scan clock for Bars and Rows. The module advances it once per audio sample. A free oscillator
@@ -91,9 +104,12 @@ struct PairClock {
 	double fieldLine = 0.0;   // lines into the field, 0..kPairFieldLines
 	double phaseA = 0.0;      // running phase, 0..1
 	double phaseB = 0.0;
+	double phaseC = 0.0;
 	double latchedA = 0.0;    // phase at the start of the current field
 	double latchedB = 0.0;
+	double latchedC = 0.0;
 	bool fieldOdd = false;    // flips at every field boundary
+	uint32_t fieldCount = 0;  // field boundaries crossed since the clock started (wraps); Snow's tick
 
 	static double cyclesPerLine(double cycles, bool bars) {
 		return bars ? cycles : cycles / kPairFieldLines;
@@ -103,7 +119,38 @@ struct PairClock {
 		return wrapped >= 1.0 ? 0.0 : wrapped;
 	}
 
-	void advance(double dt, double cyclesA, bool barsA, double cyclesB, bool barsB) {
+	// The module's version: the field boundaries come from the video clock (src/video_clock.hpp) at Rack's frame
+	// number, so a field here is the field the scan-time inputs and every other scan module draw. The phases
+	// still free-run. `lastField` is the clock's field at the previous call (-1 before the first).
+	int64_t lastField = -1;
+	void advanceAt(int64_t frame, double sampleRate, double cyclesA, bool barsA, double cyclesB, bool barsB, double cyclesC, bool barsC) {
+		const double dt = 1.0 / sampleRate;
+		if (!(dt > 0.0 && dt < 1.0)) {
+			return;
+		}
+		const double lines = vclock::kLineRateHz * dt;
+		const double cplA = cyclesPerLine(cyclesA, barsA);
+		const double cplB = cyclesPerLine(cyclesB, barsB);
+		const double cplC = cyclesPerLine(cyclesC, barsC);
+		phaseA = wrap(phaseA + cplA * lines);
+		phaseB = wrap(phaseB + cplB * lines);
+		phaseC = wrap(phaseC + cplC * lines);
+		const vclock::VideoTime t = vclock::Clock(sampleRate, kPairLines).fromFrame(static_cast<double>(frame));
+		fieldLine = t.fieldPhase * kPairFieldLines;
+		const int64_t crossed = lastField < 0 ? 0 : t.field - lastField;
+		lastField = t.field;
+		if (crossed > 0) {
+			latchedA = wrap(phaseA - fieldLine * cplA);
+			latchedB = wrap(phaseB - fieldLine * cplB);
+			latchedC = wrap(phaseC - fieldLine * cplC);
+			fieldCount += static_cast<uint32_t>(crossed);
+			if (crossed & 1) {
+				fieldOdd = !fieldOdd;
+			}
+		}
+	}
+
+	void advance(double dt, double cyclesA, bool barsA, double cyclesB, bool barsB, double cyclesC = 1.0, bool barsC = false) {
 		if (!(dt > 0.0 && dt < 1.0)) {
 			return;
 		}
@@ -112,6 +159,8 @@ struct PairClock {
 		const double cplB = cyclesPerLine(cyclesB, barsB);
 		phaseA = wrap(phaseA + cplA * lines);
 		phaseB = wrap(phaseB + cplB * lines);
+		const double cplC = cyclesPerLine(cyclesC, barsC);
+		phaseC = wrap(phaseC + cplC * lines);
 		fieldLine += lines;
 		int crossed = 0;
 		while (fieldLine >= kPairFieldLines) {
@@ -122,6 +171,8 @@ struct PairClock {
 			// The boundary fell fieldLine lines before this sample; take the phase back to it.
 			latchedA = wrap(phaseA - fieldLine * cplA);
 			latchedB = wrap(phaseB - fieldLine * cplB);
+			latchedC = wrap(phaseC - fieldLine * cplC);
+			fieldCount += static_cast<uint32_t>(crossed);
 			if (crossed & 1) {
 				fieldOdd = !fieldOdd;
 			}
@@ -371,6 +422,8 @@ private:
 	template <class Plane>
 	void renderPair(int width, int height, const VideoParams& params, Plane plane);
 	template <class Plane>
+	void renderSnow(int width, int height, const VideoParams& params, Plane plane);
+	template <class Plane>
 	void applyColorControls(int width, int height, const VideoParams& params, Plane plane);
 	void setPixel(int width, int x, int y, Color color);
 
@@ -541,4 +594,21 @@ struct VideoMixerParams {
 	// ignore these fields.
 	float level[4] = {1.f, 1.f, 1.f, 1.f};
 	bool average = false;
+};
+
+// Raster (VRU-29). A picture built from the module's signal ring (docs/architecture.md, "Raster"). `lines` is the
+// visible line count of the video clock the module's samples were stamped with (the clock is src/video_clock.hpp).
+// slotId is the ring the module writes (channels 0 to 2: red, green, blue as 0..1, or x volts, y volts and grey
+// brightness in placed mode). xPlaced / yPlaced say the module's X / Y jack has a cable: that axis is then read from the
+// ring, in volts (+/-5 V spans the picture, +5 V on Y is the top); an axis without a cable follows the raster.
+// join 0 holds each sample flat across its cell (placed: a dot); join 1 runs a straight join between neighbours.
+struct RasterParams {
+	int slotId = 0;
+	int lines = 240;
+	int xPlaced = 0;
+	int yPlaced = 0;
+	int join = 0;
+	// SLOW (1, 2, 4 ... 128): a picture takes this many fields of the clock; the renderer then paints each field's slice into
+	// a held picture (src/video_clock.hpp, "Slow scan").
+	int slow = 1;
 };

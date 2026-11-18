@@ -1,7 +1,9 @@
 #include "crt_beam.hpp"
 
+#include "render_pool.hpp"
 #include <algorithm>
 #include <cmath>
+#include <vector>
 
 namespace crt {
 
@@ -131,9 +133,12 @@ void EnergyField::clear() {
 }
 
 void EnergyField::decay(float retain) {
-	for (float& v : rgb_) {
-		v *= retain;
-	}
+	float* data = rgb_.data();
+	render_pool::parallelSpan(rgb_.size(), 3u * 32768u, [data, retain](size_t begin, size_t end) {
+		for (size_t i = begin; i < end; ++i) {
+			data[i] *= retain;
+		}
+	});
 }
 
 // ---- BeamSpot ----
@@ -216,18 +221,24 @@ void Glow::compute(const EnergyField& energy, float amount) {
 	const size_t smallCount = static_cast<size_t>(sw) * static_cast<size_t>(sh) * 3u;
 	small_.assign(smallCount, 0.f);
 	temp_.assign(smallCount, 0.f);
-	field_.assign(static_cast<size_t>(width) * static_cast<size_t>(height) * 3u, 0.f);
+	// Every float of the field is written below, so it is not zeroed first.
+	field_.resize(static_cast<size_t>(width) * static_cast<size_t>(height) * 3u);
 
 	const float* src = energy.data();
-	for (int y = 0; y < height; ++y) {
-		for (int x = 0; x < width; ++x) {
-			const size_t s = (static_cast<size_t>(y) * static_cast<size_t>(width) + static_cast<size_t>(x)) * 3u;
-			const size_t d = (static_cast<size_t>(y / kDown) * static_cast<size_t>(sw) + static_cast<size_t>(x / kDown)) * 3u;
-			small_[d + 0] += src[s + 0];
-			small_[d + 1] += src[s + 1];
-			small_[d + 2] += src[s + 2];
+	// Cell rows are independent, and each cell still adds its pixels in the same order.
+	render_pool::parallelSpan(static_cast<size_t>(sh), 16u, [&](size_t cellBegin, size_t cellEnd) {
+		const int yBegin = static_cast<int>(cellBegin) * kDown;
+		const int yEnd = std::min(height, static_cast<int>(cellEnd) * kDown);
+		for (int y = yBegin; y < yEnd; ++y) {
+			for (int x = 0; x < width; ++x) {
+				const size_t s = (static_cast<size_t>(y) * static_cast<size_t>(width) + static_cast<size_t>(x)) * 3u;
+				const size_t d = (static_cast<size_t>(y / kDown) * static_cast<size_t>(sw) + static_cast<size_t>(x / kDown)) * 3u;
+				small_[d + 0] += src[s + 0];
+				small_[d + 1] += src[s + 1];
+				small_[d + 2] += src[s + 2];
+			}
 		}
-	}
+	});
 	// A cell is the average of the pixels it covers. The last row or column can cover fewer than
 	// kDown, so each cell divides by its own count.
 	for (int y = 0; y < sh; ++y) {
@@ -285,24 +296,32 @@ void Glow::compute(const EnergyField& energy, float amount) {
 	}
 	const float gain = amount * 4.f;
 	const size_t rowFloats = static_cast<size_t>(sw) * 3u;
-	float* out = field_.data();
-	for (int y = 0; y < height; ++y) {
-		// temp_ is free after the blur. It holds this row, interpolated between two rows of cells.
-		const CellTap row = tapFor(y, sh);
-		const float* lo = small_.data() + static_cast<size_t>(row.lo) * rowFloats;
-		const float* hi = small_.data() + static_cast<size_t>(row.hi) * rowFloats;
-		for (size_t i = 0; i < rowFloats; ++i) {
-			temp_[i] = lo[i] + (hi[i] - lo[i]) * row.t;
-		}
-		for (int x = 0; x < width; ++x) {
-			const CellTap& col = columns_[static_cast<size_t>(x)];
-			const float* a = temp_.data() + static_cast<size_t>(col.lo) * 3u;
-			const float* b = temp_.data() + static_cast<size_t>(col.hi) * 3u;
-			for (int c = 0; c < 3; ++c) {
-				*out++ = (a[c] + (b[c] - a[c]) * col.t) * gain;
+	float* fieldData = field_.data();
+	const CellTap* cols = columns_.data();
+	const float* smallData = small_.data();
+	render_pool::parallelSpan(static_cast<size_t>(height), 16u, [&](size_t rowBegin, size_t rowEnd) {
+		// A row interpolated between two rows of cells, in a buffer of this piece's own.
+		thread_local std::vector<float> rowBuf;
+		rowBuf.resize(rowFloats);
+		for (size_t yy = rowBegin; yy < rowEnd; ++yy) {
+			const int y = static_cast<int>(yy);
+			const CellTap row = tapFor(y, sh);
+			const float* lo = smallData + static_cast<size_t>(row.lo) * rowFloats;
+			const float* hi = smallData + static_cast<size_t>(row.hi) * rowFloats;
+			for (size_t i = 0; i < rowFloats; ++i) {
+				rowBuf[i] = lo[i] + (hi[i] - lo[i]) * row.t;
+			}
+			float* out = fieldData + yy * static_cast<size_t>(width) * 3u;
+			for (int x = 0; x < width; ++x) {
+				const CellTap& col = cols[x];
+				const float* a = rowBuf.data() + static_cast<size_t>(col.lo) * 3u;
+				const float* b = rowBuf.data() + static_cast<size_t>(col.hi) * 3u;
+				for (int c = 0; c < 3; ++c) {
+					*out++ = (a[c] + (b[c] - a[c]) * col.t) * gain;
+				}
 			}
 		}
-	}
+	});
 }
 
 // ---- Tone map ----
@@ -311,17 +330,19 @@ void toneMap(const EnergyField& energy, const float* glow, float k, unsigned cha
 	const ToneLut& lut = toneLut();
 	const size_t pixels = static_cast<size_t>(energy.width()) * static_cast<size_t>(energy.height());
 	const float* e = energy.data();
-	for (size_t p = 0; p < pixels; ++p) {
-		for (size_t c = 0; c < 3u; ++c) {
-			float value = e[p * 3u + c];
-			if (glow) {
-				value += glow[p * 3u + c];
+	render_pool::parallelSpan(pixels, 32768u, [&](size_t begin, size_t end) {
+		for (size_t p = begin; p < end; ++p) {
+			for (size_t c = 0; c < 3u; ++c) {
+				float value = e[p * 3u + c];
+				if (glow) {
+					value += glow[p * 3u + c];
+				}
+				const float lit = lut.at(k * value);
+				rgba[p * 4u + c] = static_cast<unsigned char>(std::clamp(lit * 255.f + 0.5f, 0.f, 255.f));
 			}
-			const float lit = lut.at(k * value);
-			rgba[p * 4u + c] = static_cast<unsigned char>(std::clamp(lit * 255.f + 0.5f, 0.f, 255.f));
+			rgba[p * 4u + 3] = 255;
 		}
-		rgba[p * 4u + 3] = 255;
-	}
+	});
 }
 
 // The same curve into a float picture (0..255 units, alpha 255): no rounding, so a faint trail keeps its fraction of a level.
@@ -329,16 +350,18 @@ void toneMapF(const EnergyField& energy, const float* glow, float k, float* rgba
 	const ToneLut& lut = toneLut();
 	const size_t pixels = static_cast<size_t>(energy.width()) * static_cast<size_t>(energy.height());
 	const float* e = energy.data();
-	for (size_t p = 0; p < pixels; ++p) {
-		for (size_t c = 0; c < 3u; ++c) {
-			float value = e[p * 3u + c];
-			if (glow) {
-				value += glow[p * 3u + c];
+	render_pool::parallelSpan(pixels, 32768u, [&](size_t begin, size_t end) {
+		for (size_t p = begin; p < end; ++p) {
+			for (size_t c = 0; c < 3u; ++c) {
+				float value = e[p * 3u + c];
+				if (glow) {
+					value += glow[p * 3u + c];
+				}
+				rgba[p * 4u + c] = std::clamp(lut.at(k * value) * 255.f, 0.f, 255.f);
 			}
-			rgba[p * 4u + c] = std::clamp(lut.at(k * value) * 255.f, 0.f, 255.f);
+			rgba[p * 4u + 3] = 255.f;
 		}
-		rgba[p * 4u + 3] = 255.f;
-	}
+	});
 }
 
 // ---- CoilFilter ----

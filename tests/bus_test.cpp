@@ -13,6 +13,7 @@
 #include "scope_timebase.hpp"
 #include "signal_ring.hpp"
 #include "video_bus.hpp"
+#include "video_clock.hpp"
 #include "video_engine.hpp"
 #include "video_external_frame.hpp"
 #include "render_service.hpp"
@@ -2741,19 +2742,21 @@ void testDeflectionYokeLines() {
 	}
 }
 
-// The window the renderer reads is aligned to the field length S, so a signal keeps a fixed phase against
-// the picture from one field to the next when its frequency is rate / S, and creeps at any other.
+// The window the renderer reads is a field of the video clock (src/video_clock.hpp): its true, fractional length
+// in samples, starting on a multiple of that length. A signal keeps a fixed phase against the picture from one field
+// to the next when its frequency is a whole number times the field rate (59.94 Hz at 240 lines), and creeps at any other.
 void testDeflectionYokeFieldRate() {
 	std::printf("deflection yoke: the signal keeps its phase against the field\n");
 	const double pi = 3.14159265358979323846;
-	const int S = static_cast<int>(std::lround(kWobRate * crt::fieldSeconds(kWobLines)));
+	const vclock::Clock clock(kWobRate, kWobLines);
+	const double spf = clock.samplesPerField();
 	const double pitch = static_cast<double>(kWobH) / kWobLines;
-	const double samplesPerLine = static_cast<double>(S) / (kWobLines + crt::kBlankingLines);
+	const double samplesPerLine = clock.samplesPerLine();
 	const Frame line = makeLineSource(kWobW, kWobH, kWobW / 2);
 	DeflectionYokeParams p;
 	p.depth = 1.f;
 
-	const double hold = static_cast<double>(kWobRate) / S;
+	const double hold = clock.fieldRateHz();
 	const double cases[2] = {hold, 60.0};
 	for (int c = 0; c < 2; ++c) {
 		const double hz = cases[c];
@@ -2763,8 +2766,12 @@ void testDeflectionYokeFieldRate() {
 		auto gen = [&](int n, float* v) {
 			v[kDeflectionYokeDeflectX] = static_cast<float>(0.25 * std::sin(2.0 * pi * hz * n / kWobRate));
 		};
-		int pushed = 6 * S + 35;
-		pushScanRange(slot, 0, pushed, gen);
+		int pushed = 0;
+		auto pushTo = [&](int target) {
+			pushScanRange(slot, pushed, target - pushed, gen);
+			pushed = target;
+		};
+		pushTo(static_cast<int>(std::floor(6 * spf)) + 35);
 		double phases[5] = {};
 		double worstAmplitude = 0.0;
 		int smallestStep = 1 << 30;
@@ -2791,8 +2798,7 @@ void testDeflectionYokeFieldRate() {
 				largestStep = std::max(largestStep, maxDiff(previous, out));
 			}
 			previous = out;
-			pushScanRange(slot, pushed, S, gen);
-			pushed += S;
+			pushTo(static_cast<int>(std::floor((7 + field) * spf)) + 35);
 		}
 		double drift = 0.0;
 		for (int field = 1; field < 5; ++field) {
@@ -2800,13 +2806,13 @@ void testDeflectionYokeFieldRate() {
 			d -= std::round(d);
 			drift += d / 4.0;
 		}
-		double expected = hz * S / kWobRate;
+		double expected = hz * spf / kWobRate;
 		expected -= std::round(expected);
 		std::printf("  %.3f Hz: phase moves %.5f cycles per field (expected %.5f), amplitude off by %.2f px, change between fields %d..%d\n", hz, drift, expected, worstAmplitude, smallestStep, largestStep);
 		check(worstAmplitude < 4.0, "the fitted ripple has the amplitude that was put in");
 		check(std::fabs(drift - expected) < 0.0004, "the phase moves per field by frequency x S / rate, modulo one cycle");
 		if (c == 0) {
-			check(largestStep <= 2, "a signal at rate / S holds the picture still from field to field");
+			check(largestStep <= 2, "a signal at the field rate holds the picture still from field to field");
 		}
 		else {
 			check(smallestStep > 100, "a 60 Hz signal moves the picture a little each field");
@@ -2814,47 +2820,47 @@ void testDeflectionYokeFieldRate() {
 		signalRingRelease(slot);
 	}
 
-	// Samples pushed after the newest field boundary do not move the picture. It moves when S more samples
-	// have gone by since the boundary, and not before.
+	// Samples pushed after the newest complete field do not move the picture. It moves when the next field is
+	// complete: one field of the clock later, which is 800 or 801 samples at 48 kHz (800.8 on average).
 	{
 		const int slot = signalRingAllocate();
 		VideoGraphRenderer renderer;
 		auto gen = [&](int n, float* v) {
 			v[kDeflectionYokeDeflectX] = static_cast<float>(0.25 * std::sin(2.0 * pi * 60.0 * n / kWobRate));
 		};
-		const double period = crt::fieldSeconds(kWobLines);
-		auto windowData = [&]() {
+		auto windowField = [&]() {
 			SignalWindow w;
-			return signalRingReadFrame(slot, w, period) ? w.data : std::vector<float>();
+			return signalRingReadField(slot, w, kWobLines) ? w.field : static_cast<int64_t>(-1);
 		};
-		int pushed = 6 * S + 35;
+		int pushed = static_cast<int>(std::floor(6 * spf)) + 35;
 		pushScanRange(slot, 0, pushed, gen);
-		const std::vector<float> before = windowData();
-		std::vector<float> after;
+		const int64_t before = windowField();
+		int64_t after = before;
 		int crossing = -1;
-		for (int i = 1; i <= S + 5 && crossing < 0; ++i) {
+		for (int i = 1; i <= static_cast<int>(spf) + 5 && crossing < 0; ++i) {
 			pushScanRange(slot, pushed, 1, gen);
 			++pushed;
-			const std::vector<float> now = windowData();
-			if (now != before) {
+			after = windowField();
+			if (after != before) {
 				crossing = i;
-				after = now;
 			}
 		}
-		check(crossing > 0 && crossing <= S, "the field window moves within one field of new samples");
+		check(crossing > 0 && crossing <= 801 && after == before + 1, "the field window moves on by one field within a field of new samples");
 		const Frame a = renderWobble(renderer, line, slot, p);
 		pushScanRange(slot, pushed, 100, gen);
 		pushed += 100;
 		const Frame b = renderWobble(renderer, line, slot, p);
-		check(windowData() == after && a == b, "100 more samples do not move the picture");
-		pushScanRange(slot, pushed, S - 101, gen);
-		pushed += S - 101;
-		check(windowData() == after, "the window holds until S samples have passed the boundary");
-		pushScanRange(slot, pushed, 1, gen);
-		pushed += 1;
+		check(windowField() == after && a == b, "100 more samples do not move the picture");
+		int more = 0;
+		while (windowField() == after && more < 2000) {
+			pushScanRange(slot, pushed, 1, gen);
+			++pushed;
+			++more;
+		}
 		const Frame cFrame = renderWobble(renderer, line, slot, p);
-		check(windowData() != after && cFrame != a, "the S-th sample after the boundary moves the picture");
-		std::printf("  window crossed %d samples after the first read, held for %d more, moved on the S-th\n", crossing, S - 1);
+		check(windowField() == after + 1 && more + 100 >= 799 && more + 100 <= 802 && cFrame != a,
+			"the next field moves the picture, one field of samples later");
+		std::printf("  window crossed %d samples after the first read, then %d samples later (a field is %.3f)\n", crossing, more + 100, spf);
 		signalRingRelease(slot);
 	}
 }
@@ -8844,7 +8850,7 @@ void testBeamTrailsPinned() {
 		rig.nextTick();
 	}
 	rig.release();
-	static const uint64_t golden[3] = {5930133027663224981ull, 9186846114856468411ull, 9898023220337517764ull};
+	static const uint64_t golden[3] = {519885859275062686ull, 3971665349580754882ull, 13095106553041057985ull};
 	bool ok = got.size() == 3;
 	for (size_t i = 0; i < got.size(); ++i) {
 		if (std::getenv("VRU_PRINT_GOLDEN")) {
@@ -8924,7 +8930,7 @@ void testAlternatingRootsPinned() {
 	// and Scope Trace (bus 2) is reached from B only. A shared pass must advance each of these once per tick.
 	struct Case { const char* name; int a; int b; };
 	const Case cases[2] = {{"disjoint", 3, 2}, {"overlap", 3, 4}};
-	static const uint64_t golden[2][2][6] = {{{16467987211423747349ull, 10124434794780682920ull, 13662329181823115394ull, 1314343793154128939ull, 3693843981414716914ull, 14888959375497673740ull}, {16467987211423747349ull, 10124434794780682920ull, 13662329181823115394ull, 1314343793154128939ull, 3693843981414716914ull, 14888959375497673740ull}}, {{16467987211423747349ull, 16378486160927061331ull, 7817402214636050050ull, 10759769301473454181ull, 16648296588634103633ull, 12256587926714392161ull}, {16467987211423747349ull, 5930133027663224981ull, 13662329181823115394ull, 9186846114856468411ull, 3693843981414716914ull, 14959408401144526822ull}}};
+	static const uint64_t golden[2][2][6] = {{{12752667609284233109ull, 10124434794780682920ull, 15634228547426122483ull, 1314343793154128939ull, 3248743329874694707ull, 14888959375497673740ull}, {12752667609284233109ull, 10124434794780682920ull, 15634228547426122483ull, 1314343793154128939ull, 3248743329874694707ull, 14888959375497673740ull}}, {{12752667609284233109ull, 14093666132505096185ull, 18135236504889575278ull, 11149147786000799345ull, 11366573636467715803ull, 15734763747568721686ull}, {12752667609284233109ull, 519885859275062686ull, 15634228547426122483ull, 3971665349580754882ull, 3248743329874694707ull, 9658307974552796911ull}}};
 	bool allPinned = true;
 	for (int c = 0; c < 2; ++c) {
 		const std::vector<uint64_t> one = alternatingHashes(cases[c].a, cases[c].b, true);
@@ -9859,6 +9865,152 @@ void testThreadStartStop() {
 	videoBusClear(1);
 }
 
+// ---- Video Oscillator extras: Snow, V/OCT, sound outputs and the third oscillator ----
+
+void testOscSnow() {
+	std::printf("osc: snow\n");
+	VideoParams p;
+	p.pattern = static_cast<int>(VideoPattern::Snow);
+	p.feedback = 0.f;
+	p.snowTick = 41;
+	const Frame a = pairRender(kW, kH, p);
+	const Frame again = pairRender(kW, kH, p);
+	check(!a.empty() && a == again, "snow: the same tick draws the same picture");
+	VideoParams q = p;
+	q.snowTick = 42;
+	const Frame b = pairRender(kW, kH, q);
+	check(a != b, "snow: a different tick draws a different picture");
+	// Static: grey, with a wide spread of levels and a mean near the middle.
+	double sum = 0.0;
+	double sumSq = 0.0;
+	bool grey = true;
+	const size_t pixels = static_cast<size_t>(kW) * kH;
+	for (size_t i = 0; i < pixels; ++i) {
+		const double v = a[i * 4u] / 255.0;
+		sum += v;
+		sumSq += v * v;
+		grey = grey && a[i * 4u] == a[i * 4u + 1u] && a[i * 4u] == a[i * 4u + 2u];
+	}
+	const double mean = sum / pixels;
+	const double sd = std::sqrt(sumSq / pixels - mean * mean);
+	check(grey, "snow: every pixel is a grey");
+	check(std::abs(mean - 0.5) < 0.03 && sd > 0.25 && sd < 0.33, "snow: levels spread evenly over the whole range");
+	// Neighbouring pixels and the same pixel on the next tick are unrelated.
+	double cross = 0.0;
+	for (size_t i = 0; i + 1 < pixels; ++i) {
+		cross += (a[i * 4u] / 255.0 - mean) * (a[(i + 1) * 4u] / 255.0 - mean);
+	}
+	check(std::abs(cross / pixels / (sd * sd)) < 0.05, "snow: neighbouring pixels are not alike");
+	// Floats and bytes agree.
+	PreviewVideoEngine engine;
+	engine.render(kW, kH, p, true);
+	check(engine.outputIsFloat() && engine.outputF().size() == pixels * 4u, "snow: draws as floats too");
+	saveProof("osc_snow.png", {a, b});
+}
+
+void testOscThird() {
+	std::printf("osc: third oscillator\n");
+	// Plaid, so C has something to add to.
+	VideoParams base = pairBase();
+	base.mix = 1;
+	base.spread = 0.5f;
+	base.hue = 0.2f;
+	base.cyclesA = 8.f;
+	base.cyclesB = 6.f;
+	base.barsB = false;
+	const Frame plain = pairRender(kW, kH, base);
+
+	// At LEVEL 0, whatever C is set to, the picture is the same bytes (and the same through floats).
+	VideoParams off = base;
+	off.cyclesC = 37.f;
+	off.waveC = 1.f;
+	off.barsC = true;
+	off.lockC = 0.3f;
+	off.latchedC = 0.4;
+	off.levelC = 0.f;
+	check(pairRender(kW, kH, off) == plain, "C at level 0 leaves the picture byte for byte as A and B draw it");
+	PreviewVideoEngine f1;
+	PreviewVideoEngine f2;
+	f1.render(kW, kH, base, true);
+	f2.render(kW, kH, off, true);
+	check(f1.outputF() == f2.outputF(), "C at level 0 leaves the float picture alone too");
+
+	for (int mix = 0; mix < 4; ++mix) {
+		VideoParams a = base;
+		a.mix = mix;
+		VideoParams b = a;
+		b.levelC = 1.f;
+		b.cyclesC = 5.f;
+		b.barsC = true;
+		b.waveC = 0.f;
+		const Frame withoutC = pairRender(kW, kH, a);
+		const Frame withC = pairRender(kW, kH, b);
+		char what[96];
+		std::snprintf(what, sizeof(what), "C at full level changes the picture (mix %d)", mix);
+		check(withC != withoutC, what);
+		VideoParams half = b;
+		half.levelC = 0.5f;
+		const Frame mid = pairRender(kW, kH, half);
+		double dFull = 0.0;
+		double dHalf = 0.0;
+		for (size_t i = 0; i < withoutC.size(); ++i) {
+			dFull += std::abs(static_cast<int>(withC[i]) - static_cast<int>(withoutC[i]));
+			dHalf += std::abs(static_cast<int>(mid[i]) - static_cast<int>(withoutC[i]));
+		}
+		std::snprintf(what, sizeof(what), "half level changes it less than full level (mix %d)", mix);
+		check(dHalf > 0.0 && dHalf < dFull, what);
+	}
+
+	// A alone and C at full level: the picture crossfades to C, so it equals A alone with C's settings in A's place.
+	{
+		VideoParams only = pairBase();
+		only.mix = 0;
+		only.cyclesA = 8.f;
+		VideoParams swapped = only;
+		swapped.cyclesC = 5.f;
+		swapped.barsC = true;
+		swapped.lockC = 1.f;
+		swapped.waveC = only.shape;
+		swapped.levelC = 1.f;
+		VideoParams reference = only;
+		reference.cyclesA = 5.f;
+		reference.barsA = true;
+		const Frame got = pairRender(kW, kH, swapped);
+		const Frame want = pairRender(kW, kH, reference);
+		int worst = 0;
+		for (size_t i = 0; i < got.size(); ++i) worst = std::max(worst, std::abs(static_cast<int>(got[i]) - static_cast<int>(want[i])));
+		check(got.size() == want.size() && worst <= 1, "mix A with C at full level draws C as A would be drawn (to a byte)");
+	}
+
+	// Its pitch in the picture: C on BARS at 6 cycles gives 6 cycles across a line.
+	{
+		VideoParams p = pairBase();
+		p.mix = 0;
+		p.cyclesA = kPairMinCycles;
+		p.shape = 0.f;
+		p.cyclesC = 6.f;
+		p.barsC = true;
+		p.waveC = 0.f;
+		p.levelC = 1.f;
+		const Frame f = pairRender(kW, kH, p);
+		int peaks = 0;
+		for (int x = 1; x + 1 < kW; ++x) {
+			const float l = pairLevel(f, kW, x - 1, 10);
+			const float m = pairLevel(f, kW, x, 10);
+			const float r = pairLevel(f, kW, x + 1, 10);
+			if (m > l && m >= r && m > 0.9f) ++peaks;
+		}
+		check(peaks == 6, "C on BARS at 6 cycles draws six bars across a line");
+		saveProof("osc_third.png", {pairRender(kW, kH, base), pairRender(kW, kH, [&] { VideoParams q = base; q.levelC = 1.f; q.cyclesC = 5.f; q.barsC = true; q.waveC = 0.f; return q; }()), f});
+	}
+
+	// IN C pushes C's bars when scan inputs are on: C is a sine with a ring that is silent gives the unpushed picture.
+	VideoParams scanned = base;
+	scanned.levelC = 1.f;
+	scanned.cyclesC = 4.f;
+	check(pairRender(kW, kH, scanned) == pairRender(kW, kH, scanned), "C's picture is repeatable");
+}
+
 int main(int argc, char** argv) {
 	if (argc > 1) {
 		gProofDir = argv[1];
@@ -9971,6 +10123,8 @@ int main(int argc, char** argv) {
 	testPairHold();
 	testPairScanInputs();
 	testPairProofs();
+	testOscSnow();
+	testOscThird();
 	testSharedTapsUnchanged();
 	testSharedTapsRenderOnce();
 	testBeamTrailsPinned();

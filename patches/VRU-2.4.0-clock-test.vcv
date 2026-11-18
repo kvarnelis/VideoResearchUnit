@@ -1,0 +1,339 @@
+{
+  "version": "2.6.6",
+  "zoom": 1.0,
+  "gridOffset": [
+    0.0,
+    0.0
+  ],
+  "modules": [
+    {
+      "id": 1,
+      "plugin": "VideoResearchUnit",
+      "model": "ScanSync",
+      "version": "2.4.0",
+      "params": [
+        {
+          "id": 0,
+          "value": 240.0
+        }
+      ],
+      "pos": [
+        16,
+        0
+      ]
+    },
+    {
+      "id": 2,
+      "plugin": "VideoResearchUnit",
+      "model": "VideoOsc",
+      "version": "2.4.0",
+      "params": [
+        {
+          "id": 4,
+          "value": 5
+        }
+      ],
+      "pos": [
+        27,
+        0
+      ]
+    },
+    {
+      "id": 3,
+      "plugin": "VideoResearchUnit",
+      "model": "DeflectionYoke",
+      "version": "2.4.0",
+      "params": [
+        {
+          "id": 0,
+          "value": 0.5
+        },
+        {
+          "id": 1,
+          "value": 0.0
+        },
+        {
+          "id": 2,
+          "value": 1.0
+        },
+        {
+          "id": 14,
+          "value": 240.0
+        },
+        {
+          "id": 17,
+          "value": 0.0
+        }
+      ],
+      "pos": [
+        56,
+        0
+      ]
+    },
+    {
+      "id": 4,
+      "plugin": "VideoResearchUnit",
+      "model": "Display",
+      "version": "2.4.0",
+      "params": [],
+      "pos": [
+        76,
+        0
+      ]
+    },
+    {
+      "id": 5,
+      "plugin": "Fundamental",
+      "model": "LFO",
+      "version": "2.6.4",
+      "params": [
+        {
+          "id": 0,
+          "value": 1
+        },
+        {
+          "id": 2,
+          "value": 5.918863237274595
+        }
+      ],
+      "pos": [
+        16,
+        1
+      ]
+    },
+    {
+      "id": 6,
+      "plugin": "VideoResearchUnit",
+      "model": "VideoOsc",
+      "version": "2.4.0",
+      "params": [
+        {
+          "id": 4,
+          "value": 5
+        }
+      ],
+      "pos": [
+        27,
+        1
+      ]
+    },
+    {
+      "id": 7,
+      "plugin": "VideoResearchUnit",
+      "model": "DeflectionYoke",
+      "version": "2.4.0",
+      "params": [
+        {
+          "id": 0,
+          "value": 0.5
+        },
+        {
+          "id": 1,
+          "value": 0.0
+        },
+        {
+          "id": 2,
+          "value": 1.0
+        },
+        {
+          "id": 14,
+          "value": 240.0
+        },
+        {
+          "id": 17,
+          "value": 0.0
+        }
+      ],
+      "pos": [
+        56,
+        1
+      ]
+    },
+    {
+      "id": 8,
+      "plugin": "VideoResearchUnit",
+      "model": "Display",
+      "version": "2.4.0",
+      "params": [],
+      "pos": [
+        76,
+        1
+      ]
+    },
+    {
+      "id": 9,
+      "plugin": "Fundamental",
+      "model": "LFO",
+      "version": "2.6.4",
+      "params": [
+        {
+          "id": 0,
+          "value": 1
+        },
+        {
+          "id": 2,
+          "value": 5.918863237274595
+        }
+      ],
+      "pos": [
+        16,
+        2
+      ]
+    },
+    {
+      "id": 10,
+      "plugin": "VideoResearchUnit",
+      "model": "VideoOsc",
+      "version": "2.4.0",
+      "params": [
+        {
+          "id": 4,
+          "value": 5
+        }
+      ],
+      "pos": [
+        27,
+        2
+      ]
+    },
+    {
+      "id": 11,
+      "plugin": "VideoResearchUnit",
+      "model": "DeflectionYoke",
+      "version": "2.4.0",
+      "params": [
+        {
+          "id": 0,
+          "value": 0.5
+        },
+        {
+          "id": 1,
+          "value": 0.0
+        },
+        {
+          "id": 2,
+          "value": 1.0
+        },
+        {
+          "id": 14,
+          "value": 240.0
+        },
+        {
+          "id": 17,
+          "value": 0.0
+        }
+      ],
+      "pos": [
+        56,
+        2
+      ]
+    },
+    {
+      "id": 12,
+      "plugin": "VideoResearchUnit",
+      "model": "Display",
+      "version": "2.4.0",
+      "params": [],
+      "pos": [
+        76,
+        2
+      ]
+    },
+    {
+      "id": 13,
+      "plugin": "Core",
+      "model": "Notes",
+      "version": "2.6.6",
+      "params": [],
+      "pos": [
+        0,
+        0
+      ],
+      "data": {
+        "text": "Clock test: three rows, the same test picture and the same Deflection Yoke in each. Only what drives the Yoke's H coil input is different.\nA, top row. Scan Sync DOWN into the Yoke. Expect: the picture stands still, sheared the same way every picture.\nB, middle row. A free-running Fundamental LFO saw at 60.5 Hz into the same input. Expect: the picture rolls, because 60.5 Hz is not the picture rate (59.94 Hz).\nC, bottom row. The same LFO, but Scan Sync TOP goes into its RESET input, which restarts the saw at the top of every picture. Expect: the picture stands still.\nScan Sync LINES and the Yoke LINES are both 240.\nKnown: DOWN through the Yoke is unsteady in the top rows."
+      }
+    }
+  ],
+  "cables": [
+    {
+      "id": 1,
+      "outputModuleId": 2,
+      "outputId": 0,
+      "inputModuleId": 3,
+      "inputId": 0,
+      "color": "#8b4ade"
+    },
+    {
+      "id": 2,
+      "outputModuleId": 3,
+      "outputId": 0,
+      "inputModuleId": 4,
+      "inputId": 0,
+      "color": "#3695ef"
+    },
+    {
+      "id": 3,
+      "outputModuleId": 1,
+      "outputId": 1,
+      "inputModuleId": 3,
+      "inputId": 1,
+      "color": "#ffb437"
+    },
+    {
+      "id": 4,
+      "outputModuleId": 6,
+      "outputId": 0,
+      "inputModuleId": 7,
+      "inputId": 0,
+      "color": "#8b4ade"
+    },
+    {
+      "id": 5,
+      "outputModuleId": 7,
+      "outputId": 0,
+      "inputModuleId": 8,
+      "inputId": 0,
+      "color": "#3695ef"
+    },
+    {
+      "id": 6,
+      "outputModuleId": 5,
+      "outputId": 2,
+      "inputModuleId": 7,
+      "inputId": 1,
+      "color": "#ffb437"
+    },
+    {
+      "id": 7,
+      "outputModuleId": 10,
+      "outputId": 0,
+      "inputModuleId": 11,
+      "inputId": 0,
+      "color": "#8b4ade"
+    },
+    {
+      "id": 8,
+      "outputModuleId": 11,
+      "outputId": 0,
+      "inputModuleId": 12,
+      "inputId": 0,
+      "color": "#3695ef"
+    },
+    {
+      "id": 9,
+      "outputModuleId": 9,
+      "outputId": 2,
+      "inputModuleId": 11,
+      "inputId": 1,
+      "color": "#ffb437"
+    },
+    {
+      "id": 10,
+      "outputModuleId": 1,
+      "outputId": 0,
+      "inputModuleId": 9,
+      "inputId": 2,
+      "color": "#00b56e"
+    }
+  ]
+}

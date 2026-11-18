@@ -2,7 +2,7 @@
 
 ## Names
 
-The plugin is Video Research Unit (VRU), version 2.3.0, with 27 modules (VRU–01 to VRU–27). Version 2.3.0 adds these. Video Probe (VRU–26) turns a picture into CV, the first module to do that. The Scan Processor has a LIFT IN bus input. The Octoscillator has five presets. Frame Delay (VRU–27) holds a picture for a number of frames, and a picture can loop back through it. A picture that feeds several modules is drawn once per pass instead of once per module. Display, Syphon Out and Video Probe take their pictures from one shared render service, with two Display menu settings: "Keep video running when hidden" (on by default) and "Render video on its own thread" (off by default). Feedback has a "Fade trails fully to black" setting. The Display menu setting "Full precision between modules" (off by default) passes pictures between modules as floating point and rounds to 8 bits once, where a picture leaves the graph. Three modules take a picture as a modulation input: FM IN on the Video Oscillator, and MOD IN on Ramps, Keyer and Color Lab. The public bus API has version 2, with a float read, a tick, and the native size of a source. The offline tool vru-render-patch draws what a Display in a patch would show, without Rack. It was called RasterLab before
+The plugin is Video Research Unit (VRU), version 2.4.0, with 29 modules (VRU–01 to VRU–29). Version 2.4.0 adds Scan Sync (VRU–28), Raster (VRU–29), Video Probe's SCAN and the video clock. Version 2.3.0 added these. Video Probe (VRU–26) turns a picture into CV, the first module to do that. The Scan Processor has a LIFT IN bus input. The Octoscillator has five presets. Frame Delay (VRU–27) holds a picture for a number of frames, and a picture can loop back through it. A picture that feeds several modules is drawn once per pass instead of once per module. Display, Syphon Out and Video Probe take their pictures from one shared render service, with two Display menu settings: "Keep video running when hidden" (on by default) and "Render video on its own thread" (off by default). Feedback has a "Fade trails fully to black" setting. The Display menu setting "Full precision between modules" (off by default) passes pictures between modules as floating point and rounds to 8 bits once, where a picture leaves the graph. Three modules take a picture as a modulation input: FM IN on the Video Oscillator, and MOD IN on Ramps, Keyer and Color Lab. The public bus API has version 2, with a float read, a tick, and the native size of a source. The offline tool vru-render-patch draws what a Display in a patch would show, without Rack. It was called RasterLab before
 2.8.0. Every module has a catalogue number, VRU–01 to VRU–27, and Rack's module browser shows
 `VRU–01 Deflection Yoke`. The table is in `AGENTS.md`. The plugin slug is `VideoResearchUnit`. Version 2.1.0 renamed two module slugs, Wobbulator to DeflectionYoke and RuttEtra to ScanProcessor; `scripts/migrate-slug.py` migrates patches saved with 2.0.0.
 
@@ -780,12 +780,12 @@ drive it), `VideoMixerParams` in `src/video_engine.hpp`, and `renderVideoMixerNo
   tuning by eye in Rack.
 - Scan-time inputs. The Video Oscillator owns a signal ring (`signalRingAllocate()` in the constructor) and
   pushes one sample per audio sample (`VideoOscSignalChannel` in `video_engine.hpp`): channel 0 IN A (volts
-  / 5), 1 IN B (volts / 5), 2 the BEND CV in cycles (0.4 per volt), 3 spare, always 0. `process()` does no
+  / 5), 1 IN B (volts / 5), 2 the BEND CV in cycles (0.4 per volt), 3 IN C (volts / 5; it was a spare that was always 0, so an old patch still reads 0 there). `process()` does no
   allocation and takes no lock. IN A and IN B move A's or B's phase by their value in cycles of that
   oscillator (5 V is one cycle); the BEND CV is added to the BEND knob. The renderer reads the field-length
   window with `signalRingReadFrame(slot, window, crt::fieldSeconds(240))` and takes each pixel's value at
   its scan time `(line + u) / line rate`. Only when IN A, IN B or BEND CV has a cable does the module set
-  `scanInputs`; otherwise the ring is never read and the picture is bit for bit what it was. The LOCK CVs
+  `scanInputs` (IN C counts too); otherwise the ring is never read and the picture is bit for bit what it was. The LOCK CVs
   are read once a frame with the other controls. The BEND knob is published alone; the CV no longer rides in
   `bend`.
 - `PairClock` (no Rack dependency) is advanced once per audio sample in `process()` in every pattern,
@@ -798,6 +798,43 @@ drive it), `VideoMixerParams` in `src/video_engine.hpp`, and `renderVideoMixerNo
 - Parameters and inputs were added at the end of the lists (inputs LOCK A CV, LOCK B CV, IN A, IN B, then FM IN
   and the FM AMT parameter), so older patches load unchanged. FM IN is described in "Picture as modulation". Patterns 0 to 5
   render the same pixels as before. Tests: `testPair*` in `tests/bus_test.cpp`.
+
+#### 2.4.0 additions to the Video Oscillator
+
+All appended at the end of each list, so every saved patch loads unchanged. Params 18 to 22 are FREQ C, WAVE C,
+RANGE C, LOCK C, LEVEL C (defaults 3, 0, 0, 1 and 0). Inputs 11 to 16 are V/OCT A, V/OCT B, FREQ C CV, LOCK C CV, IN C and
+V/OCT C. Outputs 1 to 3 are SOUND A, SOUND B and SOUND C. The panel went from 20 to 29 HP (147.32 mm). The layout is data
+in `src/video_osc_layout.hpp`, which `VideoOscWidget` expands and `scripts/check-video-osc-panel.py` reads: that script
+measures every control at its true footprint (black knob 9.6 mm, small knob 7.68, jack 8.03, switch 4.74 x 6.99, output plate
+11.8 high) and every label and switch word in Nunito Bold, fails when two boxes come within 0.5 mm or one leaves the panel,
+and draws `docs/video-osc-panel-layout.png`. Left block: oscillator rows A, B, C at y = 72, 90, 108, each FREQ at x = 19, WAVE
+33.5, RANGE switch 46 (BARS above and ROWS below the lever, so they never reach LOCK), LOCK 59; the column names are written
+once, over row A; then BEND and MIX (row A), FB and AMT (row B) and LEVEL (row C) at x = 73.5 and 87. Right block, top to bottom: a table of input jacks in columns A, B, C (x = 117.5, 128.5, 139.5) and rows FREQ, V/OCT, LOCK, IN, named once at the left; under a rule, the other inputs (WAVE A, FB, HUE, BEND, FM IN); and at the bottom, y = 118.5, one block of dark-plate outputs: BUS, then SOUND A, B, C under their columns, with the FRAME light above BUS.
+
+- Snow is PATTERN 7 (`VideoPattern::Snow`). `renderSnow()` gives each pixel a grey from an integer hash of its x, y and
+  `VideoParams::snowTick`, which is `PairClock::fieldCount`, the number of field boundaries the scan clock has crossed
+  (59.94 a second of audio time). The same tick always draws the same picture, at any size, on any machine. FB mixes the
+  last picture in. SAT, BRI and CON apply as always.
+- V/OCT adds its volts to the exponent in `pairCycles()` (`0.5 x 2^(knob + 0.4 per volt + volts)`), clamped as before, and
+  multiplies the Oscillator pattern's frequency by `2^volts`. It is read only when a cable is in the jack; unpatched, the sum
+  is exactly the old one. The FREQ CV keeps its own 0.4 octave a volt.
+- Oscillator C draws in `renderPair()` only when `levelC` is above 0, and then its line starts, push (IN C, ring channel 3)
+  and wave are computed like B's. `level += levelC x (joined - level)`, where `joined` is C for MIX A, `(2 x level + C) / 3`
+  for A + B (a mean of three), `level - C / 2` for A - B and `level x C` for A x B, clamped to 0..1. C's hue is
+  `2 x SPREAD x levelC x C / (A + B + C)` round the wheel. With `levelC` 0 none of this runs and the picture, bytes or floats,
+  is unchanged. `PairClock` keeps `phaseC` and `latchedC` the way it keeps A and B.
+- Sound (`src/video_osc_audio.hpp`, no Rack types). `process()` takes each oscillator's free-running scan-clock phase, which
+  already advances at the oscillator's own frequency (cycles per line x 15 734.26 lines a second; cycles per line is the cycle
+  count on BARS and the count / 262.5 on ROWS), and writes `pairWaveValue()` of it at the audio sample, as -5 V to +5 V.
+  The wave's two possible jumps, at the end of the cycle and at the middle where a ramp has steepened into a square, are
+  found once per WAVE setting and corrected with a two-sample polynomial step (polyBLEP), so a square at 7 kHz has about 19 dB
+  less alias than the plain wave. Kinks (the triangle's corners) are not corrected. Only connected outputs are computed;
+  nothing allocates or locks. Above Nyquist the rule is silence, not folding: the level is 1 while the phase step per sample
+  is under 0.4 of a cycle, falls by a smoothstep to 0 at 0.5, and is 0 beyond, so the pitch heard is always the pitch drawn.
+  On BARS only cycles up to about 1.5 are audible at 48 kHz (a quarter cycle is 3.9 kHz); on ROWS 0.25 cycles is 15 Hz and
+  400 is above 24 kHz. LOCK, BEND, IN A/B/C and FM IN do not touch the sound.
+- Tests: `testOscSnow`, `testOscThird` in `tests/bus_test.cpp`; `tests/video_osc_module_test.cpp` runs the real module
+  (`make test`) and counts zero crossings of the sound outputs, V/OCT doubling and silence above Nyquist.
 
 ### Shapes
 
@@ -1259,7 +1296,7 @@ A module publishes a node that carries its parameters, and the renderer does the
 - Line rate is fixed at `crt::kLineRateHz` = 15,734.264 Hz.
 - A field is the visible lines (LINES) plus `crt::kBlankingLines` = 22.5 lines of vertical blanking
   (flyback). The beam is off during the flyback. With 240 lines a field is 262.5 lines, which is
-  59.94 Hz. Other counts follow the line rate: 120 lines gives 118.3 Hz, and 600 lines gives 25.3 Hz.
+  59.94 Hz. Other counts follow the line rate: 120 lines gives 110.4 Hz, and 600 lines gives 25.3 Hz.
   The field rate follows LINES. The line rate does not change.
 - Timing does not depend on the render height. Scanline k starts at `(k + x / W) * line time`
   within the field, for source column x. The signal ring is read one field long, so its window
@@ -1325,6 +1362,9 @@ the ring at each pixel's scan time.
     counting, and `signalRingClear()` only moves the ring's origin). So a signal whose
     rate is a whole multiple of 1 / period keeps the same phase against the picture from
     field to field, and any other rate creeps through the picture at its beat.
+  - `signalRingReadField(slot, out, lines)`: the newest complete field of the video clock (see "Video
+    clock" below), at a fractional start. The Deflection Yoke and the Scan Processor use it; they push
+    with `signalRingPushAt()`, which stamps each sample with Rack's frame number.
   - `signalRingReadLatest()` and `signalRingReadSeconds()`: the newest N samples
     or seconds, for traces.
 - Overrun check: a reader returns false if the writer wrapped onto its window
@@ -1332,14 +1372,209 @@ the ring at each pixel's scan time.
 - Values come back by linear interpolation (`SignalWindow::valueAtScanTime`,
   `sampleAt`). `valueAtScanTime` maps time by the window's own period.
 
+### Video clock
+
+Code: `src/video_clock.hpp` (header only, namespace `vclock`), `SignalRing::pushAt` and `SignalRing::readField` in
+`src/signal_ring.{hpp,cpp}`, `src/scan_sync_math.hpp` and `src/ScanSync.cpp`. Tests: `tests/video_clock_test.cpp` and
+`tests/scan_sync_module_test.cpp`, both in `make test`; `make tsan` runs the ring part under ThreadSanitizer.
+
+What it owns. One place that says where an audio sample is in video time. Video time is a pure function of three
+numbers: Rack's frame counter (`ProcessArgs::frame`, samples since the engine's first sample, the same number in every
+module), the sample rate and the line count. `vclock::Clock` is a small value type built from the last two. It has no
+state that anything writes, so the audio thread (no lock, no allocation) and the render side read it the same way and
+cannot disagree. There is no global instance to race on.
+
+The mapping.
+
+- A field is `lines + 22.5` lines (262.5 at the default 240) at a line rate of exactly 15 750 000 / 1001 Hz, so the
+  default field rate is exactly 60 000 / 1001 Hz = 59.94006 Hz. `crt::kLineRateHz` (15 734.264) is 0.11 parts per
+  million lower; the Video Oscillator still uses it, the Yoke and the Scan Processor use the clock's value.
+- A field is a fractional number of samples: 800.8 at 48 kHz (the old window was rounded to 801), 735.735 at 44.1 kHz,
+  1601.6 at 96 kHz. It is never rounded.
+- Field `n` starts at frame `n x samplesPerField()`, a fractional frame; frame 0 is the top of field 0. Nothing moves
+  that origin, so every module that asks about a frame gets the same answer.
+- `fromFrame(frame)` gives a `VideoTime`: the field number, the line (0 at the top; the visible lines come first, then
+  the 22.5 flyback lines), the phase along the line and the phase down the field. `toFrame` goes back. A frame within
+  1e-7 sample of a field or line start counts as on it, so frame 4004 at 48 kHz is the top of field 5 whatever the
+  rounding. The round trip is exact to better than 1e-6 sample over an hour at 44.1, 48 and 96 kHz (the test measures
+  2e-13).
+
+How the scan modules use it. The Deflection Yoke and the Scan Processor call `signalRingPushAt(slot, samples, args.frame)`
+once per sample, and the renderer calls `signalRingReadField(slot, window, lines)`. The window is the newest field whose
+last sample, and two samples of interpolation margin, have been written: `floor(spf) + 3` samples that start at the whole
+sample before the field's top, with `startFraction` saying how far into that sample the top is. A pixel's scan time `t`
+(seconds from the top, `(line + u) x line time`) reads the ring at `startFraction + t x sampleRate`, by linear
+interpolation. So a line is its true 3.05 samples long at 48 kHz, a field its true 800.8, and a tone keeps its pitch
+against the lines. A ring that is fed a frame number that does not follow the last one (a bypassed module, a new engine)
+starts afresh and hides what came before, as `signalRingClear()` does. A ring fed by plain `signalRingPush()` counts its
+own samples as frames, so the test rigs that write rings by hand see field `n` start at `n x spf` counted from their first
+sample.
+
+The field rule (what the render service and the clock agree on). A picture belongs to the field whose window it drew:
+field `n` covers audio frames `n x spf` to `(n + 1) x spf`, its top left corner is frame `n x spf`, and line `k` at
+column position `u` is at frame `n x spf + (k + u) x samplesPerLine`. The renderer chooses `n` from the ring's contents
+when it draws (the newest complete field), not from the render tick, so it does not matter whether a Display draws at 60
+or 120 Hz, in thread mode or not, or what the public API asks for: all of them get the same picture for the same ring
+contents. Scan Sync's TOP pulse goes high on the first whole frame at or after `n x spf`, so it marks the top of field
+`n`'s picture to within one sample (a third of a line at 48 kHz); `SignalWindow::field` and `startFraction` carry the
+exact position. `testFieldAgreement` checks this at 44.1, 48 and 96 kHz and for a ring that began part way through a
+field. A signal that TOP resets therefore starts at the top of a picture, give or take one sample. A signal that DOWN
+drives is exact at the sample rate, because DOWN is computed from the same frame number the ring is stamped with.
+
+What a locked tone does. A tone at a whole multiple `N` of the field rate has the same phase at the top of every field,
+so it draws the same rows every time. The tests render 610 fields at 44.1, 48 and 96 kHz for N = 1 and 6, in the Yoke
+and in the Scan Processor, and the rows move by less than 0.06 px (the picture is 192 px wide and the swing 48 px). The
+control, a 60.000 Hz tone, moves them by 96 px. Through Scan Sync, the real module driving the real Yoke, the rows
+move by 0.001 px between field 60 and field 660 (a free-running 60 Hz saw: 67 px). The same 180 Hz tone draws the same
+picture at the three sample rates to 0.015 px (Yoke) and 0.06 px (Scan Processor). A 1 kHz tone, which is not a multiple
+of the field rate, agrees to 0.25 px, the linear interpolation error at 44.1 kHz.
+
+What still depends on the sample rate. The tone is sampled: a high tone has few samples per cycle and linear
+interpolation shortens it (the 1 kHz case above, and the line-rate scallops in "Deflection Yoke"). A line is about three
+samples, so line-rate detail stays coarse. The Yoke's own oscillators run in Hz. A fresh module's home rate is the field rate, 59.94006 Hz, so its coil holds still; a patch saved with the old 60 Hz value keeps it and creeps once in about 17 s (lock it with Scan Sync or FINE). A window is at most 16 381 samples, so 600 lines at 192 kHz (7 600) fits, and a Scan
+Processor at 2048 lines does not fit at 192 kHz (25 000). The Video Oscillator's IN A, IN B, IN C and BEND read the same field
+(`signalRingReadField`), and its field latch and Snow tick come from the clock (`PairClock::advanceAt`); its SOUND outputs
+free-run. Scope Trace reads the newest samples and has
+no field.
+
+RESET. Scan Sync has no reset input. The renderer draws the newest complete field whenever it is asked, and a reset
+would move the origin of every later field: a picture that straddled it would have no field to draw, and a reader on
+another thread could see the old origin for one picture and the new one for the next. A history of origins could be
+kept, but it would turn the field into a per-reader value. The module is stateless instead, and any Rack module that
+needs to start with a picture can be reset by TOP.
+
+Public API. `include/vru_bus.h` is unchanged. A clock query could be appended to the v2 table, but it would need the
+sample rate and line count from the caller, which the table has no way to carry; left as follow-up.
+
+### Raster rule (Video Probe SCAN, Raster VRU–29)
+
+Code: `src/raster_scan.hpp` (header only, namespace `raster_scan`: the rule and Raster's painter), `video_probe::sampleScan`
+in `src/video_probe_math.hpp`, `src/Raster.cpp`, and the `Raster` node in `src/video_graph_renderer.cpp`. Tests:
+`tests/raster_scan_test.cpp` (`make test`; `make tsan` runs its thread part).
+
+What this is. The pair from `vru-handoff.md`: "Frame -> Signal Sampler" and "Signal -> Rasterizer". The sampler already existed
+as Video Probe (a read point per audio sample at X and Y, bilinear or box-averaged). What it lacked was a read point that
+follows the video clock when X and Y are open, which is what a raster is, so it was extended, not rebuilt: SCAN (param 7,
+switch, default 0) and LINES (param 8, 16 to 600, default 240). Raster (VRU–29) is the other half, built new. Scope Trace
+draws X, Y and Z as a glowing, fading beam on its own phosphor; Raster is the plain placement of samples as a flat picture
+and does not duplicate it.
+
+The sampling rule, the same for both. Audio frame `f` (Rack's frame counter) is, by the video clock, at line `L` and a fraction
+`u` of the way along it (`vclock::Clock::fromFrame`). The sample stands for a cell: the row band of line `L` (rows
+`L x H / lines` to `(L + 1) x H / lines`) and, across the line, from `u - du / 2` to `u + du / 2` where `du` is one sample as a
+fraction of a line. The first sample of a line reaches back to 0 and the last on to 1, so the cells of a line tile it exactly,
+with no gap and no overlap (`raster_scan::cellAt`; the neighbours are looked up with `fromFrame` of the frame before and the
+frame after, so a field or line boundary is whatever the clock says). In the flyback (the last 22.5 lines of a field) there is
+no cell. Video Probe's SCAN outputs the summed-area-table average of the 320 x 240 picture over the cell, per channel, in
+double precision, so LUMA, R, G and B are the exact box average (with the SIZE patch only ever widening the cell); in the
+flyback it reads black. SCAN works per axis: with the X jack uncabled, X is the cell across the line; with Y uncabled, Y is the
+row band; a cabled axis is the knob plus jack read point as before. SCAN off calls the old `process()` path unchanged (the test
+compares the two bit for bit).
+
+Raster paints the cell with the sample (HOLD) or joins sample centres with straight segments (JOIN). A pixel belongs to the
+cell that holds its centre; the cell edge between two samples is computed once (`edge[k]`) and used for both neighbours, so
+there are no gaps. Rows use the same rule at the line edges. Samples from a different field than the one being drawn (the
+margin the ring window carries) are skipped.
+
+How the audio side talks to the render side, with no allocation and no lock in `process()`. Raster pushes `[R, G, B, 0]` (volts /
+10, so 10 V is 1) with `signalRingPushAt(slot, v, args.frame)`, the Deflection Yoke's call, and publishes a `RasterParams`
+(slot, LINES, X and Y cabled flags, FILL) to its bus every 64 samples and when it changes. The renderer
+(`VideoBusNodeType::Raster`) calls `signalRingReadField(slot, window, lines)` for the newest complete field and
+`raster_scan::render` fills the bus picture; a failed read (no field yet, or overrun) keeps the last good picture. Video Probe
+takes its picture to the audio thread the way it always did: the widget fills a `Frame` and the lock-free `TripleBuffer` hands
+it over. With X or Y cabled, the ring carries `[x, y, grey, 0]` (the grey is the Rec. 709 mix of R, G and B, `0.2126 R + 0.7152 G
++ 0.0722 B`, the Keyer's weights; the ring has four channels, so a placed picture is grey); an axis without a cable still follows
+the raster. Placed samples are 2 x 2 pixel dots at 320 x 240 (a 160th of the width) or lines between them, later over earlier,
+no glow.
+
+Resolution, honestly, and SLOW. The line rate is fixed at 15 750 000 / 1001 Hz, a line is 63.55 us, so at SLOW x1 a line has
+`sampleRate / 15734.27` samples (2.80 at 44.1 kHz, 3.05 at 48 kHz, 6.10 at 96 kHz, 12.2 at 192 kHz) whatever LINES is, and a
+picture is about that many columns wide. LINES sets how many lines a picture has, so a picture has `(LINES + 22.5) x samples per
+line` samples (800.8 at 240 lines at 48 kHz, 434 at 120, 252 at 60). A full 240-line picture therefore gets about 3 samples a line.
+These modules are for low line counts, for audio and for processing a picture's signal through other modules; they are not a
+full-resolution path. The picture Video Probe reads is 320 x 240, refreshed with Rack's UI, one picture late, so only a still
+picture round-trips exactly; at x1 Raster draws the newest finished field, about a field behind the sound.
+
+Slow scan. Video Probe (SLOW param 9), Raster (SLOW param 2) and Scan Sync (SLOW param 1) each have a snapped SLOW knob, step 0
+to 7 meaning K = 1, 2, 4 ... 128 (`vclock::slowFromStep`), default 0, which is the old clock exactly. The rule is one pure
+function in `src/video_clock.hpp`: `vclock::Clock(rate, lines, K)` has a line K times as long and a field (a picture) K ordinary
+fields long, so picture `n` starts at frame `n x K x samplesPerField()`, that is at ordinary field `n x K` of the plain clock,
+and every module with the same LINES and K agrees where it is. Nothing else in the maths changes: `cellAt`, Scan Sync's outputs
+and the Probe's cell all take the clock. At 48 kHz:
+
+| SLOW | samples a line at 48 kHz | columns across the picture | time for one picture at 240 lines | pictures a second |
+| --- | --- | --- | --- | --- |
+| x1 | 3.05 | about 3 | 0.017 s | 59.9 |
+| x2 | 6.1 | about 6 | 0.033 s | 30 |
+| x4 | 12.2 | about 12 | 0.067 s | 15 |
+| x8 | 24.4 | about 24 | 0.13 s | 7.5 |
+| x16 | 48.8 | about 49 | 0.27 s | 3.7 |
+| x32 | 97.6 | about 98 | 0.53 s | 1.9 |
+| x64 | 195 | about 195 | 1.07 s | 0.94 |
+| x128 | 390 | 320 (the picture Probe reads is 320 wide) | 2.1 s | 0.47 |
+
+Samples a line scale with the sample rate (2.80 x K at 44.1 kHz, 6.10 x K at 96 kHz). A picture takes K x (LINES + 22.5)
+lines of time, 22.5 of them the flyback, so fewer lines come round faster (120 lines at x1 is about 110 pictures a second,
+434 samples a picture). Sharper means slower: every doubling of the columns doubles the time a picture takes.
+
+Raster with K above 1 builds the picture over K fields and does not need a whole picture in the 32768-sample ring (x64 at 48 kHz
+is 51 200 samples). The renderer keeps a held picture per bus (`raster_scan::Held`) and, on every pass, takes the samples stamped
+after the last one it painted (`SignalRing::readSince`, up to 8192, so a pass that skips a field or two loses nothing) and
+paints their cells into it (`raster_scan::paintSince`); the rest of the picture keeps the previous pass, so the screen shows a
+steady picture refreshed from the top down. With both X and Y placed the held picture is cleared when a new slow picture starts,
+since a placed sample can land anywhere. Scan Sync at K above 1: TOP once per slow picture (K fields apart, tested to one
+sample), DOWN over the whole slow picture, LINE and ACROSS on the slow line. Beyond 320 columns (x128 at 48 kHz, x64 at 96 kHz)
+a cell is narrower than a pixel of the picture Probe reads, so the extra samples add nothing: the tests stop short of that.
+
+Tests (x1 and slow). Fixed X and Y return the known pixel's R, G and B (0.03 V). 2 bars a line at 48 kHz and 6 bars a line at 192 kHz give 1
+and 3 rising edges a line over 196 lines (to within 2). The round trip (test picture, Video Probe SCAN, Raster at the same LINES)
+is compared with the picture averaged over each sample's cell, worked out from the 8-bit picture, in fields 1, 2, 3, 7, 30, 100,
+300 and 600 at 44.1, 48 and 96 kHz and 240, 120 and 60 lines: no value is more than 2 levels off (the 8-bit picture and 0 to 10
+V float are the only errors). A row's green value is the same in field 2 and field 600, so nothing drifts. Inverting the signal
+(10 V minus it) between them gives 255 minus the reference. Placed dots, JOIN against HOLD, and X placed with Y on the raster are
+checked. Slow: the slow clock is K fields and K lines long; TOP's period is K fields at x1, x4 and x32; the round trip at SLOW x16 and x64 (x32 at 96 kHz, since x64 there is finer than Probe's picture) at 44.1, 48 and 96 kHz, Raster asked for a picture after every field as the screen does, is within 2 levels of the cell averages in pictures 1 to 9, steady from picture to picture, and also at 120 lines and with an inverted signal; at x32 a row has about 98 distinct columns. The thread test (x1 and x4) has an audio thread writing the ring and reading the Probe's hand-off, a widget thread publishing
+pictures and a render thread drawing, under ThreadSanitizer.
+
+What the handoff's signal domain still lacks. Built now: the sampler (Video Probe, per axis, with or without the clock), the
+rasterizer (Raster), a single video clock (Scan Sync, "Video clock") and the picture <-> signal loop through ordinary Rack
+modules. Not built: a blanking signal (the flyback is implicit and carries no picture, with no BLANK jack on either module),
+colour in placed mode (the ring has four channels), a signal-domain line delay, horizontal detail finer than a sample (the
+line rate is fixed; there is no way to slow it), a sampler that reads the picture at the moment rather than one picture late,
+and any of the 5 to 100 MHz style resolution the handoff warns against.
+
+Panels. Raster is 10 HP and Video Probe's table is 20 HP; both are layout tables (`src/raster_layout.hpp`,
+`src/video_probe_layout.hpp`) placed by `src/panel_items.hpp` and checked by `scripts/check-panel.py`, which fails on any
+overlap or box outside the panel and draws `docs/raster-panel-layout.png` and `docs/video-probe-panel-layout.png` to scale.
+Raster: LINES and FILL at the top, inputs BRIGHT, X, Y over R, G, B, and BUS on a dark plate alone at the bottom. Param ids:
+LINES 0, FILL 1; inputs BRIGHT 0, X 1, Y 2, R 3, G 4, B 5; output BUS 0. Append-only.
+
+### Scan Sync (VRU–28)
+
+`src/ScanSync.cpp` (module and panel) and `src/scan_sync_math.hpp` (the outputs as a function of a `vclock::Clock` and a
+frame, no Rack types). No video bus. `process()` rebuilds the clock when the sample rate or LINES changes (a few doubles,
+no allocation) and sets four voltages from `args.frame`. The panel is 10 HP (50.8 mm): the standard header, one snap knob
+LINES (120 to 600, default 240) at x 25.4, y 42, and four plated outputs at y 118, 11 mm apart, labelled TOP, DOWN, LINE
+and ACROSS. Param 0 is LINES and outputs 0 to 3 are TOP, DOWN, LINE, ACROSS; ids are append-only.
+
+- TOP is 10 V while `frame - n x spf < min(1 ms, half a field)`. DOWN is `10 V x min(1, fieldPhase / (lines / (lines +
+  22.5)))`, so it reaches 10 V at the bottom of the last visible line and holds through the flyback. LINE is 10 V while
+  the time since the line start is under `min(1 ms, half a line)`. ACROSS is `10 V x linePhase`. LINE and ACROSS count all
+  `lines + 22.5` lines, flyback lines included. The last line of a field is half a line (1.5 samples), so its pulse runs straight into the first line's
+  pulse of the next field and the two read as one on a rising-edge counter (15 705 edges a second at 48 kHz, not 15 734).
+  Left as it is: a narrower half-line pulse could miss every sample. A full line holds at least three samples, so it
+  always has its own pulse.
+- `scan_sync_module_test` runs the module into the Deflection Yoke's H coil input and compares pictures out to field
+  660. The top 40 rows are left out of the comparison: the coil filter (3 kHz, about five lines) smooths the ramp's restart by
+  an amount that depends on where the restart falls between two samples.
+
 ### Latency: from a sample to the screen
 
 How long after a sample is produced on the audio thread does it show on a Display? The figures count from the sample
 being pushed into the ring by `process()` and do not include Rack's audio output buffer. They are derived from the code, not
 measured on a screen. Times are for the defaults: 240 lines, 48 kHz, one Display drawn on the UI thread at 60 Hz.
 
-Deflection Yoke, Scan Processor and the Video Oscillator's IN A, IN B and BEND read a field window with
-`signalRingReadFrame()`. Three terms add up.
+Deflection Yoke, Scan Processor and the Video Oscillator's IN A, IN B, IN C and BEND read a field of the video clock with
+`signalRingReadField()` (see "Video clock"). Three terms add up.
 
 1. The field window. The window is the field that ends on the newest field boundary, so a sample cannot appear until
    the boundary after it has been written. A field is (lines + 22.5) / 15734.264 s (`crt::fieldSeconds`,
@@ -1526,11 +1761,13 @@ amount past that is where the fold-over starts.
 
 Timing notes.
 
-- The field is 262.5 lines (59.94 Hz) at 240 lines, but the ring window holds a whole number of samples (801
-  at 48 kHz, so windows come at 59.93 Hz). A 60 Hz coil is therefore not locked to the picture: it creeps
-  through it, one roll in about 13 s at 48 kHz. A coil at a whole multiple of the window rate holds still (a
-  window starts on a multiple of its length on the ring's sample count; see "Signal ring"), and FINE can trim
-  a drifting coil until it does.
+- The field is 262.5 lines (59.94006 Hz, exactly 60000/1001) at 240 lines, and since the video clock (see "Video
+  clock") the window is that field at its true fractional length (800.8 samples at 48 kHz), not a whole number
+  of samples. A 60 Hz coil (the default before the clock) is not locked to the picture: it runs 0.06 Hz fast and creeps through it, one roll in
+  about 17 s at any sample rate (it was one in about 13 s at 48 kHz, and different at 44.1 and 96 kHz, before
+  the clock). A coil at a whole multiple of the field rate holds still at 44.1, 48 and 96 kHz alike, an external
+  tone from Scan Sync or an oscillator tuned to 59.94006 Hz times N does it exactly, and FINE can trim an
+  internal coil.
 - 30 Hz is one cycle in two fields, so alternate fields are displaced in opposite directions. With
   persistence both stay visible: two images half a cycle apart (preset 08). How they look depends on the
   PERSIST setting and the frame cadence of the Display.

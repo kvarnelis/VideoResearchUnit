@@ -1,12 +1,34 @@
 # Video Research Unit
 
-Video Research Unit (VRU) is a video synthesizer you patch in VCV Rack 2. It is one plugin with 27
-modules, numbered VRU–01 to VRU–27. Rack's module browser lists them under the brand
+Video Research Unit (VRU) is a video synthesizer you patch in VCV Rack 2. It is one plugin with 29
+modules, numbered VRU–01 to VRU–29. Rack's module browser lists them under the brand
 "Video Research Unit". Sources make a picture. Processors bend, color and mix it. Display or Syphon
-Out shows it. CV from any Rack module can drive the CV inputs, and one module, Video Probe, turns a
-picture back into CV.
+Out shows it. CV from any Rack module can drive the CV inputs, and two modules turn pictures into CV
+and back: Video Probe and Raster.
 
-This is version 2.3.0. It has been tested only on Apple silicon Macs.
+This is version 2.4.0. It has been tested only on Apple silicon Macs.
+
+## New in 2.4.0
+
+- The [Video Oscillator](#vru05-video-oscillator) has a third oscillator, C, with its own FREQ, WAVE, RANGE,
+  LOCK and LEVEL.
+- Every oscillator has a V/OCT input and a sound output, so the picture and the tone come from the same
+  oscillator.
+- A new SNOW position on PATTERN draws television static.
+- A picture can become a signal and a signal can become a picture, on the video clock. [Video Probe](#vru26-video-probe)
+  has a new SCAN switch and LINES knob: with SCAN on and nothing in X and Y it reads the picture as a raster, one
+  sample at a time, left to right and top to bottom. A new module, [Raster](#vru29-raster) (VRU–29), paints
+  signals back into a picture the same way. These are for low line counts, for audio, and for processing a
+  picture's signal through other modules: at SLOW x1 a line has only about 3 samples at 48 kHz, so the picture is 3
+  columns wide; a SLOW knob on Video Probe, Raster and Scan Sync makes it sharper by making it slower (x32 is about 98
+  columns and one picture every half second). They are not a full-resolution path. Demo patch 9 shows Video Probe into Raster.
+- A new module, [Scan Sync](#vru28-scan-sync) (VRU–28), gives pulses and ramps that follow the picture.
+  Behind it is a video clock: the Deflection Yoke, the Scan Processor and the Video Oscillator's scan-time inputs
+  now share one exact 59.94 Hz field, not a whole number of samples, so a tone at a whole multiple of the field rate
+  stands still at 44.1, 48 and 96 kHz alike.
+- The Video Oscillator panel is 29 HP wide, up from 20 HP. Oscillators A, B and C are three identical rows;
+  the jacks are a table with columns A, B, C. Patches saved with the old panel load unchanged, and Rack
+  moves the modules beside it along the row.
 
 ## New in 2.3.0
 
@@ -32,7 +54,7 @@ You need a `.vcvplugin` file. Building from source makes one, as described in
 2. Copy `VideoResearchUnit-<version>-mac-arm64.vcvplugin` into `plugins-mac-arm64` in Rack's user folder.
    On a Mac that is `~/Library/Application Support/Rack2`. Help > Open user folder opens it.
 3. Start Rack. It unpacks the file. The modules appear in the module browser under
-   "Video Research Unit", named VRU–01 to VRU–27.
+   "Video Research Unit", named VRU–01 to VRU–29.
 
 The plugin's id is `VideoResearchUnit`. It is in the package file name and the plugin folder.
 
@@ -178,20 +200,22 @@ video bus.
 
 | Group | Modules |
 | --- | --- |
-| [Sources](#sources) | VRU–05 Video Oscillator, VRU–06 Ramps, VRU–21 Shapes, VRU–03 Scope Trace, VRU–07 Video Player |
+| [Sources](#sources) | VRU–05 Video Oscillator, VRU–06 Ramps, VRU–21 Shapes, VRU–03 Scope Trace, VRU–07 Video Player, VRU–29 Raster |
 | [Processors](#processors) | VRU–01 Deflection Yoke, VRU–02 Scan Processor, VRU–04 Line Field, VRU–20 Rotator, VRU–24 Focus, VRU–09 Color Lab, VRU–10 Colorizer, VRU–11 Wave Shaper |
 | [Mixers and keys](#mixers-and-keys) | VRU–12 Keyer, VRU–13 Bus Mixer, VRU–22 Video Mixer |
 | [Time and memory](#time-and-memory) | VRU–14 Feedback, VRU–15 Freeze Frame, VRU–27 Frame Delay |
 | [Outputs and bridges](#outputs-and-bridges) | VRU–16 Display, VRU–08 Syphon In, VRU–17 Syphon Out, VRU–26 Video Probe, VRU–19 1V CV Out |
-| [Modulation](#modulation) | VRU–18 Dual LFO Chaos, VRU–23 Octoscillator, VRU–25 Vector Osc |
+| [Modulation](#modulation) | VRU–18 Dual LFO Chaos, VRU–23 Octoscillator, VRU–25 Vector Osc, VRU–28 Scan Sync |
 
 ### Sources
 
 #### VRU–05 Video Oscillator
 
 A video oscillator and test-pattern generator. The PATTERN knob picks oscillator, SMPTE-style 75%
-bars, EBU-style 75% bars, EBU-style 100% bars, grayscale ramp, grid or Bars and Rows. Each pattern has a
-factory preset in the right-click Preset menu.
+bars, EBU-style 75% bars, EBU-style 100% bars, grayscale ramp, grid, Bars and Rows or Snow. Each pattern has a
+factory preset in the right-click Preset menu. The panel is 29 HP. The left block has three oscillator
+rows A, B and C, each with FREQ, WAVE, RANGE and LOCK in the same columns, then BEND and MIX (row A), FB and AMT
+(row B) and LEVEL (row C). The right block is a table of input jacks, columns A, B and C, rows FREQ, V/OCT, LOCK and IN; under it the other inputs (WAVE A, FB, HUE, BEND, FM IN); and at the bottom the outputs together: BUS, with the FRAME light above it, and SOUND A, B and C.
 
 - Bars and Rows runs two oscillators, A and B, against the television scan. Each can draw bars across
   the picture or rows down it, locked to the scan or free running, with WAVE, BEND (B bends A), MIX and
@@ -201,6 +225,21 @@ factory preset in the right-click Preset menu.
 - IN A and IN B push the bars of each oscillator sideways, and the BEND CV does the same to the bend,
   all read at each point of the scan, so an audio signal draws its waveform down the bars.
 - FREQ A, WAVE A, FREQ B, BEND, HUE, FB and both LOCKs take CV.
+- Oscillator C is a third oscillator with FREQ C, WAVE C, RANGE C, LOCK C and IN C, and CV jacks for
+  FREQ C and LOCK C. LEVEL C says how much of it joins the picture, and it is 0 on a new module, so a
+  patch looks the same until you turn it up. C joins the way B joins A: with MIX on A it fades from A to
+  C, on A + B it averages all three, on A - B it takes C away as well, on A x B it multiplies C in.
+  SPREAD sets C's colour two steps round the wheel from A's. C only draws in Bars and Rows.
+- V/OCT A, V/OCT B and V/OCT C take one volt per octave: +1 V doubles an oscillator's cycles. They add to
+  the knob and the FREQ CV, and do nothing when unpatched.
+- SOUND A, SOUND B and SOUND C play each oscillator as audio at its own frequency, 10 V peak to peak,
+  with the edges of a square or ramp band-limited. On ROWS the pitch is the number of cycles times
+  59.94 Hz (100 cycles is about 6 kHz). On BARS it is the number of cycles times the line rate,
+  15 734 Hz, so only the lowest settings are heard: a quarter cycle is 3.9 kHz. Above half the sample
+  rate the output is silent, not folded down to another note; it fades out from 0.4 to 0.5 of the rate.
+  The sound is the free-running wave. LOCK, BEND, the IN jacks and FM IN change the picture only.
+- Snow, on PATTERN, is television static: a new grey for every pixel at every field. FB turns it into
+  drifting flecks.
 - FM IN takes a second picture that bends oscillator A. In Bars and Rows this is true frequency
   modulation: bright parts of that picture speed A up and dark parts slow it down, so A's bars bunch
   together where the picture is bright and spread apart where it is dark. FM AMT sets how far (zero is
@@ -264,6 +303,85 @@ Press OPEN FILE, or right-click the module, to choose an mp4, m4v or mov file.
   can open the folder.
 - Install yt-dlp yourself, for example with `brew install yt-dlp`. YouTube often offers a single-file
   mp4 only up to 360p, so expect low resolution. That is untested on a real video.
+
+#### VRU–29 Raster
+
+Turns ordinary Rack signals into a picture. It is the way back from Video Probe: where Video Probe reads a
+picture one sample at a time, Raster paints one sample at a time. It is 10 HP wide, with LINES, FILL, six
+inputs (BRIGHT, X, Y, R, G, B) and one video bus output, BUS.
+
+- Every audio sample is one place in the picture, taken from the video clock (see Scan Sync). With nothing in
+  X and Y, the signal is painted along each line, left to right, top to bottom, one picture per field. Each
+  sample covers the stretch of line from halfway back to the previous sample to halfway on to the next, so a
+  line is solid, with no dots.
+- BRIGHT is brightness: 0 V is black, 10 V is white, and anything outside clips. R, G and B are red, green and
+  blue; any of them with no cable takes BRIGHT, so BRIGHT alone makes a grey picture.
+- LINES is the same as on Scan Sync and Video Probe, 16 to 600, and has to match the module that made the
+  signal. Video Probe with SCAN on and the same LINES, into Raster, gives the picture back.
+- FILL: HOLD paints each sample as a flat block. JOIN runs a straight join from each sample to the next, which
+  is smoother when a line has only a few samples.
+- X and Y place samples by position instead of by the clock: -5 V to +5 V spans the picture, and +5 V on Y is
+  the top. A jack with a cable takes its axis from the signal; an axis with no cable still follows the clock.
+  So Y alone on the clock with X patched draws each line with its horizontal position from the signal, and X
+  and Y both patched plot points (HOLD) or draw a line from point to point (JOIN). In this mode the picture is
+  grey: R, G and B are mixed into one brightness with the Keyer's Rec. 709 weights, because the module keeps
+  four channels of signal. Later samples paint over earlier ones, and the picture is flat: no glow or trail.
+  (Scope Trace draws a glowing, fading beam from X and Y; Raster does not.)
+- BUS is one picture per field of the video clock, taken from the newest complete field of the signal. Nothing
+  is drawn until a field of signal has arrived.
+
+How much picture there is, and SLOW. At SLOW x1 a line lasts 63.55 us at any LINES setting, so a line has only about 3
+samples at 48 kHz and the picture is about 3 columns wide. SLOW (x1 to x128, on Video Probe, Raster and Scan Sync) makes
+a picture take K fields of the video clock instead of one: with the same LINES every line lasts K times longer and has
+K times the samples. The picture is built over K fields, each field painting its slice into the picture on screen, so you
+see a steady picture being refreshed from the top down. Set SLOW and LINES the same on every module that scans or paints
+the same picture.
+
+| SLOW | samples a line at 48 kHz | columns across the picture | time for one picture at 240 lines | pictures a second |
+| --- | --- | --- | --- | --- |
+| x1 | 3.05 | about 3 | 0.017 s | 59.9 |
+| x2 | 6.1 | about 6 | 0.033 s | 30 |
+| x4 | 12.2 | about 12 | 0.067 s | 15 |
+| x8 | 24.4 | about 24 | 0.13 s | 7.5 |
+| x16 | 48.8 | about 49 | 0.27 s | 3.7 |
+| x32 | 97.6 | about 98 | 0.53 s | 1.9 |
+| x64 | 195 | about 195 | 1.07 s | 0.94 |
+| x128 | 390 | 320 (the picture Video Probe reads is 320 wide) | 2.1 s | 0.47 |
+
+Samples a line scale with the sample rate (2.80 x K at 44.1 kHz, 6.10 x K at 96 kHz). A picture takes K x (LINES + 22.5)
+lines of time, 22.5 of them the flyback, so fewer lines come round faster (120 lines at x1 is about 110 pictures a second,
+434 samples a picture). Sharper means slower: every doubling of the columns doubles the time a picture takes.
+
+Raster and Video Probe's SCAN are for low line counts, for audio, and for processing a picture's signal through other
+modules. They are not a full-resolution path: even at x32 a picture is about 98 columns wide and comes round every half second.
+A higher sample rate gives more columns.
+
+The rule, for both modules. Sample number `f` (Rack's frame counter) is at line `L` and a fraction `u` of the way across
+it, from the video clock. It stands for the cell of row band `L` and, across the line, from the midpoint with the sample
+before to the midpoint with the sample after (the first sample of a line reaches back to the left edge, the last on to
+the right edge). Video Probe with SCAN outputs the average of the picture over that cell. Raster paints that cell with the
+sample. The flyback lines have no cell: Video Probe reads black there and Raster paints nothing. Inverting the signal
+between them gives the inverted picture, and the picture is the same field after field.
+
+Two ways to start.
+
+- Hear and process a picture: Shapes or a Video Player into Video Probe BUS IN, SCAN on, LINES 120. LUMA is the
+  scanned picture as a signal, 434 samples a picture at 48 kHz and about 110 pictures a second, so it has a pitch. Put
+  it through a filter, a wavefolder or an inverting attenuator, then into Raster BRIGHT with LINES 120, and Display
+  shows the processed picture. Demo patch 9 does the first half.
+- Draw a picture from a sound: an oscillator or audio into Raster BRIGHT, LINES 60, Display on BUS. The
+  signal's waveform is painted along the lines; an oscillator locked to a whole multiple of the picture rate draws
+  steady bars.
+
+Limits.
+
+- Video Probe's picture is read at 320 x 240, refreshes with Rack's screen and is one picture late. A moving
+  picture is therefore sampled from a picture that changes between lines. A still picture is exact.
+- The signal for each picture is the signal from the field just finished, so the picture is about one field (17
+  ms at 240 lines) behind the sound.
+- Anything between 0 V and 10 V is a brightness. A bipolar audio signal needs an offset to be seen
+  below its zero line.
+- Video Probe's outputs stay 0 V in `vru-render-patch`, so Raster is black there. It runs in Rack.
 
 ### Processors
 
@@ -496,6 +614,15 @@ The outputs.
 The panel shows the picture with the read point and patch drawn on it. SIG is lit while pictures
 arrive.
 
+SCAN and LINES. With the SCAN switch on, an axis with no cable in its jack follows the video clock instead of its
+knob. With nothing in X or Y, the whole picture is read as a raster: left to right and top to bottom, once per
+picture, at LINES lines (16 to 600; 240 is 59.94 pictures a second). Each audio sample is the average of the picture over
+the cell that sample stands for (see Raster for the rule), so SIZE only ever widens that cell. At SLOW x1 a line is only
+about 3 samples at 48 kHz, so the scanned picture comes out as about 3 columns by LINES rows; SLOW (x1 to x128) makes a
+picture K fields long so each line has K times the samples (see the table under Raster). Sharper means slower. The flyback between pictures reads black. Set LINES to match the Raster you are feeding, or the
+scan module you are driving. With SCAN off, the read point is X and Y as before, and SCAN is off in every saved patch
+and every new module.
+
 The rule from picture to sound: the output is the picture's brightness along the path that X and Y
 trace, and the picture underneath refreshes about 60 times a second, one picture late. Sweeping X at a
 frequency f across a picture of N vertical bars gives a tone at N times f.
@@ -572,6 +699,33 @@ moves by itself. It is 12 HP wide.
 - The outputs are X and Y (±5 V) and Z (0 to 10 V brightness: bright where the trace moves slowly, dim
   where it moves fast; patch it to Scope Trace's Z CV jack).
 
+#### VRU–28 Scan Sync
+
+Pulses and ramps that follow the picture, so ordinary Rack signals can stand still on a scan module.
+It has no video bus. It is 10 HP wide, with a LINES knob and four outputs.
+
+- TOP is a 10 V, 1 ms pulse at the top of every picture. DOWN is a ramp from 0 V at the top of the
+  picture to 10 V at the bottom of the last visible line, once per picture; it stays at 10 V while the
+  beam is off between pictures.
+- LINE is a 10 V pulse at the start of every line (1 ms, or half a line if that is shorter). ACROSS is
+  a ramp from 0 V at the left of a line to 10 V at its right. At Rack's sample rate a line is only
+  about three samples long (3.05 at 48 kHz), so at SLOW x1 these two are coarse: LINE is a pulse about every third
+  sample and ACROSS is a ramp of three steps. SLOW (x1 to x128) slows the picture: a picture takes K fields and a line K
+  times as long, TOP pulses once per slow picture, DOWN ramps over the whole of it, and LINE and ACROSS follow the slow
+  line (x32 is about 98 samples a line). Set SLOW and LINES the same as the Video Probe or Raster you are driving. They are
+  also useful as audio.
+- LINES sets how many visible lines a picture has, 120 to 600 (240 by default, which is 59.94 pictures a
+  second). Set it to the same number as the scan module you are driving.
+- Patch DOWN into a Deflection Yoke coil input or a Scan Processor's deflection input and you get a
+  slanted line that does not move. Patch TOP into a ramp or envelope generator's reset and its ramp starts
+  at the top of each picture, to within one sample (a third of a line). A free-running oscillator cannot
+  do this: a 60 Hz one runs a little faster than the 59.94 Hz picture, so its pattern rolls.
+- The top lines of a picture driven by DOWN show where the ramp restarts: the Yoke's coil filter smooths
+  the jump over about five lines.
+- There is no reset input. The scan modules draw the field that has just finished, whenever Rack asks for
+  a picture, and the pulse has to name the same field. A reset would move the fields, and a picture
+  that straddled it would have no field to draw. See `docs/architecture.md`, "Video clock".
+
 ## Patching ideas
 
 - **A loop.** Put a Frame Delay in a loop with a Video Mixer and a Rotator, as in demo patch 7. Each
@@ -583,6 +737,9 @@ moves by itself. It is 12 HP wide.
 - **Picture to sound, and back.** Video Probe turns any picture into voltages. Use LUMA to drive a filter
   or a pitch, or sweep X at audio rate to hear the picture. Send the same voltages back into a
   Video Oscillator's FREQ or into a Deflection Yoke, and the sound bends the picture that made it.
+- **A picture through a signal.** Video Probe with SCAN on reads a picture as a stream of samples, any Rack
+  module can process that stream, and Raster paints it back as a picture, as in demo patch 9. It is coarse (about three
+  samples a line) and meant for low line counts.
 - **Sound to picture.** Audio into Scope Trace's X IN and Y IN draws it. Audio into a Deflection Yoke
   coil, a Scan Processor or the Video Oscillator's IN A and IN B bends a picture at audio rate. See
   [Latency](#latency-sound-bending-a-picture).
@@ -593,8 +750,8 @@ moves by itself. It is 12 HP wide.
 
 ### Latency: sound bending a picture
 
-Sound that bends a picture is not instant. Deflection Yoke, Scan Processor and the Video Oscillator's IN
-A, IN B and BEND read the sound over a window one field long (16.7 ms at the default 240 lines), so a
+Sound that bends a picture is not instant. Deflection Yoke and Scan Processor (on the video clock, see
+Scan Sync) and the Video Oscillator's IN A, IN B and BEND read the sound over a window one field long (16.7 ms at the default 240 lines), so a
 sample shows up on a Display between 0.04 ms and about 33 ms after it was made (about 17 ms typically),
 before the monitor's own delay. With "Render video on its own thread" on, add one more tick: about 50 ms
 worst and 25 ms typical before the screen. Scope Trace draws the newest samples and is a frame behind
@@ -658,7 +815,7 @@ https://commons.wikimedia.org/wiki/File:Muybridge_race_horse_animated.gif
 
 ## Old patches
 
-Patches saved by earlier versions load in version 2.3.0. The new inputs and options are added so that
+Patches saved by earlier versions load in version 2.4.0. The new inputs and options are added so that
 an old patch makes the same picture as before: Feedback's "Fade trails fully to black" loads off, and
 FM IN, MOD IN, LIFT IN and the settings that default to off change nothing until you use them.
 

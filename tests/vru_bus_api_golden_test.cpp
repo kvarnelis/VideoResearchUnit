@@ -177,10 +177,10 @@ static const Scenario kScenarios[] = {generator, chain, beams, feedback, twoSize
 static const std::vector<std::vector<uint64_t>> kGolden = {
 	{0x7991904239ca3064ull, 0x7991904239ca3064ull, 0x7991904239ca3064ull, 0x7991904239ca3064ull, },  // generator
 	{0x45ba9372ef347897ull, 0x45ba9372ef347897ull, 0x45ba9372ef347897ull, },  // chain
-	{0x977b95062cfc9518ull, 0x0fded2221533d929ull, 0x8be46becb6897040ull, 0xad8435e74e1d0a84ull, 0x9bd2cf81764961faull, 0x1cae3f06aff05f08ull, 0x5abf83d9f8594cd7ull, 0x94e94345345dfd82ull, },  // beams
+	{0xb553cd31447b4258ull, 0x5b429a78266ad901ull, 0xd064ff9621f0e011ull, 0x279bc66a09208093ull, 0x29b8a4906d39329full, 0x46b67a9c96c62903ull, 0x5abf83d9f8594cd7ull, 0xbbeefd23469aefe7ull, },  // beams (the Yoke frames changed with the video clock; the Scope Trace frame, 7th of 8, did not)
 	{0x6cfc2cb8d05229c6ull, 0xfacf25bc9dc6c86bull, 0xfacf25bc9dc6c86bull, 0xaba2ea4fa022b711ull, 0x170e088b11b4129full, 0x007b0c649821028aull, },  // feedback
 	{0x7991904239ca3064ull, 0xfc962eb139fed25cull, 0x7991904239ca3064ull, 0xfc962eb139fed25cull, 0x7991904239ca3064ull, 0xfc962eb139fed25cull, 0x7991904239ca3064ull, 0xfc962eb139fed25cull, },  // two sizes
-	{0x977b95062cfc9518ull, 0x977b95062cfc9518ull, 0x42a1a35182801785ull, 0x42a1a35182801785ull, 0x8ceb49a5c853bb67ull, 0x8ceb49a5c853bb67ull, 0x6fa6b805d9eb740bull, 0x6fa6b805d9eb740bull, },  // alongside display (changed in stage 2: the API shares the Display's picture for the tick, so the pair is equal)
+	{0xb553cd31447b4258ull, 0xb553cd31447b4258ull, 0x417fa2ac63a7f6f8ull, 0x417fa2ac63a7f6f8ull, 0x0b4d8ff825dea768ull, 0x0b4d8ff825dea768ull, 0x0de4bc950ac8963cull, 0x0de4bc950ac8963cull, },  // alongside display (changed in stage 2: the API shares the Display's picture for the tick, so the pair is equal; the Yoke frames changed again when the scan modules moved onto the video clock, and the Scope Trace frame did not)
 };
 // GOLDEN-END
 

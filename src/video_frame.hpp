@@ -4,8 +4,11 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <utility>
 #include <vector>
+
+#include "render_pool.hpp"
 
 // The picture type the video graph hands from node to node (see docs/architecture.md, "Precision").
 //
@@ -124,12 +127,24 @@ public:
 		format = other.format;
 		if (other.isFloat()) {
 			Bytes::clear();
-			f.assign(other.f.begin(), other.f.end());
+			if (f.size() == other.f.size() && f.size() >= kParallelCopyFloats) {
+				// A frame being refilled at its size: the pages are already mapped, so the copy is memory bandwidth and
+				// the helpers share it. The bytes written are the same.
+				float* dst = f.data();
+				const float* src = other.f.data();
+				render_pool::parallelSpan(f.size(), kParallelCopyFloats / 4, [dst, src](size_t begin, size_t end) {
+					std::memcpy(dst + begin, src + begin, (end - begin) * sizeof(float));
+				});
+			}
+			else {
+				f.assign(other.f.begin(), other.f.end());
+			}
 		}
 		else {
 			Bytes::assign(other.begin(), other.end());
 		}
 	}
+	static constexpr size_t kParallelCopyFloats = 1u << 20;
 
 	// To a byte frame, in place, round half up. A byte frame is left alone.
 	void ensureU8() {

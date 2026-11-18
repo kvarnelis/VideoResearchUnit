@@ -3,6 +3,10 @@
 #include "video_bus.hpp"
 #include "render_service.hpp"
 #include "video_probe_math.hpp"
+#include "video_probe_layout.hpp"
+#include "panel_items.hpp"
+#include "video_clock.hpp"
+#include "slow_param.hpp"
 
 #include <atomic>
 #include <memory>
@@ -24,7 +28,7 @@
 //     hidden" is off; then the widget takes the picture in draw() as before, and process() holds the last values
 //     whenever the widget is not drawn.
 struct VideoProbe : Module {
-	enum ParamId { X_PARAM, Y_PARAM, SIZE_PARAM, SMOOTH_PARAM, LEVEL_PARAM, X_AMT_PARAM, Y_AMT_PARAM, PARAMS_LEN };
+	enum ParamId { X_PARAM, Y_PARAM, SIZE_PARAM, SMOOTH_PARAM, LEVEL_PARAM, X_AMT_PARAM, Y_AMT_PARAM, SCAN_PARAM, LINES_PARAM, SLOW_PARAM, PARAMS_LEN };
 	enum InputId { VIDEO_BUS_INPUT, X_INPUT, Y_INPUT, INPUTS_LEN };
 	enum OutputId { LUMA_OUTPUT, R_OUTPUT, G_OUTPUT, B_OUTPUT, AVG_OUTPUT, MOTION_OUTPUT, GATE_OUTPUT, FRAME_OUTPUT, OUTPUTS_LEN };
 	enum LightId { SIGNAL_LIGHT, LIGHTS_LEN };
@@ -40,6 +44,7 @@ struct VideoProbe : Module {
 
 	// process() state.
 	video_probe::Reader reader;
+	vclock::Clock scanClock;   // SCAN: the video clock for the current LINES and sample rate
 	float liveTimer = 0.f;
 	uint32_t lastFrameCount = 0;
 	bool live = false;
@@ -56,6 +61,12 @@ struct VideoProbe : Module {
 		configParam(LEVEL_PARAM, 0.f, 1.f, .5f, "Gate level", "%", 0.f, 100.f);
 		configParam(X_AMT_PARAM, -1.f, 1.f, 1.f, "X jack amount", "%", 0.f, 100.f);
 		configParam(Y_AMT_PARAM, -1.f, 1.f, 1.f, "Y jack amount", "%", 0.f, 100.f);
+		configSwitch(SCAN_PARAM, 0.f, 1.f, 0.f, "Scan the picture as a raster", {"Off: read point from X and Y", "On: axes with no cable follow the video clock"});
+		auto* lines = configParam(LINES_PARAM, static_cast<float>(raster_scan::kMinLines), static_cast<float>(raster_scan::kMaxLines), static_cast<float>(raster_scan::kDefaultLines), "Scan lines");
+		lines->snapEnabled = true;
+		configSlow(this, SLOW_PARAM);
+		describe(SCAN_PARAM, "On: an axis with no cable in its jack follows the video clock instead of the knob, so with neither X nor Y patched the whole picture is read as a raster, left to right and top to bottom, once per picture (see LINES). Each sample is the average of the cell of picture it stands for. At SLOW x1 a line lasts 63.55 us, only about 3 samples at 48 kHz, so the picture reaches the outputs as about 3 columns; SLOW makes lines K times longer for K times the columns (sharper means slower). Between pictures the flyback reads black. Off: the read point is X and Y, as always.");
+		describe(LINES_PARAM, "How many lines a scanned picture has, the same meaning as Scan Sync's LINES and Raster's. A picture takes (LINES + 22.5) lines of time (times SLOW). Only used when SCAN is on; match it to the module you are patching to.");
 		describe(X_PARAM, "Where the read point sits across the picture. -5 V is the left edge, +5 V the right edge. The X jack is added to this.");
 		describe(Y_PARAM, "Where the read point sits up the picture. -5 V is the bottom edge, +5 V the top edge. The Y jack is added to this.");
 		describe(SIZE_PARAM, "How big a patch of the picture is read. All the way down reads one point. Turned up, LUMA, R, G and B (and the gate) are the average of a square patch around the point, up to the picture's full height.");
@@ -86,15 +97,35 @@ struct VideoProbe : Module {
 		const int busId = inputs[VIDEO_BUS_INPUT].isConnected() ? videoBusIdFromVoltage(inputs[VIDEO_BUS_INPUT].getVoltage()) : 1;
 		selectedBus.store(busId, std::memory_order_relaxed);
 
+		const bool scan = params[SCAN_PARAM].getValue() > .5f;
+		const bool scanX = scan && !inputs[X_INPUT].isConnected();
+		const bool scanY = scan && !inputs[Y_INPUT].isConnected();
+		if (scan) {
+			const int lines = raster_scan::clampLines(params[LINES_PARAM].getValue());
+			const int slow = vclock::slowFromStep(params[SLOW_PARAM].getValue());
+			if (scanClock.visibleLines() != lines || scanClock.slow() != slow || scanClock.sampleRate() != static_cast<double>(args.sampleRate)) {
+				scanClock = vclock::Clock(static_cast<double>(args.sampleRate), lines, slow);
+			}
+		}
 		const float xv = position(params[X_PARAM].getValue(), params[X_AMT_PARAM].getValue(), inputs[X_INPUT].getVoltage());
 		const float yv = position(params[Y_PARAM].getValue(), params[Y_AMT_PARAM].getValue(), inputs[Y_INPUT].getVoltage());
 		const float size = sane(params[SIZE_PARAM].getValue(), 0.f, 1.f);
-		shownX.store(xv, std::memory_order_relaxed);
-		shownY.store(yv, std::memory_order_relaxed);
+		float markX = xv, markY = yv;
+		if (scanX || scanY) {
+			// The marker shows where this sample sits on the picture (as volts), so it sweeps while scanning.
+			const raster_scan::Cell c = raster_scan::cellAt(scanClock, args.frame);
+			if (scanX) markX = static_cast<float>(c.u * 10.0 - 5.0);
+			if (scanY) markY = static_cast<float>(5.0 - (c.line + .5) * 10.0 / scanClock.visibleLines());
+		}
+		shownX.store(markX, std::memory_order_relaxed);
+		shownY.store(markY, std::memory_order_relaxed);
 		shownSize.store(size, std::memory_order_relaxed);
 
-		const Reader::Out o = reader.process(handOff, frames.get(), xv, yv, size, params[SMOOTH_PARAM].getValue(),
-			params[LEVEL_PARAM].getValue(), args.sampleTime);
+		const Reader::Out o = scan
+			? reader.processScan(handOff, frames.get(), scanClock, args.frame, scanX, scanY, xv, yv, size, params[SMOOTH_PARAM].getValue(),
+				params[LEVEL_PARAM].getValue(), args.sampleTime)
+			: reader.process(handOff, frames.get(), xv, yv, size, params[SMOOTH_PARAM].getValue(),
+				params[LEVEL_PARAM].getValue(), args.sampleTime);
 		if (o.valid) {
 			outputs[AVG_OUTPUT].setVoltage(o.avg);
 			outputs[MOTION_OUTPUT].setVoltage(o.motion);
@@ -246,57 +277,18 @@ struct VideoProbeFrameWidget : TransparentWidget {
 struct VideoProbeWidget : ModuleWidget {
 	VideoProbeWidget(VideoProbe* module) {
 		using namespace rasterlab_panel;
-		constexpr float W = 101.6f;   // 20 HP
-		constexpr float P = 18.f;     // column pitch of the knob rows
+		constexpr float W = kVideoProbePanelWidth;   // 20 HP
 		setModule(module);
 		setPanel(createPanel(asset::plugin(pluginInstance, "res/VideoProbe.svg")));
 		addPanelHeader(this, W, "26", "VIDEO PROBE");
 
 		auto* screen = new VideoProbeFrameWidget();
 		screen->module = module;
-		screen->box.size = mm2px(Vec(58.7f, 44.f));   // 4:3 like the 320 x 240 picture
-		screen->box.pos = mm2px(Vec((W - 58.7f) * 0.5f, 19.f));
+		screen->box.size = mm2px(Vec(kVideoProbePreview[2], kVideoProbePreview[3]));   // 4:3 like the 320 x 240 picture
+		screen->box.pos = mm2px(Vec(kVideoProbePreview[0], kVideoProbePreview[1]));
 		addChild(screen);
 
-		auto knob = [&](int col, float y, const char* label, int id) {
-			const Vec p(rowX(W, 5, col, P), y);
-			addKnobLabel(this, p, label);
-			addParam(createParamCentered<RoundBlackKnob>(mm2px(p), module, id));
-		};
-		knob(0, 76.f, "X", VideoProbe::X_PARAM);
-		knob(1, 76.f, "Y", VideoProbe::Y_PARAM);
-		knob(2, 76.f, "SIZE", VideoProbe::SIZE_PARAM);
-		knob(3, 76.f, "SMOOTH", VideoProbe::SMOOTH_PARAM);
-		knob(4, 76.f, "LEVEL", VideoProbe::LEVEL_PARAM);
-
-		auto trim = [&](int col, float y, int id) {
-			const Vec p(rowX(W, 5, col, P), y);
-			addKnobLabel(this, p, "AMT", R_TRIM);
-			addParam(createParamCentered<Trimpot>(mm2px(p), module, id));
-		};
-		trim(0, 90.f, VideoProbe::X_AMT_PARAM);
-		trim(1, 90.f, VideoProbe::Y_AMT_PARAM);
-		const Vec sig(rowX(W, 5, 4, P), 90.f);
-		addJackLabel(this, sig, "SIG");
-		addChild(createLightCentered<MediumLight<GreenLight>>(mm2px(sig), module, VideoProbe::SIGNAL_LIGHT));
-
-		auto jack = [&](int col, float y, const char* label, int id) {
-			const Vec p(rowX(W, 5, col, P), y);
-			addJackLabel(this, p, label);
-			addInput(createInputCentered<PJ301MPort>(mm2px(p), module, id));
-		};
-		jack(0, 103.f, "X", VideoProbe::X_INPUT);
-		jack(1, 103.f, "Y", VideoProbe::Y_INPUT);
-		jack(2, 103.f, "BUS IN", VideoProbe::VIDEO_BUS_INPUT);
-
-		// Eight outputs on plates, 11.8 mm apart. MOTION is the longest word, so its plate text is a little smaller.
-		const char* names[] = {"LUMA", "R", "G", "B", "AVG", "MOTION", "GATE", "FRAME"};
-		constexpr float PITCH = 11.8f, PLATE = 11.2f;
-		for (int i = 0; i < 8; ++i) {
-			const Vec p(rowX(W, 8, i, PITCH), 119.f);
-			addChild(createOutputPlate(p, names[i], i == 5 ? 2.6f : (i == 7 ? 2.9f : PLATE_TEXT_MM), PLATE));
-			addOutput(createOutputCentered<PJ301MPort>(mm2px(p), module, VideoProbe::LUMA_OUTPUT + i));
-		}
+		PANEL_PLACE_ALL(VIDEO_PROBE_LAYOUT)
 	}
 };
 

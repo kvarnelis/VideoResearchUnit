@@ -117,7 +117,7 @@ struct ScanProcessor : Module {
 			zIn,
 		};
 		signalRingSetSampleRate(signalSlotId, args.sampleRate);
-		signalRingPush(signalSlotId, samples);
+		signalRingPushAt(signalSlotId, samples, args.frame);
 
 		const float lumaCv = inputs[LUMA_GAIN_INPUT].isConnected() ? inputs[LUMA_GAIN_INPUT].getVoltage() / 5.f : 0.f;
 		const float intensityCv = inputs[INTENSITY_INPUT].isConnected() ? inputs[INTENSITY_INPUT].getVoltage() : 0.f;

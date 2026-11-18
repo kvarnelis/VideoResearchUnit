@@ -309,6 +309,13 @@ private:
 	std::atomic<bool> autoStart {true};
 	std::atomic<bool> threadLive {false};  // a thread was started and has not finished
 	std::atomic<bool> stopFlag {false};
+	// Phase lock to the UI. A UI draw that takes a new picture (frameThreaded / touchThreaded) counts one here and wakes the
+	// thread, which then starts the next tick while the UI still has most of a frame to wait, so the picture is ready before
+	// the next draw. Without it the 60 Hz tick clock and the UI's frame clock free-run against each other, and a draw
+	// sometimes finds no new picture (held frame) while another finds two (one skipped).
+	std::atomic<uint64_t> demandSeq {0};
+	std::atomic<int64_t> demandNs {0};  // steady-clock time of the last such draw, ns; 0 before the first
+	void noteDemand();
 	std::atomic<uint64_t> tickCount {0};
 	std::atomic<uint64_t> startCount {0};
 	std::mutex lifeMutex;  // guards `worker` (start and join)

@@ -2,6 +2,7 @@
 #include "audio_ring.hpp"
 #include "display_capture.hpp"
 #include "display_recorder.hpp"
+#include "display_picture_size.hpp"
 #include "display_select.hpp"
 #include "panel_style.hpp"
 #include "video_bus.hpp"
@@ -93,10 +94,8 @@ constexpr int kDefaultHp = kFullHeightHp;
 // Screen aspect (width : height) of the picture.
 constexpr float kScreenAspect = 4.f / 3.f;
 
-// Render size of the Display frame: rows follow the on-screen height, with a floor and a cap.
-constexpr int kMinRenderLines = 480;
-constexpr int kMaxRenderLines = 1080;
-constexpr int kMaxRenderWidth = 2048;
+// Render size of the Display frame: rows follow the on-screen height, with a floor (480) and a cap, the Display's
+// "Picture size" choice (display_picture_size.hpp).
 
 // The choice nearest to hp (ties go to the narrower width). Patches saved with a width that is no
 // longer offered load at the nearest one.
@@ -266,6 +265,7 @@ struct Display : Module {
 	double recStartedAt = 0.0;     // nowSeconds() when the recorder's session was created; the REC tooltip's clock
 	std::string recFailureText;    // why the last recording failed; empty once a new one starts or none failed
 	std::string shotStatusText = "Screenshot ready";  // the SHOT tooltip
+	int pictureLines = kDisplayLinesNew;  // "Picture size": most rows of the picture; UI thread only, saved in the patch
 
 	Display() {
 		config(PARAMS_LEN, INPUTS_LEN, OUTPUTS_LEN, LIGHTS_LEN);
@@ -361,6 +361,7 @@ struct Display : Module {
 		json_object_set_new(rootJ, "selectedInput", json_integer(selectedInput.load(std::memory_order_relaxed)));
 		// Written even when empty, so "default folder" is told apart from a patch that predates the setting.
 		json_object_set_new(rootJ, "captureFolder", json_string(captureFolder.c_str()));
+		json_object_set_new(rootJ, "pictureLines", json_integer(pictureLines));
 		return rootJ;
 	}
 
@@ -372,6 +373,9 @@ struct Display : Module {
 		if (json_t* hpJ = json_object_get(rootJ, "panelHp")) {
 			panelHp = snapHp(static_cast<int>(json_integer_value(hpJ)));
 		}
+		// A patch saved before the choice existed has no key: it keeps its old 1080-line picture.
+		json_t* linesJ = json_object_get(rootJ, "pictureLines");
+		pictureLines = json_is_integer(linesJ) ? displayClampLines(json_integer_value(linesJ)) : kDisplayLinesOldPatch;
 		if (json_t* folderJ = json_object_get(rootJ, "captureFolder")) {
 			if (json_is_string(folderJ)) {
 				captureFolder = json_string_value(folderJ);
@@ -734,16 +738,10 @@ struct DisplayFrameWidget : TransparentWidget {
 		return getAbsoluteZoom() * ratio;
 	}
 
-	// The picture is 4:3. Rows follow the on-screen height, clamped to [kMinRenderLines, kMaxRenderLines],
-	// and width is four thirds of the rows, capped at kMaxRenderWidth.
+	// The picture is 4:3. Rows follow the on-screen height, clamped to [480, the Display's picture size choice],
+	// and width is four thirds of the rows, capped at 2048.
 	void renderSize(int& width, int& height) {
-		const float wanted = box.size.y * devicePixelScale();
-		height = std::clamp(static_cast<int>(std::lround(wanted)), kMinRenderLines, kMaxRenderLines);
-		width = std::max(1, static_cast<int>(std::lround(height * kScreenAspect)));
-		if (width > kMaxRenderWidth) {
-			width = kMaxRenderWidth;
-			height = std::max(1, static_cast<int>(std::lround(width / kScreenAspect)));
-		}
+		displayPictureSize(box.size.y * devicePixelScale(), module ? module->pictureLines : kDisplayLinesOldPatch, width, height);
 	}
 
 	// Rounded picture outline, used for the background, the image and the edge stroke.
@@ -1184,6 +1182,21 @@ struct DisplayWidget : ModuleWidget {
 		menu->addChild(createCheckMenuItem("Full precision between modules", "",
 			[]() { return renderService().fullPrecision(); },
 			[]() { renderService().setFullPrecision(!renderService().fullPrecision()); }));
+		if (displayModule) {
+			Display* m = displayModule;
+			menu->addChild(createSubmenuItem("Picture size", std::to_string(m->pictureLines) + " lines", [m](ui::Menu* sub) {
+				for (int lines : kDisplayLinesChoices) {
+					int cw = 0;
+					int ch = 0;
+					displayChoiceSize(lines, cw, ch);
+					// Changing the size while a recording runs would mix sizes in one movie, so it waits for the stop.
+					sub->addChild(createCheckMenuItem(std::to_string(lines) + " lines", std::to_string(cw) + "×" + std::to_string(ch),
+						[m, lines]() { return m->pictureLines == lines; },
+						[m, lines]() { m->pictureLines = lines; },
+						m->recordingOn));
+				}
+			}));
+		}
 		menu->addChild(createSubmenuItem("Panel width", std::to_string(hp) + " HP", [this](ui::Menu* sub) {
 			for (int choice : kHpChoices) {
 				sub->addChild(createCheckMenuItem(std::to_string(choice) + " HP", "",

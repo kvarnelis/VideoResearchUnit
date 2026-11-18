@@ -747,7 +747,9 @@ void RenderService::threadMain() {
 	}
 	while (!stopFlag.load(std::memory_order_acquire)) {
 		const double t = now();
+		const auto tickStart = Clock::now();
 		runTick(t);
+		const uint64_t demandAtPublish = demandSeq.load(std::memory_order_acquire);
 		bool idle = false;
 		{
 			std::lock_guard<std::mutex> lock(pubMutex);
@@ -758,6 +760,33 @@ void RenderService::threadMain() {
 		}
 		// Drift-free: the next wake is start + n * period, not the end of the last tick plus a sleep. A thread that
 		// has fallen several periods behind (the machine was busy) restarts its schedule instead of racing to catch up.
+		// Locked to the UI: when a draw has taken a picture within the last two periods, the next tick starts when the next
+		// draw takes one (but not sooner than 0.98 of a period after this tick began, so a fast reader cannot speed the thread up, nor later than 1.25 periods), and the
+		// schedule restarts from there. With no draw taking pictures (hidden, API readers only) it free-runs at 60 Hz as before.
+		{
+			const int64_t lastNs = demandNs.load(std::memory_order_acquire);
+			const auto nowTp = Clock::now();
+			const int64_t nowNs = std::chrono::duration_cast<std::chrono::nanoseconds>(nowTp.time_since_epoch()).count();
+			const int64_t periodNs = std::chrono::duration_cast<std::chrono::nanoseconds>(period).count();
+			// Only while ticks are short. A tick that runs close to the period needs the free-running schedule, which starts the
+			// next one at once after an overrun; waiting for a draw there would lose a frame every time it overran.
+			const bool quick = (nowTp - tickStart) * 10 < period * 6;
+			if (quick && lastNs != 0 && nowNs - lastNs < 2 * periodNs) {
+				std::unique_lock<std::mutex> lock(stopMutex);
+				const auto lo = tickStart + period * 49 / 50;
+				const auto hi = tickStart + period * 5 / 4;
+				const auto stopped = [this]() { return stopFlag.load(std::memory_order_acquire); };
+				if (Clock::now() < lo) {
+					stopCv.wait_until(lock, lo, stopped);
+				}
+				if (!stopped()) {
+					stopCv.wait_until(lock, hi, [&]() { return stopped() || demandSeq.load(std::memory_order_acquire) != demandAtPublish; });
+				}
+				start = Clock::now();
+				n = 0;
+				continue;
+			}
+		}
 		++n;
 		auto next = start + period * static_cast<Clock::rep>(n);
 		const auto current = Clock::now();
@@ -770,6 +799,15 @@ void RenderService::threadMain() {
 		stopCv.wait_until(lock, next, [this]() { return stopFlag.load(std::memory_order_acquire); });
 	}
 	threadLive.store(false, std::memory_order_release);
+}
+
+void RenderService::noteDemand() {
+	demandNs.store(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count(), std::memory_order_release);
+	demandSeq.fetch_add(1, std::memory_order_acq_rel);
+	{
+		std::lock_guard<std::mutex> lock(stopMutex);  // so the thread cannot check its condition and then miss the wake
+	}
+	stopCv.notify_one();
 }
 
 void RenderService::runTickForTest() {
@@ -835,6 +873,9 @@ RenderService::Result RenderService::frameThreaded(const void* owner, int busId,
 		result.pixels = result.hold.get();
 	}
 	ensureThread();
+	if (result.fresh && !result.pending) {
+		noteDemand();
+	}
 	return result;
 }
 
@@ -862,6 +903,9 @@ RenderService::Taken RenderService::touchThreaded(const void* owner, int busId, 
 		taken.pixels = taken.hold.get();
 	}
 	ensureThread();
+	if (taken.fresh) {
+		noteDemand();
+	}
 	return taken;
 }
 

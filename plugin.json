@@ -1,7 +1,7 @@
 {
   "slug": "VideoResearchUnit",
   "name": "Video Research Unit",
-  "version": "2.3.0",
+  "version": "2.4.0",
   "license": "GPL-3.0-or-later",
   "brand": "Video Research Unit",
   "author": "Kazys Varnelis",
@@ -254,6 +254,24 @@
       "tags": [
         "Visual",
         "Effect"
+      ]
+    },
+    {
+      "slug": "ScanSync",
+      "name": "VRU–28 Scan Sync",
+      "description": "Pulses and ramps that follow the picture: one at the top of every picture and one down it, and one at every line and one across it, so ordinary Rack signals can stand still on a scan module's picture",
+      "tags": [
+        "Visual",
+        "Utility"
+      ]
+    },
+    {
+      "slug": "Raster",
+      "name": "VRU–29 Raster",
+      "description": "Turns ordinary Rack signals into a picture: each audio sample is painted where the video clock's raster is at that instant, or where X and Y say, so the output of Video Probe's scan, or any signal run through other modules, comes back as a video bus. Low line counts, about three samples a line: a way to hear and process a picture, not a full-resolution path",
+      "tags": [
+        "Visual",
+        "Utility"
       ]
     }
   ]

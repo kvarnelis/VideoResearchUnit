@@ -292,3 +292,11 @@ void videoBusPublishVideoMixer(int busId, const VideoMixerParams& params) {
 	node.videoMixer = params;
 	commitNode(busId, node);
 }
+
+void videoBusPublishRaster(int busId, const RasterParams& params) {
+	VideoBusNode node;
+	node.type = VideoBusNodeType::Raster;
+	node.sourceBusId = 0;
+	node.raster = params;
+	commitNode(busId, node);
+}

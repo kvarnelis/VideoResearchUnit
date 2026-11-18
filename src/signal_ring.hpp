@@ -35,9 +35,17 @@ constexpr int kSignalRingTriggerHistory = 16;
 struct SignalWindow {
 	int channels = 0;
 	int length = 0;                  // samples per channel
-	int framePeriodSamples = 0;      // S for readFrame() windows, 0 for readLatest()
+	int framePeriodSamples = 0;      // S for readFrame() windows, 0 for readLatest() and readField()
 	double framePeriodSeconds = kRasterFramePeriod;  // period the frame was read with
 	float sampleRate = 0.f;
+	// readField() windows (the video clock, src/video_clock.hpp): the field starts startFraction samples
+	// after data[0] (0 <= startFraction < 1), because a field is a fractional number of samples long.
+	// `field` is the clock's field number. fieldWindow is false for every other kind of window.
+	bool fieldWindow = false;
+	double startFraction = 0.0;
+	int64_t field = 0;
+	// readSince() windows: the audio frame of data[0] (data[i] is frame firstFrame + i).
+	int64_t firstFrame = 0;
 	std::vector<float> data;
 
 	bool valid() const {
@@ -49,6 +57,8 @@ struct SignalWindow {
 
 	// Value at scan time t (seconds from the start of the frame) for a readFrame() window.
 	// t is mapped as t / T * S, where T is framePeriodSeconds, so one frame spans exactly S samples.
+	// For a readField() window t is real time: position = startFraction + t x sampleRate, so a field is
+	// its true fractional length and a tone keeps its true pitch against the lines.
 	float valueAtScanTime(int channel, float t) const;
 };
 
@@ -56,6 +66,10 @@ class SignalRing {
 public:
 	// Writer side (audio thread). Pushes one sample; values holds kSignalRingChannels floats.
 	void push(const float* values);
+	// Writer side (audio thread). Like push(), and stamps the sample with Rack's frame number
+	// (`ProcessArgs::frame`) so readField() can place it on the video clock. A frame that does not follow the
+	// last one (a bypassed module, a new engine) starts the ring afresh, as clear() does.
+	void pushAt(const float* values, int64_t frame);
 	// Writer side. Sets the rate used to size frames. Cheap enough to call every sample.
 	void setSampleRate(float sampleRate);
 	// Writer side. Ignores everything written so far (a trace reset). The ring keeps writing.
@@ -68,6 +82,16 @@ public:
 	// periodSeconds long (the nominal 60 Hz raster by default, or a field period such as
 	// crt::fieldSeconds()).
 	bool readFrame(SignalWindow& out, double periodSeconds = kRasterFramePeriod) const;
+	// Reader side (any thread). The newest complete field of the video clock (src/video_clock.hpp) for a raster
+	// of `lines` visible lines, at the writer's sample rate: field n covers audio frames n x spf to
+	// (n + 1) x spf, spf fractional, and the window holds those samples plus the margin to interpolate at
+	// the ends, with startFraction saying where the field starts inside the first. Needs the writer's frame
+	// numbers (pushAt; a ring fed by push() counts its own samples as frames). False until a field is complete.
+	bool readField(SignalWindow& out, int lines) const;
+	// Reader side. The samples stamped with frames after `afterFrame`, up to `maxCount` of the newest, with out.firstFrame
+	// set (data[i] is frame firstFrame + i). False when there is nothing newer (or the writer wrapped onto the copy).
+	// For a reader that paints each slice as it arrives (Raster at SLOW above x1) and so never needs a whole picture.
+	bool readSince(int64_t afterFrame, int maxCount, SignalWindow& out) const;
 	// Reader side. Newest `count` samples (fewer is not returned: false if not enough).
 	bool readLatest(int count, SignalWindow& out) const;
 	// Writer side. Stamps the newest written sample as a trigger point (call after push()).
@@ -87,6 +111,7 @@ private:
 	std::atomic<float> samples[kSignalRingChannels * kSignalRingCapacity] {};
 	std::atomic<uint64_t> writes {0};
 	std::atomic<uint64_t> origin {0};
+	std::atomic<int64_t> frameOffset {0};  // audio frame of write index i is i + frameOffset
 	std::atomic<float> rate {0.f};
 	std::atomic<uint64_t> stamps[kSignalRingTriggerHistory] {};
 	std::atomic<uint64_t> stampCount {0};
@@ -109,6 +134,10 @@ void signalRingPush(int slotId, const float* values);
 void signalRingSetSampleRate(int slotId, float sampleRate);
 void signalRingClear(int slotId);
 bool signalRingReadFrame(int slotId, SignalWindow& out, double periodSeconds = kRasterFramePeriod);
+// Clock-stamped push (audio thread) and the field read that goes with it. See SignalRing::pushAt, readField.
+void signalRingPushAt(int slotId, const float* values, int64_t frame);
+bool signalRingReadField(int slotId, SignalWindow& out, int lines);
+bool signalRingReadSince(int slotId, int64_t afterFrame, int maxCount, SignalWindow& out);
 bool signalRingReadLatest(int slotId, int count, SignalWindow& out);
 // Trigger stamps: the writer (audio thread) marks the sample it just pushed; the reader takes a
 // window that starts there. See SignalRing::markTrigger and readTriggered.

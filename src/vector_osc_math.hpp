@@ -4,6 +4,8 @@
 #include <array>
 #include <cmath>
 
+#include "vector_osc_letters.hpp"
+
 // Vector Osc (VRU-25): a pair of oscillators, X and Y, each made of up to eight slightly detuned
 // voices that are averaged, with a wave shape that runs continuously from sine to triangle to saw to
 // square. It feeds the X IN and Y IN jacks of Scope Trace. Everything here is plain and allocation free.
@@ -13,7 +15,13 @@
 // DETUNE spreads the voice frequencies evenly above and below the base (and nudges each voice's
 // starting phase), so the figure thickens into a bundle of traces that slowly drifts and breathes.
 // At DETUNE 0 every voice is the same, so the figure is one clean line.
+//
+// WAVE 0 to 1 is sine, triangle, saw, square. Past 1, up to kWaveMax, the square gives way to the letters
+// V R U (vector_osc_letters.hpp), which are drawn from X's own phase for both X and Y, so the letters
+// ignore RATIO, FINE and PHASE. Every WAVE value up to 1 behaves exactly as it did before the letters.
 namespace vector_osc {
+
+constexpr float kWaveMax = 4.f / 3.f;   // WAVE 1 to 4/3 cross-fades from the square to the letters
 
 constexpr int kMaxVoices = 8;
 constexpr float kTwoPi = 6.2831853f;
@@ -97,6 +105,28 @@ inline float waveform(float p, float dt, float wave) {
 	return std::clamp(a + (b - a) * w, -1.f, 1.f);
 }
 
+// The cross-fade amount from the square to the letters for a WAVE value (0 up to 1, 1 at kWaveMax).
+inline float letterMix(float wave) {
+	const float f = std::clamp((wave - 1.f) * 3.f, 0.f, 1.f);
+	return f * f * (3.f - 2.f * f);
+}
+
+// A voice's X and Y at phases px and py. At WAVE up to 1 this is exactly the two waveforms.
+inline void voicePoint(float px, float py, float stepX, float stepY, float waveX, float waveY, float& outX, float& outY) {
+	if (waveX <= 1.f && waveY <= 1.f) {
+		outX = waveform(px, stepX, waveX);
+		outY = waveform(py, stepY, waveY);
+		return;
+	}
+	const float sqX = waveform(px, stepX, std::min(waveX, 1.f));
+	const float sqY = waveform(py, stepY, std::min(waveY, 1.f));
+	float lx, ly;
+	letterPoint(px, lx, ly);
+	const float mx = letterMix(waveX), my = letterMix(waveY);
+	outX = sqX + (lx - sqX) * mx;
+	outY = sqY + (ly - sqY) * my;
+}
+
 struct Settings {
 	float freq = 261.6256f;   // X base frequency in Hz
 	int voices = 1;           // 1 to 8
@@ -133,8 +163,8 @@ struct Engine {
 		const float ratio = sane(s.ratio, .01f, 64.f, 1.f);
 		const float octaves = detuneOctaves(s.detune);
 		const float skew = sane(s.detune, 0.f, 1.f);
-		const float waveX = sane(s.wave, 0.f, 1.f);
-		const float waveY = std::clamp(waveX + sane(s.waveOffsetY, -1.f, 1.f), 0.f, 1.f);
+		const float waveX = sane(s.wave, 0.f, kWaveMax);
+		const float waveY = std::clamp(waveX + sane(s.waveOffsetY, -1.f, 1.f), 0.f, waveX > 1.f ? kWaveMax : 1.f);
 		const float turn = sane(s.phase, -4.f, 4.f);
 		float sumX = 0.f, sumY = 0.f;
 		for (int k = 0; k < n; ++k) {
@@ -143,8 +173,10 @@ struct Engine {
 			const float stepY = std::min(fx * mult * ratio * sampleTime, .45f);
 			const float px = static_cast<float>(phaseX[k]) + skew * kSkewX[k];
 			const float py = static_cast<float>(phaseY[k]) + turn + skew * kSkewY[k];
-			sumX += waveform(px, stepX, waveX);
-			sumY += waveform(py, stepY, waveY);
+			float vx, vy;
+			voicePoint(px, py, stepX, stepY, waveX, waveY, vx, vy);
+			sumX += vx;
+			sumY += vy;
 			phaseX[k] += stepX;
 			phaseY[k] += stepY;
 			phaseX[k] -= std::floor(phaseX[k]);

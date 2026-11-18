@@ -1,4 +1,5 @@
 #include "plugin.hpp"
+#include "video_clock.hpp"
 #include "panel_style.hpp"
 #include "hz_param.hpp"
 #include "signal_ring.hpp"
@@ -26,9 +27,10 @@ constexpr float kCoilMinHz = 500.f;
 constexpr float kCoilMaxHz = 8000.f;
 constexpr float kCoilDefaultHz = 3000.f;
 
-// A fresh module's coil oscillators run at 60 Hz, a multiple of the field rate, which holds the pattern
-// nearly still.
-constexpr float kHomeHz = 60.f;
+// A fresh module's coil oscillators run at the field rate, 60000/1001 Hz (59.94006), which the video clock
+// (src/video_clock.hpp) makes hold the pattern exactly still. It was 60 Hz, which crept once in about 17 s.
+// Only the default of a new module: a patch stores its own knob values and loads unchanged.
+constexpr float kHomeHz = static_cast<float>(vclock::kDefaultFieldRateHz);
 
 // Everything that changes slowly (knob-derived rates, LINES, SPOT, PERSIST, GLOW, CURL, TWIST, SIZE, FLIP,
 // the COIL cutoff) is refreshed, and the node on the video bus is republished, every this many samples:
@@ -426,7 +428,7 @@ struct DeflectionYoke : Module {
 		samples[kDeflectionYokeDeflectY] = coilY.process(depth * yAmount * ySource * kDeflectFullScale);
 		samples[kDeflectionYokeZoom] = 2.f * zoomAmount * zSource;
 		samples[kDeflectionYokeSCoil] = coilS.process(depth * sAmount * sSource);
-		signalRingPush(signalSlotId, samples);
+		signalRingPushAt(signalSlotId, samples, args.frame);
 
 		sourceBus.store(inputBusId, std::memory_order_relaxed);
 		hasSignal.store(active, std::memory_order_relaxed);

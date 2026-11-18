@@ -3,6 +3,10 @@
 #include "vector_osc_math.hpp"
 #include <cstdio>
 #include <cmath>
+#include <cstdint>
+#include <cstring>
+
+static const unsigned long long GOLDEN = 8081521012212322312ull;
 
 namespace v = vector_osc;
 static int checks = 0, failures = 0;
@@ -123,6 +127,64 @@ int main() {
 			maxStep = std::max(maxStep, std::abs(cur - prev)); prev = cur;
 		}
 		check(maxStep < .02f, "turning WAVE changes the shape continuously");
+	}
+
+	// Golden: every WAVE value the knob had before the V R U shape (0 to 1) gives exactly the samples it gave
+	// before. The hash was taken from the engine at main dc61b13, before the letters were added.
+	{
+		uint64_t h = 1469598103934665603ull;
+		auto mix = [&](float f) {
+			uint32_t b;
+			std::memcpy(&b, &f, 4);
+			for (int i = 0; i < 4; ++i) { h ^= (b >> (8 * i)) & 0xffu; h *= 1099511628211ull; }
+		};
+		const float waves[] = {0.f, .055f, .1f, .33f, .5f, .67f, .9f, 1.f};
+		const float freqs[] = {147.f, 3000.f};
+		for (float w : waves) for (float d : {0.f, .3f, 1.f}) for (int n : {1, 3, 8}) for (float r : {1.f, 4.f / 3.f, 2.5f})
+			for (float off : {0.f, .4f, -.3f, .9f}) for (float f : freqs) {
+				v::Engine e;
+				v::Settings s;
+				s.freq = f; s.wave = w; s.detune = d; s.voices = n; s.ratio = r; s.waveOffsetY = off; s.phase = .12f; s.level = .87f;
+				for (int i = 0; i < 300; ++i) { const v::Output o = e.process(s, dt); mix(o.x); mix(o.y); mix(o.z); }
+			}
+		std::printf("golden hash %llu\n", static_cast<unsigned long long>(h));
+		check(h == GOLDEN, "WAVE values 0 to 1 are bit-identical to the engine before the V R U shape");
+	}
+
+	// The letters V R U (WAVE past 1): one closed loop, no DC, in range, repeatable, and different from the square.
+	{
+		const v::LetterTable& t = v::letterTable();
+		check(t.x[v::kLetterTable] == t.x[0] && t.y[v::kLetterTable] == t.y[0], "the letters are one closed loop");
+		double mx = 0, my = 0, px = 0, py = 0;
+		for (int i = 0; i < v::kLetterTable; ++i) {
+			mx += t.x[i]; my += t.y[i];
+			px = std::max(px, (double)std::abs(t.x[i])); py = std::max(py, (double)std::abs(t.y[i]));
+		}
+		mx /= v::kLetterTable; my /= v::kLetterTable;
+		check(std::abs(mx) < 1e-4 && std::abs(my) < 1e-4, "the letters have no DC in X or Y");
+		check(px <= 1.0 && py <= 1.0 && px > .5 && py > .3, "the letters peak inside the unit box and are not tiny");
+
+		v::Settings s;
+		s.freq = 147.f; s.voices = 1; s.wave = v::kWaveMax; s.level = 1.f; s.phase = .12f;
+		v::Engine a, b;
+		bool same = true, inRange = true;
+		double sumX = 0, sumY = 0, peak = 0;
+		const int n = 48000;
+		for (int i = 0; i < n; ++i) {
+			const v::Output oa = a.process(s, dt), ob = b.process(s, dt);
+			same &= oa.x == ob.x && oa.y == ob.y;
+			inRange &= std::abs(oa.x) <= 5.f + 1e-4f && std::abs(oa.y) <= 5.f + 1e-4f;
+			sumX += oa.x; sumY += oa.y;
+			peak = std::max(peak, (double)std::max(std::abs(oa.x), std::abs(oa.y)));
+		}
+		check(same, "the letters are deterministic");
+		check(inRange && peak > 2.f, "the letters stay within +/-5 V at a useful level");
+		check(std::abs(sumX / n) < .05 && std::abs(sumY / n) < .05, "the letters output has no DC");
+		v::Engine c, d;
+		v::Settings sq = s; sq.wave = 1.f;
+		bool differs = false;
+		for (int i = 0; i < 2000; ++i) differs |= std::abs(c.process(s, dt).x - d.process(sq, dt).x) > .1f;
+		check(differs, "WAVE past 1 is not the square any more");
 	}
 
 	// Z: a resting point is brightest, a fast sweep is dim, and a circle sits between.

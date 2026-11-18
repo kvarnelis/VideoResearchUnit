@@ -110,6 +110,8 @@ Size. S.
 
 ### 4. Composite In, with Scan Sync
 
+Scan Sync is built, as VRU–28 (2026-11-16): TOP (a pulse at the top of every picture), DOWN (a 0 to 10 V ramp down the picture), LINE (a pulse at every line) and ACROSS (a 0 to 10 V ramp across each line), with a LINES knob, all from the video clock (docs/architecture.md, "Video clock" and "Scan Sync (VRU–28)"). Not built: the divided clocks and the pitch voltage that tunes a Rack VCO to the line rate, and the reset input (left out on purpose, see "Video clock", RESET). Composite In is not built.
+
 What it does. Composite In is a generator with three audio-rate inputs that
 become red, green and blue (or one brightness input ahead of a Colorizer) at
 each pixel's scan time, as if Rack's oscillators were wired straight to the
@@ -136,6 +138,8 @@ kHz helps, and the module should say so on its panel or in its manual.
 Size. S for Composite In, S for Scan Sync.
 
 ### 5. Light Meter
+
+Raster (VRU–29) and Video Probe's SCAN (2026-11-16) are the picture <-> signal pair on the video clock (docs/architecture.md, "Raster rule").
 
 Built, in a reduced form, as VRU–26 Video Probe (2026-11-13): a read point moved by X and Y with LUMA, R, G and B at every audio sample, a SIZE patch average, AVG, MOTION and GATE (docs/architecture.md, "Video Probe"). Not built: the brightness centroid as X and Y, and the scene-cut gate.
 
@@ -701,13 +705,13 @@ his Rack.
 
 Later, if wanted.
 
-- A sound output for each oscillator. On ROWS an oscillator runs at its row
+- A sound output for each oscillator. (Built, 2.4.0.) On ROWS an oscillator runs at its row
   count times 59.94 Hz, a bass note at one row and a high one at a hundred,
   so the picture and the tone would be one signal.
-- FREQ at one volt to the octave, so a keyboard doubles and halves the bars.
-- A SNOW position on PATTERN: television static. Nothing in the series draws
+- FREQ at one volt to the octave, so a keyboard doubles and halves the bars. (Built, 2.4.0.)
+- A SNOW position on PATTERN: television static. (Built, 2.4.0.) Nothing in the series draws
   noise yet.
-- A third oscillator.
+- A third oscillator. (Built, 2.4.0.)
 - The frame pulse and field ramp outputs of Scan Sync, so Rack's own
   oscillators can be tuned to the scan.
 
@@ -722,6 +726,12 @@ Built. Step one (the pair, LOCK as a switch) is built. The follow-on is built to
 CV are read at each pixel's scan time through the module's own signal ring. The hold's feel (the pull is
 `LOCK^2` per line) still has to be tuned by eye in Rack. The panel stayed 20 HP. See docs/architecture.md,
 "Bars and Rows".
+
+Four of the "Later, if wanted" items are built, on branch `feat/video-osc-extras` (2.4.0): a sound output for each
+oscillator (silent above half the sample rate, not folded), FREQ at one volt to the octave (a V/OCT input for each oscillator,
+alongside the old FREQ CV), a SNOW position on PATTERN, and a third oscillator, C, with its own LEVEL (0 by default, so a patch
+is unchanged). The panel is now 29 HP. Not built: the frame pulse and field ramp outputs of Scan Sync, which belong to that
+entry. See docs/architecture.md, "2.4.0 additions to the Video Oscillator".
 
 ## Naming
 

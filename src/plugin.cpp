@@ -49,7 +49,7 @@ void init(Plugin* p) {
 	pluginInstance = p;
 	display_capture::setCreateFolderHook(createCaptureFolder);
 	renderService().setTickSource(uiFrameTick);
-	// Catalogue order, VRU–01 to VRU–27, the same order as plugin.json.
+	// Catalogue order, VRU–01 to VRU–28, the same order as plugin.json.
 	p->addModel(modelDeflectionYoke);
 	p->addModel(modelScanProcessor);
 	p->addModel(modelScopeTrace);
@@ -77,6 +77,8 @@ void init(Plugin* p) {
 	p->addModel(modelVectorOsc);
 	p->addModel(modelVideoProbe);
 	p->addModel(modelFrameDelay);
+	p->addModel(modelScanSync);
+	p->addModel(modelRaster);
 }
 
 // Plugin-wide settings, stored by Rack in settings.json under settings["pluginSettings"]["VideoResearchUnit"].

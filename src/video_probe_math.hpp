@@ -11,6 +11,8 @@
 // table at fractional corners with bilinear weights gives the exact integral of the picture there (the table
 // is bilinear inside a pixel), so a box average is exact for any position and size. A box one pixel wide is
 // exactly the bilinear interpolation between pixel centres, so SIZE at its minimum is a plain point read.
+#include "raster_scan.hpp"
+
 #include <algorithm>
 #include <atomic>
 #include <cmath>
@@ -102,14 +104,12 @@ inline float halfWidthPx(float size) {
 inline double pixelX(float volts) { return (sane(volts, -5.f, 5.f) + 5.0) * (kW / 10.0); }
 inline double pixelY(float volts) { return (5.0 - sane(volts, -5.f, 5.f)) * (kH / 10.0); }
 
-// Average colour of the square of half-width halfWidthPx(size) centred on the volts position. Near an edge the
-// square is cut at the edge and the average is over what is left.
-inline Point sample(const Frame& f, float xVolts, float yVolts, float size) {
+// Average colour of the box x0..x1, y0..y1 (picture pixels, already inside the picture).
+inline Point sampleBox(const Frame& f, double x0, double x1, double y0, double y1) {
 	Point p;
 	if (!f.valid) return p;
-	const double cx = pixelX(xVolts), cy = pixelY(yVolts), h = halfWidthPx(size);
-	const double x0 = std::max(cx - h, 0.0), x1 = std::min(cx + h, static_cast<double>(kW));
-	const double y0 = std::max(cy - h, 0.0), y1 = std::min(cy + h, static_cast<double>(kH));
+	x0 = std::max(x0, 0.0); x1 = std::min(x1, static_cast<double>(kW));
+	y0 = std::max(y0, 0.0); y1 = std::min(y1, static_cast<double>(kH));
 	const double area = (x1 - x0) * (y1 - y0) * 255.0;
 	if (!(area > 0.0)) return p;
 	float* out[kChannels] = {&p.r, &p.g, &p.b, &p.luma};
@@ -118,6 +118,44 @@ inline Point sample(const Frame& f, float xVolts, float yVolts, float size) {
 		*out[c] = static_cast<float>(std::min(std::max(sum / area, 0.0), 1.0));
 	}
 	return p;
+}
+
+// Average colour of the square of half-width halfWidthPx(size) centred on the volts position. Near an edge the
+// square is cut at the edge and the average is over what is left.
+inline Point sample(const Frame& f, float xVolts, float yVolts, float size) {
+	const double cx = pixelX(xVolts), cy = pixelY(yVolts), h = halfWidthPx(size);
+	return sampleBox(f, cx - h, cx + h, cy - h, cy + h);
+}
+
+// SCAN: the picture read as a raster on the video clock (src/raster_scan.hpp). An axis with scan set follows the clock:
+// X reads the cell of the audio sample across its line, Y reads the band of its line (and is black in the flyback);
+// an axis without it is the read point as before, from xVolts / yVolts. SIZE only ever widens the box.
+inline Point sampleScan(const Frame& f, const vclock::Clock& clock, int64_t frame, bool scanX, bool scanY, float xVolts, float yVolts, float size) {
+	const double h = halfWidthPx(size);
+	const raster_scan::Cell c = raster_scan::cellAt(clock, frame);
+	const int lines = clock.visibleLines();
+	double x0, x1, y0, y1;
+	if (scanX) {
+		const double mid = c.u * kW;
+		x0 = std::min(c.u0 * kW, mid - h);
+		x1 = std::max(c.u1 * kW, mid + h);
+	}
+	else {
+		const double cx = pixelX(xVolts);
+		x0 = cx - h; x1 = cx + h;
+	}
+	if (scanY) {
+		if (!c.visible || c.line >= lines) return Point();
+		const double top = static_cast<double>(c.line) * kH / lines, bottom = static_cast<double>(c.line + 1) * kH / lines;
+		const double mid = 0.5 * (top + bottom);
+		y0 = std::min(top, mid - h);
+		y1 = std::max(bottom, mid + h);
+	}
+	else {
+		const double cy = pixelY(yVolts);
+		y0 = cy - h; y1 = cy + h;
+	}
+	return sampleBox(f, x0, x1, y0, y1);
 }
 
 // Combined position: knob plus trimmer times jack, clamped to +/-5 V.
@@ -189,11 +227,20 @@ struct Reader {
 	struct Out { bool valid = false; float luma = 0.f, r = 0.f, g = 0.f, b = 0.f, avg = 0.f, motion = 0.f, gate = 0.f, frame = 0.f; };
 	void reset() { luma = r = g = b = 0.f; gate.on = false; }
 	Out process(TripleBuffer& tb, const Frame* frames, float xv, float yv, float size, float smooth, float level, float sampleTime) {
+		return run(tb, frames, smooth, level, sampleTime, [&](const Frame& f) { return sample(f, xv, yv, size); });
+	}
+	// SCAN: as process(), with the read point taken from the video clock on every axis whose scan flag is set.
+	Out processScan(TripleBuffer& tb, const Frame* frames, const vclock::Clock& vc, int64_t frame, bool scanX, bool scanY,
+		float xv, float yv, float size, float smooth, float level, float sampleTime) {
+		return run(tb, frames, smooth, level, sampleTime, [&](const Frame& f) { return sampleScan(f, vc, frame, scanX, scanY, xv, yv, size); });
+	}
+	template <class PointOf>
+	Out run(TripleBuffer& tb, const Frame* frames, float smooth, float level, float sampleTime, PointOf pointOf) {
 		Out o;
 		bool fresh = false;
 		const Frame& f = frames[tb.readIndex(fresh)];
 		if (f.valid) {
-			const Point p = sample(f, xv, yv, size);
+			const Point p = pointOf(f);
 			const float a = smoothCoeff(smooth, sampleTime);
 			luma += (p.luma - luma) * a;
 			r += (p.r - r) * a;

@@ -66,10 +66,16 @@ struct Ramps : Module {
 		outputs[VIDEO_BUS_OUTPUT].setVoltage(videoBus.voltage());
 	}
 
-	// The bus already provides a race-free snapshot for the preview.
-	RampsParams snapshot() const {
+	// The bus already provides a race-free snapshot for the preview. False when the read lost its race with the audio
+	// thread (the writer kept interrupting) or the bus holds something else: `params` is then not touched, so the
+	// preview keeps its last picture instead of drawing a default one for a frame (a blink).
+	bool snapshot(RampsParams& params) const {
 		VideoBusNode node;
-		return videoBusReadNode(videoBus.id(), node) && node.type == VideoBusNodeType::Ramps ? node.ramps : RampsParams{};
+		if (!videoBusReadNode(videoBus.id(), node) || node.type != VideoBusNodeType::Ramps) {
+			return false;
+		}
+		params = node.ramps;
+		return true;
 	}
 	json_t* dataToJson() override {
 		json_t* rootJ = json_object();
@@ -83,9 +89,25 @@ struct RampsPreviewWidget : TransparentWidget {
 	Ramps* module = nullptr;
 	std::vector<unsigned char> rgba;
 	int nvgImage = 0;
+	RampsParams params;
+	bool haveParams = false;
 
 	void step() override {
-		renderRamps(rgba, 128, 84, module ? module->snapshot() : RampsParams{});
+		// A module that is not in a rack (library, browser) draws the defaults. A real module keeps the last good
+		// parameters when a read fails, and draws the defaults only before it has had one.
+		if (!module) {
+			renderRamps(rgba, 128, 84, RampsParams{});
+		}
+		else {
+			RampsParams fresh;
+			if (module->snapshot(fresh)) {
+				params = fresh;
+				haveParams = true;
+			}
+			if (haveParams || rgba.empty()) {
+				renderRamps(rgba, 128, 84, haveParams ? params : RampsParams{});
+			}
+		}
 		TransparentWidget::step();
 	}
 	void draw(const DrawArgs& args) override {
