@@ -8,6 +8,42 @@ and back: Video Probe and Raster.
 
 This is version 2.5.0. It has been tested only on Apple silicon Macs.
 
+## Modules
+
+| No. | Module | What it does |
+| --- | --- | --- |
+| VRU–01 | [Deflection Yoke](#vru01-deflection-yoke) | Bends the raster of a picture with audio-rate deflection signals. |
+| VRU–02 | [Scan Processor](#vru02-scan-processor) | Draws a picture as scan lines lifted by its brightness, or by a second picture. |
+| VRU–03 | [Scope Trace](#vru03-scope-trace) | An oscilloscope and Lissajous source for audio and CV, with phosphor persistence. |
+| VRU–04 | [Line Field](#vru04-line-field) | Turns a picture into a field of scan lines raised like a relief. |
+| VRU–05 | [Video Oscillator](#vru05-video-oscillator) | Three oscillators that make bars, rows and test patterns, with sound outputs. |
+| VRU–06 | [Ramps](#vru06-ramps) | Two layers of grey ramps: horizontal, vertical, radial and angular. |
+| VRU–07 | [Video Player](#vru07-video-player) | Plays a video file or a YouTube source, with its soundtrack. |
+| VRU–08 | [Syphon In](#vru08-syphon-in) | Receives pictures from other Mac applications through Syphon. |
+| VRU–09 | [Color Lab](#vru09-color-lab) | Shifts hue, saturation, brightness and contrast, and posterizes or solarizes. |
+| VRU–10 | [Colorizer](#vru10-colorizer) | Maps brightness onto a four-stop color gradient. |
+| VRU–11 | [Wave Shaper](#vru11-wave-shaper) | Folds, mirrors and quantizes the brightness of a picture. |
+| VRU–12 | [Keyer](#vru12-keyer) | Cuts a matte from a picture by brightness. |
+| VRU–13 | [Bus Mixer](#vru13-bus-mixer) | Mixes two pictures: mix, add, multiply, screen, difference, max or matte. |
+| VRU–14 | [Feedback](#vru14-feedback) | Feeds a picture back into itself with zoom, turn, shift and hue. |
+| VRU–15 | [Freeze Frame](#vru15-freeze-frame) | Holds or strobes a picture. |
+| VRU–16 | [Display](#vru16-display) | Shows a picture, full screen if you like, and saves stills and movies. |
+| VRU–17 | [Syphon Out](#vru17-syphon-out) | Sends a picture to other Mac applications through Syphon. |
+| VRU–18 | [Dual LFO Chaos](#vru18-dual-lfo-chaos) | Two LFOs and a chaos source for CV. |
+| VRU–19 | [1V CV Out](#vru19-1v-cv-out) | Scales Rack CV to the ranges video hardware expects. |
+| VRU–20 | [Rotator](#vru20-rotator) | Turns, zooms, slides and folds a picture into a kaleidoscope. |
+| VRU–21 | [Shapes](#vru21-shapes) | Draws a polygon, star or circle, alone, tiled or in a ring. |
+| VRU–22 | [Video Mixer](#vru22-video-mixer) | Four pictures with color, dissolves, wipes and keys. |
+| VRU–23 | [Octoscillator](#vru23-octoscillator) | Eight slow chaotic CV sources with 24 outputs. |
+| VRU–24 | [Focus](#vru24-focus) | Softens, smears, sharpens and misconverges a picture. |
+| VRU–25 | [Vector Osc](#vru25-vector-osc) | A pair of oscillators that draw moving figures on Scope Trace. |
+| VRU–26 | [Video Probe](#vru26-video-probe) | Reads brightness and color from a picture as CV. |
+| VRU–27 | [Frame Delay](#vru27-frame-delay) | Shows a picture a few frames late, so a picture can loop through it. |
+| VRU–28 | [Scan Sync](#vru28-scan-sync) | Pulses and ramps that follow the picture and its lines. |
+| VRU–29 | [Raster](#vru29-raster) | Paints ordinary signals into a picture, line by line. |
+
+They are described in full, grouped by what they do, under [The modules](#the-modules).
+
 ## New in 2.5.0
 
 - [Vector Osc](#vru25-vector-osc) has a CV jack and an AMT attenuverter for every knob except FREQ, which keeps
