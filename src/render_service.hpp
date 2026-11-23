@@ -149,14 +149,21 @@ public:
 	};
 	// Registers `owner` (any pointer that is the same every call) for busId at width x height for this tick, from the UI
 	// thread's step(). Returns the newest unseen picture of that bus and size. The pixels stay valid and unchanged while the Taken is kept.
-	Taken touch(const void* owner, int busId, int width, int height);
+	//
+	// mayDerive (Video Probe): this consumer reads the picture as numbers and does not need the graph drawn at its own
+	// size. In thread mode, while another consumer that did not say so (a Display, Syphon Out, the API) has the same
+	// bus drawn larger and in the same shape, the service does not draw the bus again at this size: it averages the
+	// larger picture down (src/frame_downsample.hpp), which saves a whole pass of the graph each tick. The picture is
+	// then the larger one made small, not the graph drawn small, so its values differ a little; when the larger
+	// consumer goes, the bus is drawn at this size again. The UI-driven modes ignore the flag.
+	Taken touch(const void* owner, int busId, int width, int height, bool mayDerive = false);
 	// Drops the registration of `owner` (call when the widget is destroyed).
 	void forget(const void* owner);
 
 	// The picture of `busId` at width x height for the current tick (a UI consumer: Display, Syphon Out, Probe).
 	Result frame(int busId, int width, int height);
 	// The same for a consumer that wants to know whether the picture is new to it (thread mode: Result::fresh).
-	Result frame(const void* owner, int busId, int width, int height);
+	Result frame(const void* owner, int busId, int width, int height, bool mayDerive = false);
 
 	// ---- Render thread (stage 4) ----
 	// The setting "Render video on its own thread". Off is the default. Turning it off stops and joins the thread
@@ -210,6 +217,7 @@ public:
 	// Bytes of float plane memory the pool buffers hold at this moment (every size, free and held buffers).
 	size_t floatPlaneBytes() const;
 	uint64_t renderTotal() const;  // every bus render the service has made (drawn, hidden and API)
+	uint64_t derivedTotal() const;  // pictures made by averaging a larger one down instead of rendering (thread mode)
 	size_t registrationCount() const;
 	uint64_t tickSerial() const;
 	size_t sizeCount() const;
@@ -281,6 +289,7 @@ private:
 		double lastSeen = 0.0;
 		uint64_t taken = 0;  // the stamp touch() last gave this consumer
 		uint64_t shown = 0;  // the stamp frame() last gave this consumer
+		bool mayDerive = false;  // see touch()
 	};
 	struct Pub {
 		std::shared_ptr<const Frame> frame;  // null when there is no picture to show
@@ -295,13 +304,16 @@ private:
 		int busId;
 		int width;
 		int height;
+		bool mayDerive;  // every consumer registered for this bus and size said mayDerive
+		int fromWidth;  // not 0: this tick's picture is the fromWidth x fromHeight one averaged down, not a render
+		int fromHeight;
 	};
 	void runTick(double t);
 	void threadMain();
 	void ensureThread();
-	ThreadReg& registerThreaded(const void* owner, int busId, int width, int height, double t);
-	Result frameThreaded(const void* owner, int busId, int width, int height);
-	Taken touchThreaded(const void* owner, int busId, int width, int height);
+	ThreadReg& registerThreaded(const void* owner, int busId, int width, int height, double t, bool mayDerive = false);
+	Result frameThreaded(const void* owner, int busId, int width, int height, bool mayDerive);
+	Taken touchThreaded(const void* owner, int busId, int width, int height, bool mayDerive);
 	bool readCopyThreaded(int busId, int width, int height, unsigned char* dst, size_t strideBytes);
 	ReadOutcome readThreaded(const ReadRequest& request);
 
@@ -348,6 +360,7 @@ private:
 	bool drawnThisTick = false;  // a frame() call was made in the current tick
 	double lastRenderTime = -1.0;  // when a tick last rendered (drawn or hidden), for the cap
 	uint64_t renderCounter = 0;
+	uint64_t derivedCounter = 0;  // pictures averaged down from a larger one (runTick); under `mutex`
 	std::vector<Registration> registrations;
 };
 

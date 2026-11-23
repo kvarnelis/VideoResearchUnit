@@ -138,6 +138,7 @@ struct RasterWidget : ModuleWidget {
 		setPanel(createPanel(asset::plugin(pluginInstance, "res/Raster.svg")));
 		addPanelHeader(this, kRasterPanelWidth, "29", "RASTER");
 		PANEL_PLACE_ALL(RASTER_LAYOUT)
+		quickenSlowKnob(this, Raster::SLOW_PARAM);
 	}
 };
 

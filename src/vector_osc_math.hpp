@@ -50,6 +50,33 @@ inline float fineFactor(float fine) {
 	return std::exp2(f * std::abs(f) / 12.f);
 }
 
+// A knob with its CV jack and attenuverter: the knob's value plus volts x amount x scale. amount is the
+// trimmer, -1 to 1 (1 is what the jack did before the trimmers existed, so old patches play the same); scale is
+// knob units per volt. An open jack reads 0 V and leaves the knob's value exactly as it is.
+inline float withCv(float knob, float volts, float amount, float scale) {
+	return knob + sane(volts, -20.f, 20.f) * sane(amount, -1.f, 1.f, 1.f) * scale;
+}
+
+// RATIO: whole steps along the list, 1 V a step at amount 1.
+inline int ratioStepWithCv(float knob, float volts, float amount) {
+	return ratioIndex(knob + std::round(sane(volts, -20.f, 20.f) * sane(amount, -1.f, 1.f, 1.f)));
+}
+// FINE and Y WAVE run -1 to 1: 5 V is the whole way from the middle. PHASE is in turns: 10 V is one turn.
+// DETUNE and LEVEL run 0 to 1: 10 V is the whole range. VOICES: 10 V sweeps 1 to 8.
+inline float fineWithCv(float knob, float volts, float amount) { return sane(withCv(knob, volts, amount, .2f), -1.f, 1.f); }
+inline float waveYWithCv(float knob, float volts, float amount) { return sane(withCv(knob, volts, amount, .2f), -1.f, 1.f); }
+inline float phaseWithCv(float knob, float volts, float amount) { return withCv(knob, volts, amount, .1f); }
+inline float detuneWithCv(float knob, float volts, float amount) { return sane(withCv(knob, volts, amount, .1f), 0.f, 1.f); }
+inline float levelWithCv(float knob, float volts, float amount) { return sane(withCv(knob, volts, amount, .1f), 0.f, 1.f); }
+inline int voicesWithCv(float knob, float volts, float amount) {
+	return static_cast<int>(std::lround(sane(withCv(knob, volts, amount, .7f), 1.f, static_cast<float>(kMaxVoices), 1.f)));
+}
+// WAVE: a knob up to 1 (every patch saved before the letters) is limited to 1, CV included; only a knob turned
+// past 1, towards the letters, has the extra range.
+inline float waveWithCv(float knob, float volts, float amount) {
+	return sane(withCv(knob, volts, amount, .1f), 0.f, knob > 1.f ? kWaveMax : 1.f);
+}
+
 // Voice spread in -1 to +1, evenly spaced; a single voice sits at 0.
 inline float voiceSpread(int k, int n) {
 	return n <= 1 ? 0.f : (2.f * k - (n - 1.f)) / (n - 1.f);

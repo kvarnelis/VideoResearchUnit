@@ -463,7 +463,18 @@ void renderRamps(std::vector<unsigned char>& rgba, int width, int height, const 
 // The same picture into a VideoFrame: bytes (each grey rounded, as the vector form does) or, with floatOut, float
 // greys that are not rounded, so a stretched ramp has no steps. modLuma: width x height values in 0..1 (see
 // RampsParams::modAmount); nullptr draws without it.
-void renderRamps(VideoFrame& out, int width, int height, const RampsParams& params, bool floatOut, const float* modLuma = nullptr);
+// What Ramps keeps between pictures: the ANGLE axis coordinate (0..1) of every pixel of one picture size, which
+// does not change from picture to picture. A caller that draws Ramps at one size again and again (the graph renderer)
+// owns one and passes it; without one the coordinate is worked out for every pixel, with the same result.
+struct RampsGeometry {
+	const float* angleFor(int width, int height);
+
+private:
+	std::vector<float> angle;
+	int angleWidth = 0;
+	int angleHeight = 0;
+};
+void renderRamps(VideoFrame& out, int width, int height, const RampsParams& params, bool floatOut, const float* modLuma = nullptr, RampsGeometry* geometry = nullptr);
 
 struct FeedbackParams {
 	int ringSlotId = 0;
@@ -486,7 +497,8 @@ struct FeedbackParams {
 // Frame Delay (VRU-27). The picture is its source as it was `frames` ticks ago, from a ring of stored pictures
 // (frame_ring.hpp, slot ringSlotId). A tick is one count of frameCounter, which the module advances 60 times a
 // second of audio time, exactly as Feedback does. clearCounter changes when the module is reset. frames is 1 to
-// kFrameDelayMaxFrames. Before the ring holds a picture that old, the output is black.
+// kFrameDelayMaxFrames. Before the ring holds a picture that old, the output is black; once it has shown a picture, a
+// delay that is made longer holds its oldest picture until one is old enough (frameRingReadDelayed).
 constexpr int kFrameDelayMaxFrames = 30;
 struct FrameDelayParams {
 	int ringSlotId = 0;
@@ -555,6 +567,11 @@ struct ShapesParams {
 void renderShapes(std::vector<unsigned char>& rgba, int width, int height, const ShapesParams& params);
 // As renderRamps above: bytes, or float greys with floatOut.
 void renderShapes(VideoFrame& out, int width, int height, const ShapesParams& params, bool floatOut);
+// An optional faster renderer for the call above (the plugin's graphics-card one, src/shapes_gpu.cpp). It fills `out`
+// exactly as renderShapes would and returns true, or returns false and leaves the picture to the CPU code. Null (the
+// default, and always in the offline tests and tools) means CPU only. May be called from any thread that renders.
+using ShapesAccelerator = bool (*)(VideoFrame& out, int width, int height, const ShapesParams& params, bool floatOut);
+void setShapesAccelerator(ShapesAccelerator accelerator);
 
 // Video Mixer (VRU-22). Four picture buses, A to D, of which one is live and one is next; fader is how far the
 // next picture has come up over the live one (0 = live only, 1 = next only). A bus id of 0 means the picture is

@@ -1,4 +1,5 @@
 #include "plugin.hpp"
+#include "shapes_gpu.hpp"
 #include "audio_ring.hpp"
 #include "display_capture.hpp"
 #include "display_recorder.hpp"
@@ -265,7 +266,7 @@ struct Display : Module {
 	double recStartedAt = 0.0;     // nowSeconds() when the recorder's session was created; the REC tooltip's clock
 	std::string recFailureText;    // why the last recording failed; empty once a new one starts or none failed
 	std::string shotStatusText = "Screenshot ready";  // the SHOT tooltip
-	int pictureLines = kDisplayLinesNew;  // "Picture size": most rows of the picture; UI thread only, saved in the patch
+	int pictureLines = displayPreferredLines.load();  // "Picture size": most rows of the picture; UI thread only, saved in the patch
 
 	Display() {
 		config(PARAMS_LEN, INPUTS_LEN, OUTPUTS_LEN, LIGHTS_LEN);
@@ -373,9 +374,9 @@ struct Display : Module {
 		if (json_t* hpJ = json_object_get(rootJ, "panelHp")) {
 			panelHp = snapHp(static_cast<int>(json_integer_value(hpJ)));
 		}
-		// A patch saved before the choice existed has no key: it keeps its old 1080-line picture.
+		// Explicit patch choices take precedence over the last menu choice.
 		json_t* linesJ = json_object_get(rootJ, "pictureLines");
-		pictureLines = json_is_integer(linesJ) ? displayClampLines(json_integer_value(linesJ)) : kDisplayLinesOldPatch;
+		pictureLines = displayClampLines(json_integer_value(linesJ), displayPreferredLines.load());
 		if (json_t* folderJ = json_object_get(rootJ, "captureFolder")) {
 			if (json_is_string(folderJ)) {
 				captureFolder = json_string_value(folderJ);
@@ -700,6 +701,8 @@ struct DisplayBezelWidget : Widget {
 #ifdef __APPLE__
 void* displayWatchWake(GLFWwindow* window, std::function<void()> leaveFullscreen);
 void displayUnwatchWake(void* handle);
+// display_wake_mac.mm reports what it does at sleep and wake here.
+void displayWakeLog(const char* text) { INFO("%s", text); }
 #endif
 
 struct FullscreenPicture : OpaqueWidget {
@@ -865,7 +868,7 @@ struct DisplayFrameWidget : TransparentWidget {
 	// The picture is 4:3. Rows follow the on-screen height, clamped to [480, the Display's picture size choice],
 	// and width is four thirds of the rows, capped at 2048.
 	void renderSize(int& width, int& height) {
-		displayPictureSize(box.size.y * devicePixelScale(), module ? module->pictureLines : kDisplayLinesOldPatch, width, height);
+		displayPictureSize(box.size.y * devicePixelScale(), module ? module->pictureLines : displayPreferredLines.load(), width, height);
 	}
 
 	// Rounded picture outline, used for the background, the image and the edge stroke.
@@ -1250,6 +1253,7 @@ struct DisplayWidget : ModuleWidget {
 
 	void step() override {
 		ModuleWidget::step();
+		shapes_gpu::uiStep();
 		if (displayModule) {
 			// Runs for every Display every UI frame, drawn or not: button presses, worker results, lights.
 			displayModule->uiTick();
@@ -1308,6 +1312,11 @@ struct DisplayWidget : ModuleWidget {
 		menu->addChild(createCheckMenuItem("Full precision between modules", "",
 			[]() { return renderService().fullPrecision(); },
 			[]() { renderService().setFullPrecision(!renderService().fullPrecision()); }));
+		// Plugin-wide and saved with Rack's settings. On: Shapes pictures are drawn by the graphics card and read back
+		// (src/shapes_gpu.cpp). If the card or driver cannot do it, the menu says so and the CPU code draws them.
+		menu->addChild(createCheckMenuItem("Draw Shapes on the graphics card", shapes_gpu::status()[0] ? "not available" : "",
+			[]() { return shapes_gpu::enabled(); },
+			[]() { shapes_gpu::setEnabled(!shapes_gpu::enabled()); }));
 		if (displayModule) {
 			Display* m = displayModule;
 			menu->addChild(createSubmenuItem("Picture size", std::to_string(m->pictureLines) + " lines", [m](ui::Menu* sub) {
@@ -1318,7 +1327,7 @@ struct DisplayWidget : ModuleWidget {
 					// Changing the size while a recording runs would mix sizes in one movie, so it waits for the stop.
 					sub->addChild(createCheckMenuItem(std::to_string(lines) + " lines", std::to_string(cw) + "×" + std::to_string(ch),
 						[m, lines]() { return m->pictureLines == lines; },
-						[m, lines]() { m->pictureLines = lines; },
+						[m, lines]() { m->pictureLines = lines; displayPreferredLines.store(lines); },
 						m->recordingOn));
 				}
 			}));

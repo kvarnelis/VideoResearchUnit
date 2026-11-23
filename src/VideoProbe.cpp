@@ -179,7 +179,7 @@ struct VideoProbeFrameWidget : TransparentWidget {
 		if (!module) {
 			return;
 		}
-		const RenderService::Taken taken = renderService().touch(this, module->selectedBus.load(std::memory_order_relaxed), kW, kH);
+		const RenderService::Taken taken = renderService().touch(this, module->selectedBus.load(std::memory_order_relaxed), kW, kH, true);
 		if (!taken.fresh) {
 			return;
 		}
@@ -202,7 +202,7 @@ struct VideoProbeFrameWidget : TransparentWidget {
 			return;
 		}
 
-		const RenderService::Result picture = renderService().frame(this, module->selectedBus.load(std::memory_order_relaxed), kW, kH);
+		const RenderService::Result picture = renderService().frame(this, module->selectedBus.load(std::memory_order_relaxed), kW, kH, true);
 		const std::vector<unsigned char>& rgba = *picture.pixels;
 		const bool ok = picture.signal && rgba.size() == static_cast<size_t>(kW) * kH * 4u;
 		// With "Keep video running when hidden" on, step() takes every picture, drawn or not. Off, only draw() does.
@@ -289,6 +289,7 @@ struct VideoProbeWidget : ModuleWidget {
 		addChild(screen);
 
 		PANEL_PLACE_ALL(VIDEO_PROBE_LAYOUT)
+		quickenSlowKnob(this, VideoProbe::SLOW_PARAM);
 	}
 };
 

@@ -277,6 +277,12 @@ int main() {
 	const std::string exactReason(160, 'y');
 	CHECK_CONTAINS(msgYouTubeDownloadFailed(exactReason), exactReason);
 	CHECK(msgYouTubeDownloadFailed(exactReason).find("...") == std::string::npos);
+	CHECK(youtubeFailureMayPass("ERROR: unable to download video data: HTTP Error 403: Forbidden"));
+	CHECK(youtubeFailureMayPass("ERROR: [youtube] VRUtest0000: Unable to download webpage: HTTP Error 403: Forbidden"));
+	CHECK(!youtubeFailureMayPass(""));
+	CHECK(!youtubeFailureMayPass("ERROR: [youtube] VRUtest0000: Video unavailable"));
+	CHECK(!youtubeFailureMayPass("ERROR: unable to download video data: HTTP Error 404: Not Found"));
+	CHECK(!youtubeFailureMayPass("ERROR: [youtube] VRUtest0000: Requested format is not available"));
 	CHECK_CONTAINS(msgYouTubeNoMp4(), "MP4");
 	CHECK_CONTAINS(msgYouTubeNoMp4(), "H.264");
 	CHECK_CONTAINS(msgYouTubeNoMp4(), "Try another video.");

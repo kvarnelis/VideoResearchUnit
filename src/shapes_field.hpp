@@ -1,5 +1,6 @@
 #pragma once
 
+#include "render_pool.hpp"
 #include "video_engine.hpp"
 
 #include <algorithm>
@@ -913,7 +914,7 @@ inline std::shared_ptr<const FieldTable> buildFieldTable(const Scene& S, int bud
 	FieldSample unset;
 	unset.value = kUnset;
 	std::vector<FieldSample> node(static_cast<size_t>(W) * W, unset);
-	const int cores = std::clamp(static_cast<int>(std::thread::hardware_concurrency()), 1, 8);
+	const int cores = render_pool::threadBudget();
 	// REPEAT on: the home cell. REPEAT off: nothing repeats, so the table covers the frame itself, as a square
 	// around it as wide as its wider side, and squares wholly outside the frame are never measured.
 	float frameX0 = -kBig;
@@ -1241,7 +1242,8 @@ inline float busyness(const Scene& S) {
 	return static_cast<float>(calls) / kProbes;
 }
 
-inline Scene makeScene(const ShapesParams& in, int width, int height) {
+// wantTable false leaves the table out: the graphics-card renderer (src/shapes_gpu.cpp) works every pixel the long way.
+inline Scene makeScene(const ShapesParams& in, int width, int height, bool wantTable = true) {
 	Scene S;
 	S.width = width;
 	S.height = height;
@@ -1382,7 +1384,7 @@ inline Scene makeScene(const ShapesParams& in, int width, int height) {
 	// A scene that takes many outlines per pixel is cheaper to tabulate over the home cell (or, with REPEAT off,
 	// over the frame) and read back.
 	const long long pixels = static_cast<long long>(width) * height;
-	if (pixels >= kTableMinPixels) {
+	if (wantTable && pixels >= kTableMinPixels) {
 		const float nsPerPixel = (S.stretched ? 46.f : 20.f) * busyness(S);
 		if (nsPerPixel >= kTableMinNs) {
 			S.table = buildFieldTable(S, static_cast<int>(std::clamp<long long>(pixels / kTableBudgetDiv, 600, kTableMaxEvals)), nsPerPixel);

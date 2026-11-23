@@ -1,26 +1,27 @@
 #pragma once
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 
 // The Display's "Picture size" choice, shared by the module and the offline tests. No Rack dependencies.
 // The choice is the most rows (lines) the picture may have; the width follows at 4:3.
 
 constexpr int kDisplayLinesChoices[] = {1080, 720, 540};
-constexpr int kDisplayLinesOldPatch = 1080;  // a patch saved before the choice existed: its exact old output
-constexpr int kDisplayLinesNew = 720;        // a Display added now
+constexpr int kDisplayDefaultLines = 720;
+inline std::atomic<int> displayPreferredLines{kDisplayDefaultLines};
 constexpr int kDisplayMinRenderLines = 480;
 constexpr int kDisplayMaxRenderWidth = 2048;
 constexpr float kDisplayScreenAspect = 4.f / 3.f;
 
-// Snaps to a listed choice; anything else (a hand-edited patch) is the old-patch value.
-inline int displayClampLines(long long lines) {
+// Missing or unsupported choices use the caller's default.
+inline int displayClampLines(long long lines, int fallback) {
 	for (int choice : kDisplayLinesChoices) {
 		if (lines == choice) {
 			return choice;
 		}
 	}
-	return kDisplayLinesOldPatch;
+	return fallback;
 }
 
 // The picture size for a screen `wantedRows` device pixels tall: rows clamped to [480, maxLines], width at 4:3,

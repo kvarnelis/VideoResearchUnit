@@ -1,4 +1,5 @@
 #include "plugin.hpp"
+#include "shapes_gpu.hpp"
 #include "panel_style.hpp"
 #include "shapes_math.hpp"
 #include "video_bus.hpp"
@@ -121,6 +122,11 @@ struct ShapesReadout : TransparentWidget {
 };
 
 struct ShapesWidget : ModuleWidget {
+	void step() override {
+		ModuleWidget::step();
+		shapes_gpu::uiStep();
+	}
+
 	void addReadout(Shapes* module, Vec centreMm, int paramId) {
 		auto* r = new ShapesReadout;
 		r->module = module;

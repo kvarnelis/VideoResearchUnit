@@ -575,6 +575,18 @@ void testNoFlashUnderWriterContention() {
 	renderer.renderBus(bus, 8, 8);
 	check(renderer.hasSignal(), "the first picture has a signal");
 
+	// B supplies the whole mixed picture. A visibly different A exposes a partial fallback.
+	const int aBus = 42;
+	const int mixBus = 43;
+	RampsParams ramp;
+	videoBusPublishRamps(aBus, ramp);
+	BusMixerParams mix;
+	mix.busB = bus;
+	mix.mix = 1.f;
+	videoBusPublishBusMixer(mixBus, aBus, mix);
+	VideoGraphRenderer mixer;
+	const auto expected = mixer.renderBus(mixBus, 8, 8);
+	long partial = 0;
 	std::atomic<bool> done {false};
 	std::thread writer([&]() {
 		while (!done.load()) {
@@ -586,6 +598,9 @@ void testNoFlashUnderWriterContention() {
 	for (int i = 0; i < 200000; ++i) {
 		renderer.renderBus(bus, 8, 8);
 		++frames;
+		if (mixer.renderBus(mixBus, 8, 8) != expected) {
+			++partial;
+		}
 		if (!renderer.hasSignal()) {
 			++lost;
 		}
@@ -595,7 +610,13 @@ void testNoFlashUnderWriterContention() {
 	std::printf("  %ld renders, %ld without signal\n", frames, lost);
 	check(lost == 0, "the renderer never loses the signal while the bus is only being rewritten");
 
+	check(partial == 0, "a contended B never flashes A alone");
 	videoBusClear(bus);
+	VideoGraphRenderer reference;
+	const auto aOnly = reference.renderBus(aBus, 8, 8);
+	check(aOnly != expected && mixer.renderBus(mixBus, 8, 8) == aOnly, "clearing B restores the A-only fallback");
+	videoBusClear(aBus);
+	videoBusClear(mixBus);
 	renderer.renderBus(bus, 8, 8);
 	check(!renderer.hasSignal(), "a real clear still shows no signal at once");
 	videoExternalFrameRelease(frameId);

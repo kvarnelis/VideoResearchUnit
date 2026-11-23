@@ -6,7 +6,39 @@ modules, numbered VRU–01 to VRU–29. Rack's module browser lists them under t
 Out shows it. CV from any Rack module can drive the CV inputs, and two modules turn pictures into CV
 and back: Video Probe and Raster.
 
-This is version 2.4.0. It has been tested only on Apple silicon Macs.
+This is version 2.5.0. It has been tested only on Apple silicon Macs.
+
+## New in 2.5.0
+
+- [Vector Osc](#vru25-vector-osc) has a CV jack and an AMT attenuverter for every knob except FREQ, which keeps
+  V/OCT. FINE, VOICES, Y WAVE and LEVEL are new jacks; a signal in LEVEL makes the module its own VCA. The panel
+  is 16 HP, up from 12.
+- [Rotator](#vru20-rotator) has a CV jack for every control: PIVOT X, PIVOT Y, EDGE, FOLDS, STEP and GLIDE are
+  new. The word under EDGE, FOLDS, STEP and GLIDE follows the CV. The panel is 17 HP, up from 14, laid out as
+  six columns by two rows.
+- Heavy patches draw faster. At 1080 lines a patch that took 34 ms a picture takes 21 ms. The Scan Processor,
+  Bus Mixer, Wave Shaper, Colorizer and Ramps do less work for each picture, the glow of the beam modules is
+  cheaper, and a Mac with 16 or more cores spreads a picture over 12 threads, up from 8. With **Render video on
+  its own thread** on, a Video Probe takes its small picture from the Display's larger one and no longer draws
+  the chain a second time.
+- Shapes can draw on the graphics card using OpenGL. On macOS this is on by default. Display's **Draw Shapes on
+  the graphics card** menu setting switches it off, and Shapes falls back to the CPU when the graphics card
+  cannot be used.
+- [Frame Delay](#vru27-frame-delay) holds its oldest picture when FRAMES is made longer while it runs, as CV
+  does, where it used to go black until a picture that old had been stored.
+- The SLOW knobs on Video Probe, Raster and Scan Sync move one step for about 25 pixels of drag, where they
+  needed over 100.
+- If your Mac goes to sleep while a [Display](#vru16-display) picture is full screen, the Display goes back to
+  Rack's ordinary window first. Rack's window could be lost after the wake before.
+- Display REC takes the newest finished picture at each frame's deadline.
+- Display holds the last complete picture when a bus read is interrupted, including reads of a mixer input, a
+  lift picture or a modulation picture.
+- Display remembers the last picture size you chose across Rack restarts. New Displays and older patches
+  without a saved size use that choice, 720 lines at first. A Display with a saved size keeps its own.
+- Video Player retries a YouTube download when yt-dlp reports HTTP 403.
+- In a patch saved by an earlier version, Vector Osc and Rotator are wider than they were, so each overlaps a
+  module placed straight after it until you move one. Nothing else about an old patch changes: with no cable
+  in the new jacks, every picture is the same as before.
 
 ## New in 2.4.0
 
@@ -31,7 +63,7 @@ This is version 2.4.0. It has been tested only on Apple silicon Macs.
   the jacks are a table with columns A, B, C. Patches saved with the old panel load unchanged, and Rack
   moves the modules beside it along the row.
 - The [Display](#vru16-display) has a Picture size choice in its right-click menu: 1080, 720 or 540 lines.
-  A new Display starts at 720; a patch saved before 2.4.0 keeps 1080. Fewer lines draw faster.
+  Fewer lines draw faster.
 - Pictures are made faster: the work for each picture is shared across a pool of threads that stays running,
   the Scope Trace beam is drawn more cheaply, and Shapes no longer starts threads for every picture.
 - New patches: demo `9 - A Picture Through A Signal.vcv`, the self-playing `70s V slow tide.vcv`, and a
@@ -307,7 +339,8 @@ Press OPEN FILE, or right-click the module, to choose an mp4, m4v or mov file.
   END gives a pulse at the end of each clip.
 - For YouTube, right-click the module and paste a link. VRU runs yt-dlp to download one H.264 mp4 file
   into a cache folder in Rack's user folder and plays that file. Downloads are reused, and the menu
-  can open the folder.
+  can open the folder. If YouTube refuses the download (HTTP Error 403), VRU tries twice more before
+  it shows the error.
 - Install yt-dlp yourself, for example with `brew install yt-dlp`. YouTube often offers a single-file
   mp4 only up to 360p, so expect low resolution. That is untested on a real video.
 
@@ -422,6 +455,11 @@ Turns, zooms and slides the picture about a pivot you can move.
   with GLIDE to ease the move.
 - FOLDS cuts the picture into 2 to 12 wedges for a kaleidoscope.
 - EDGE is Black, Hold, Repeat or Mirror. RESET zeroes the spin and the notches.
+- Every knob has a CV jack. Each jack is straight below its knob; STEP, GLIDE, FOLDS and EDGE have theirs under the word that
+  shows their setting, and that word follows the CV. The NOTCH and RESET trigger jacks are at the top
+  left, above STEP. 10 V sweeps EDGE, FOLDS, STEP and GLIDE across their whole ranges and moves a pivot a whole
+  picture. It is 17 HP wide (14 HP before EDGE, FOLDS, STEP, GLIDE and the pivots had jacks; in an older
+  patch it overlaps a module placed straight after it until one of them is moved).
 - There is no perspective tilt.
 
 #### VRU–24 Focus
@@ -558,6 +596,8 @@ Second.
 - Until the delay has a picture that old it shows black, so a loop starts from nothing. If its source
   stops, the delay stops showing a picture (NO VIDEO), as Feedback does. Resetting the module clears
   what it holds.
+- When FRAMES is turned up while it runs, by hand or by CV, the delay holds the picture it was showing
+  until it has one old enough. It used to go black for that moment. Turned down, the change is at once.
 - The delay is counted in 60ths of a second of audio time, not in screen frames. If Rack draws slower
   than 60 a second, the delay is still the same length in time, so some frames are never shown. Every
   Display, every picture size and the Syphon Out see the same delayed picture.
@@ -572,12 +612,14 @@ Shows a bus inside Rack. It has three video inputs, A, B and C.
 - The SEL button, or the right-click Input menu, picks which input is on screen. THRU repeats the
   selected input's voltage, so you can keep patching from it.
 - Picture size, in the right-click menu, sets the most lines the picture may have: 1080 (1440 x 1080),
-  720 (960 x 720) or 540 (720 x 540). A new Display starts at 720. Fewer lines draw faster, so pick 720 or
-  540 when a heavy patch stutters. A patch saved before 2.4.0 loads at 1080, as it was.
+  720 (960 x 720) or 540 (720 x 540). Rack remembers the size you last chose in any Display: a new Display
+  starts at it (720 until you choose one), and so does a patch saved before 2.4.0, which has no size of
+  its own. A size saved in a patch always wins. Fewer lines draw faster, so pick 720 or 540 when a heavy
+  patch stutters.
 - Double-click the picture to fill your whole screen with it, scaled to fit with black around it. Click
   anywhere or press Esc to go back. Rack's own window returns to how it was. Full screen uses the screen
-  Rack is on; it does not use a second display. If your Mac sleeps while the picture is full screen, it
-  goes back to Rack when the Mac wakes.
+  Rack is on; it does not use a second display. If your Mac goes to sleep while the picture is full
+  screen, it goes back to Rack's ordinary window first, so the window is there when the Mac wakes.
 - SHOT saves a PNG. REC records an H.264 .mov, and a second press stops it. Files go to
   `~/Pictures/Video Research Unit` unless you pick another folder in the right-click menu. REC needs
   macOS.
@@ -696,7 +738,8 @@ Eight chaotic CV channels with three outputs each (X, Y and Z), 24 in all.
 #### VRU–25 Vector Osc
 
 A pair of oscillators made to feed Scope Trace's X IN and Y IN, so the XY picture is a rich figure that
-moves by itself. It is 12 HP wide.
+moves by itself. It is 16 HP wide (12 HP before the CV jacks below were added; in an older patch it
+overlaps a module placed straight after it until one of them is moved).
 
 - FREQ sets X, with a V/OCT jack.
 - RATIO sets how fast Y runs compared with X and snaps to whole and simple ratios (1:4 up to 9:1); FINE
@@ -708,8 +751,11 @@ moves by itself. It is 12 HP wide.
   breathes.
 - WAVE runs each voice from sine through triangle and saw to square; Y WAVE makes Y's shape differ from
   X's. LEVEL scales X and Y.
-- DETUNE, WAVE and PHASE have CV jacks, and a rising edge on SYNC restarts every voice, so a saved patch
-  always starts from the same figure.
+- Every knob except FREQ has a CV jack under it with an AMT attenuverter (minus 100% to plus 100%, 100% by
+  default): RATIO (1 V per step), FINE and Y WAVE (5 V is the whole way), PHASE (10 V is one turn), VOICES
+  (10 V sweeps 1 to 8), DETUNE, WAVE and LEVEL (10 V is full). LEVEL's jack makes the module its own VCA:
+  patch an envelope there. FREQ's jack is V/OCT and has no attenuverter.
+- A rising edge on SYNC restarts every voice, so a saved patch always starts from the same figure.
 - The outputs are X and Y (±5 V) and Z (0 to 10 V brightness: bright where the trace moves slowly, dim
   where it moves fast; patch it to Scope Trace's Z CV jack).
 
@@ -833,7 +879,7 @@ https://commons.wikimedia.org/wiki/File:Muybridge_race_horse_animated.gif
 
 ## Old patches
 
-Patches saved by earlier versions load in version 2.4.0. The new inputs and options are added so that
+Patches saved by earlier versions load in version 2.5.0. The new inputs and options are added so that
 an old patch makes the same picture as before: Feedback's "Fade trails fully to black" loads off, and
 FM IN, MOD IN, LIFT IN and the settings that default to off change nothing until you use them.
 

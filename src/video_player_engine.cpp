@@ -467,7 +467,21 @@ void Engine::loadSource(bool youtube, const std::string& text) {
 				return;
 			}
 			std::string error;
-			const Download result = download(exe, id, path, error);
+			Download result = Download::Failed;
+			const Clock::time_point started = Clock::now();
+			const int attempts = options_.youtubeAttempts < 1 ? 1 : options_.youtubeAttempts;
+			for (int attempt = 1; attempt <= attempts; ++attempt) {
+				bool mayPass = false;
+				result = download(exe, id, path, started, error, mayPass);
+				if (result != Download::Failed || !mayPass || attempt == attempts) {
+					break;
+				}
+				// YouTube refused this run. The same download often works a moment later.
+				if (!waitBeforeRetry(started)) {
+					result = Download::Cancelled;
+					break;
+				}
+			}
 			if (result == Download::Cancelled) {
 				return;  // a newer request or shutdown; the loop deals with it
 			}
@@ -530,12 +544,43 @@ bool Engine::openPath(const std::string& path, std::string& error) {
 	return true;
 }
 
+void Engine::showDownloadSeconds(Clock::time_point started, int& shownSeconds) {
+	const int seconds = static_cast<int>(std::chrono::duration_cast<std::chrono::seconds>(Clock::now() - started).count());
+	if (seconds != shownSeconds) {
+		shownSeconds = seconds;
+		message_ = msgYouTubeDownloading(seconds);
+		messageIsError_ = false;
+		publishSnapshot(true);
+	}
+}
+
+bool Engine::waitBeforeRetry(Clock::time_point started) {
+	const Clock::time_point until = Clock::now() +
+		std::chrono::duration_cast<Clock::duration>(std::chrono::duration<double>(options_.youtubeRetryWaitSeconds));
+	int shownSeconds = -1;
+	for (;;) {
+		if (quit_.load() || requestPending()) {
+			return false;
+		}
+		const Clock::time_point now = Clock::now();
+		if (now >= until) {
+			return true;
+		}
+		showDownloadSeconds(started, shownSeconds);
+		const Clock::duration left = until - now;
+		const Clock::duration slice = std::chrono::milliseconds(50);
+		std::this_thread::sleep_for(left < slice ? left : slice);
+	}
+}
+
 Engine::Download Engine::download(const std::string& exe, const std::string& videoId,
-	const std::string& cachePath, std::string& error) {
+	const std::string& cachePath, Clock::time_point started, std::string& error, bool& mayPass) {
+	mayPass = false;
 #ifdef _WIN32
 	(void) exe;
 	(void) videoId;
 	(void) cachePath;
+	(void) started;
 	error = msgNotMacOs();
 	return Download::Failed;
 #else
@@ -589,7 +634,6 @@ Engine::Download Engine::download(const std::string& exe, const std::string& vid
 		return Download::Failed;
 	}
 
-	const Clock::time_point started = Clock::now();
 	int shownSeconds = -1;
 	std::string partial;
 	std::string lastLine;
@@ -647,13 +691,7 @@ Engine::Download Engine::download(const std::string& exe, const std::string& vid
 			break;
 		}
 
-		const int seconds = static_cast<int>(std::chrono::duration_cast<std::chrono::seconds>(Clock::now() - started).count());
-		if (seconds != shownSeconds) {
-			shownSeconds = seconds;
-			message_ = msgYouTubeDownloading(seconds);
-			messageIsError_ = false;
-			publishSnapshot(true);
-		}
+		showDownloadSeconds(started, shownSeconds);
 
 		struct pollfd waitFor;
 		waitFor.fd = fds[0];
@@ -704,6 +742,7 @@ Engine::Download Engine::download(const std::string& exe, const std::string& vid
 			lastLine = "it was stopped by signal " + std::to_string(WTERMSIG(status));
 		}
 	}
+	mayPass = youtubeFailureMayPass(lastLine);
 	error = msgYouTubeDownloadFailed(lastLine);
 	return Download::Failed;
 #endif

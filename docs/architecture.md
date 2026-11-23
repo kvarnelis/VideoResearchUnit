@@ -2,7 +2,7 @@
 
 ## Names
 
-The plugin is Video Research Unit (VRU), version 2.4.0, with 29 modules (VRU–01 to VRU–29). Version 2.4.0 adds Scan Sync (VRU–28), Raster (VRU–29), Video Probe's SCAN and the video clock. Version 2.3.0 added these. Video Probe (VRU–26) turns a picture into CV, the first module to do that. The Scan Processor has a LIFT IN bus input. The Octoscillator has five presets. Frame Delay (VRU–27) holds a picture for a number of frames, and a picture can loop back through it. A picture that feeds several modules is drawn once per pass instead of once per module. Display, Syphon Out and Video Probe take their pictures from one shared render service, with two Display menu settings: "Keep video running when hidden" (on by default) and "Render video on its own thread" (off by default). Feedback has a "Fade trails fully to black" setting. The Display menu setting "Full precision between modules" (off by default) passes pictures between modules as floating point and rounds to 8 bits once, where a picture leaves the graph. Three modules take a picture as a modulation input: FM IN on the Video Oscillator, and MOD IN on Ramps, Keyer and Color Lab. The public bus API has version 2, with a float read, a tick, and the native size of a source. The offline tool vru-render-patch draws what a Display in a patch would show, without Rack. It was called RasterLab before
+The plugin is Video Research Unit (VRU), version 2.5.0, with 29 modules (VRU–01 to VRU–29). Version 2.5.0 adds CV jacks and attenuverters to Vector Osc, CV jacks for every Rotator control, the render speed-ups of "Render speed" in AGENTS.md, Shapes on the graphics card, and fixes to Frame Delay and to the Display's full screen at sleep. Version 2.4.0 adds Scan Sync (VRU–28), Raster (VRU–29), Video Probe's SCAN and the video clock. Version 2.3.0 added these. Video Probe (VRU–26) turns a picture into CV, the first module to do that. The Scan Processor has a LIFT IN bus input. The Octoscillator has five presets. Frame Delay (VRU–27) holds a picture for a number of frames, and a picture can loop back through it. A picture that feeds several modules is drawn once per pass instead of once per module. Display, Syphon Out and Video Probe take their pictures from one shared render service, with two Display menu settings: "Keep video running when hidden" (on by default) and "Render video on its own thread" (off by default). Feedback has a "Fade trails fully to black" setting. The Display menu setting "Full precision between modules" (off by default) passes pictures between modules as floating point and rounds to 8 bits once, where a picture leaves the graph. Three modules take a picture as a modulation input: FM IN on the Video Oscillator, and MOD IN on Ramps, Keyer and Color Lab. The public bus API has version 2, with a float read, a tick, and the native size of a source. The offline tool vru-render-patch draws what a Display in a patch would show, without Rack. It was called RasterLab before
 2.8.0. Every module has a catalogue number, VRU–01 to VRU–27, and Rack's module browser shows
 `VRU–01 Deflection Yoke`. The table is in `AGENTS.md`. The plugin slug is `VideoResearchUnit`. Version 2.1.0 renamed two module slugs, Wobbulator to DeflectionYoke and RuttEtra to ScanProcessor; `scripts/migrate-slug.py` migrates patches saved with 2.0.0.
 
@@ -521,6 +521,14 @@ NOTCH steps (1/16, 1/12, 1/8, 1/6, 1/4 turn, constant-speed GLIDE toward a targe
 sample, and `rotatorAngle` adds knob, CV (10 V = one turn), spin and notch, then wraps in double to
 [-0.5, 0.5) so a 0 to 10 V saw has no seam.
 
+CV for the rest (added in 2.5.0): PIVOT X, PIVOT Y, EDGE, FOLDS, STEP and GLIDE have jacks, input ids appended
+after `RESET_INPUT`. `rotatorCv` is knob + volts x scale inside the knob's range (pivots 0.1 a volt, GLIDE 0.2 s a
+volt) and `rotatorSteppedCv` rounds that to a position (EDGE 0.3, FOLDS 1.1, STEP 0.4 a volt, so 10 V sweeps each).
+An open jack gives the knob's own value, so an old patch draws the same frames (checked against every patch in
+`patches/`). The module keeps the four second-row values with CV in atomics for `RotatorReadout`. The panel is 17 HP, six columns by two rows with no empty place,
+from `src/rotator_layout.hpp` (it was 14 HP; Rack does not push neighbours aside, so an older patch overlaps a
+module placed straight after the Rotator until one is moved).
+
 ### Feedback
 
 Feedback owns a frame ring with capacity 1. Each pass inverse-maps the previous
@@ -589,6 +597,12 @@ CV 1; output BUS 0; light SIG 0. 7 HP (the smallest the header fits, as the Syph
   service's passes, whichever Display, Syphon Out, Video Probe or API read started them. A source that fails to
   draw (a zero-delay loop inside it, or too deep) stores nothing and does not change the root's own status; the
   delay then keeps showing older pictures, or black.
+- **FRAMES made longer.** The ring keeps only the pictures the current FRAMES needs (`frames + 1`). When FRAMES goes
+  up while the delay runs, as CV on FRAMES does, no stored picture is that old yet. The leaf then shows the oldest
+  picture it has, which is the one that was on screen, until that picture is old enough (`frameRingReadDelayed`): a
+  freeze of as many ticks as the delay grew by. Before this it went black for those ticks, which showed as blanking
+  in a patch that steps FRAMES with a random voltage. Black is still what it shows before its first picture: at the
+  start and after a reset. FRAMES made shorter takes effect at once, and drops the pictures no longer needed.
 - **The clock.** The delay is counted by the same counter Feedback uses: `process()` adds `args.sampleTime` and
   steps `frameCounter` every 1/60 s of audio time. Not the service tick (a UI frame): that one is 60 Hz only when
   Rack draws at 60 Hz, runs at 30 Hz for hidden pictures, does not exist for the API (every read is its own tick)
@@ -627,6 +641,13 @@ CV 1; output BUS 0; light SIG 0. 7 HP (the smallest the header fits, as the Syph
   the MAT BUS luma when MATTE is above zero.
 - Matte (6): the MAT BUS luma keys A (dark) into B (bright). INV MAT inverts
   the key. With no MAT BUS, Matte falls back to the MIX knob.
+- Speed: with byte pictures and no matte in use, an output byte depends only on
+  its two input bytes, so a picture of 65536 pixels or more is looked up in a
+  table of all 65536 pairs. The table is made by the pixel loop itself, run over
+  two small pictures that hold every pair once, so it holds exactly the loop's
+  bytes; it is kept while MODE and the mix are unchanged. Wave Shaper does the
+  same in RGB mode with a table of 256 values. `tests/pointwise_table_test.cpp`
+  checks every pair, mode and a set of mixes and settings against the loop.
 
 ### Video Mixer
 
@@ -754,6 +775,11 @@ drive it), `VideoMixerParams` in `src/video_engine.hpp`, and `renderVideoMixerNo
 - MIX selects A, the average of A and B, centred A minus B, or A times B.
 - Parameters are sampled per frame. The bus and 128 x 84 panel preview both
   call `renderRamps()`; it produces opaque grayscale pixels without render state.
+- Speed: the ANGLE coordinate of a pixel depends only on the picture size, so
+  the graph renderer keeps it in a table per size (`RampsGeometry`,
+  `src/video_engine.hpp`) instead of taking an arctangent per pixel per picture,
+  and a layer works out only the two wave shapes it blends. The bytes and the
+  float picture are unchanged.
 
 ### Bars and Rows
 
@@ -1321,6 +1347,12 @@ A beam node follows the same steps each render:
 
 Scope Trace and the Deflection Yoke both run this pattern. Their state is `VideoGraphRenderer::beam`,
 indexed by bus id.
+
+`Glow::compute` only averages the energy into cells and blurs them. The glow of a picture row is worked out by
+`toneMap` as it goes (`Glow::row`), into a row buffer of the thread's own, so no picture-sized glow field is written
+and read back. The cell sums are added in a fixed order whatever the compiler flags (`VRU_FP_KEEP_ORDER` in
+`src/crt_beam.cpp`): the plugin is built with `-funsafe-math-optimizations`, which otherwise lets the compiler
+reorder a run of float additions and move a pixel by one level.
 
 ## Scan-time signal model
 
@@ -2267,7 +2299,12 @@ Decisions:
 - **YouTube.** yt-dlp is found in `/opt/homebrew/bin`, then `/usr/local/bin`, then PATH. The format
   is `best[ext=mp4][vcodec^=avc1][height<=1080]` with `--no-playlist`: one H.264 file that
   AVFoundation plays and no ffmpeg merge. It is saved as `<video ID>.mp4` in
-  `asset::user("VideoResearchUnit-video-cache")` and reused on later loads. Nothing is installed. A missing
+  `asset::user("VideoResearchUnit-video-cache")` and reused on later loads. Nothing is installed. When
+  yt-dlp's last line says YouTube refused the request ("HTTP Error 403", `youtubeFailureMayPass`), the
+  engine runs yt-dlp again: up to three runs for one link, two seconds apart
+  (`EngineOptions::youtubeAttempts`, `youtubeRetryWaitSeconds`). YouTube refuses a download now and
+  then that works a moment later, and yt-dlp does not retry a 403 itself. Every other failure is
+  shown after the first run. A new source or removing the module ends the pause at once. A missing
   yt-dlp, a failed download and
   "YouTube has no single-file MP4 (H.264) version of this video, so it cannot be played here. Try another video."
   each give a plain message. YouTube often offers a single-file MP4 only up to 360p (not tested
@@ -2355,6 +2392,13 @@ and has no bus output. `VideoProbe.cpp` owns the knobs, jacks and the preview wi
   picture, as before. When Rack's window is minimised nothing in this plugin can run if Rack stops calling
   `step()` then; the SDK headers do not say, and this has not been checked in Rack. The hand-off does not
   tell `process()` that frames have stopped; the SIG light (frame counter checked every 0.1 s) is the only sign.
+- One render, not two. The probe asks the render service for its picture with `mayDerive` set. With "Render video
+  on its own thread" on, while a Display, Syphon Out or API reader has the same bus drawn larger in the same 4:3
+  shape, the service does not draw the graph again at 320 x 240: it averages the larger picture down
+  (`src/frame_downsample.hpp`, a box average). The probe's values are then those of the larger picture made small,
+  which differ a little from the graph drawn small (a Scan Processor's lines are finer at 1080 rows than at 240).
+  When the larger consumer goes, the bus is drawn at 320 x 240 again. The UI-driven modes ignore the flag.
+  `tests/render_derive_test.cpp`.
 - Panel (20 HP): the preview at the top (58.7 x 44 mm), a row of X, Y, SIZE, SMOOTH and LEVEL knobs at y 76, AMT
   trimmers for X and Y and the SIG light at y 90, the X, Y and BUS IN jacks at y 103, and eight outputs on plates
   at y 119 (LUMA, R, G, B, AVG, MOTION, GATE, FRAME), 11.8 mm apart on 11.2 mm plates, MOTION and FRAME in smaller type.
@@ -2367,6 +2411,18 @@ CV and audio only: no video bus, no frames. It is the signal source that `docs/s
 asks for ("Vector Osc"), so Scope Trace stays a sink. `VectorOsc.cpp` reads the knobs and jacks, and
 `src/vector_osc_math.hpp` (namespace `vector_osc`, no Rack types) does the work in `Engine::process`.
 
+- CV (added in 2.5.0). Every knob except FREQ has a CV jack and an attenuverter, laid out from
+  `src/vector_osc_layout.hpp` (16 HP; the panel was 12 HP, and Rack does not push neighbours aside, so in an
+  older patch it overlaps a module placed straight after it until one of them is moved). The sums are the
+  `...WithCv` functions in `vector_osc_math.hpp`: value = knob + volts x amount x scale, then the knob's own
+  limits. Scales: RATIO 1 step a volt (rounded to whole steps), PHASE 0.1 turn a volt, DETUNE, WAVE and LEVEL
+  0.1 a volt, FINE and Y WAVE 0.2 a volt, VOICES 0.7 a volt. The attenuverters default to 1, where the
+  RATIO, PHASE, DETUNE and WAVE sums are the old expressions value for value (`tests/vector_osc_test.cpp`
+  checks this), and a patch saved before them loads them at that default. Ids are append-only: params
+  `RATIO_CV_PARAM`, `PHASE_CV_PARAM`, `DETUNE_CV_PARAM`, `WAVE_CV_PARAM`, `FINE_CV_PARAM`, `VOICES_CV_PARAM`,
+  `WAVE_Y_CV_PARAM`, `LEVEL_CV_PARAM` after `LEVEL_PARAM`; inputs `FINE_INPUT`, `VOICES_INPUT`,
+  `WAVE_Y_INPUT`, `LEVEL_INPUT` after `SYNC_INPUT`. V/OCT has no attenuverter. VOICES can change from sample
+  to sample; a voice that drops out keeps its phase and rejoins from there.
 - Two sides, X and Y, each the average of 1 to 8 voices. X runs at FREQ (C4 times 2 to the knob plus
   V/OCT, 0.06 Hz to 8 kHz). Y runs at X times RATIO; the RATIO knob is a snap list of 19 whole and simple
   ratios (`kRatios`), the RATIO jack adds whole steps (1 V per step) and FINE multiplies by up to plus or

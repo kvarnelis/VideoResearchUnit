@@ -1,4 +1,5 @@
 #include "render_service.hpp"
+#include "frame_downsample.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -362,7 +363,7 @@ void RenderService::renderEntry(SizeState& state, Entry& entry, int busId, int w
 	else {
 		// Hold the last picture for a cycle, or for a read the writer kept interrupting: the same rule a
 		// private renderer follows.
-		const bool hold = (status == VideoGraphRenderer::Status::Cycle || (status == VideoGraphRenderer::Status::Empty && state.renderer.wasContended())) &&
+		const bool hold = (status == VideoGraphRenderer::Status::Cycle || status == VideoGraphRenderer::Status::Contended) &&
 			entry.goodWidth == width && entry.goodHeight == height && entry.good && !entry.good->empty();
 		entry.signal = hold;
 	}
@@ -372,9 +373,9 @@ RenderService::Result RenderService::frame(int busId, int width, int height) {
 	return frame(nullptr, busId, width, height);
 }
 
-RenderService::Result RenderService::frame(const void* owner, int busId, int width, int height) {
+RenderService::Result RenderService::frame(const void* owner, int busId, int width, int height, bool mayDerive) {
 	if (threadOn.load(std::memory_order_acquire)) {
-		return frameThreaded(owner, busId, width, height);
+		return frameThreaded(owner, busId, width, height, mayDerive);
 	}
 	std::lock_guard<std::mutex> lock(mutex);
 	advanceTick();
@@ -407,9 +408,9 @@ RenderService::Result RenderService::frame(const void* owner, int busId, int wid
 	return result;
 }
 
-RenderService::Taken RenderService::touch(const void* owner, int busId, int width, int height) {
+RenderService::Taken RenderService::touch(const void* owner, int busId, int width, int height, bool mayDerive) {
 	if (threadOn.load(std::memory_order_acquire)) {
-		return touchThreaded(owner, busId, width, height);
+		return touchThreaded(owner, busId, width, height, mayDerive);
 	}
 	std::lock_guard<std::mutex> lock(mutex);
 	Taken taken;
@@ -473,6 +474,11 @@ void RenderService::forget(const void* owner) {
 uint64_t RenderService::renderTotal() const {
 	std::lock_guard<std::mutex> lock(mutex);
 	return renderCounter;
+}
+
+uint64_t RenderService::derivedTotal() const {
+	std::lock_guard<std::mutex> lock(mutex);
+	return derivedCounter;
 }
 
 size_t RenderService::registrationCount() const {
@@ -814,7 +820,7 @@ void RenderService::runTickForTest() {
 	runTick(now());
 }
 
-RenderService::ThreadReg& RenderService::registerThreaded(const void* owner, int busId, int width, int height, double t) {
+RenderService::ThreadReg& RenderService::registerThreaded(const void* owner, int busId, int width, int height, double t, bool mayDerive) {
 	// pubMutex is held by the caller.
 	ThreadReg* reg = nullptr;
 	for (ThreadReg& r : threadRegs) {
@@ -836,6 +842,7 @@ RenderService::ThreadReg& RenderService::registerThreaded(const void* owner, int
 		reg->shown = 0;
 	}
 	reg->lastSeen = t;
+	reg->mayDerive = mayDerive;
 	return *reg;
 }
 
@@ -845,7 +852,7 @@ bool validRequest(int busId, int width, int height) {
 }
 }
 
-RenderService::Result RenderService::frameThreaded(const void* owner, int busId, int width, int height) {
+RenderService::Result RenderService::frameThreaded(const void* owner, int busId, int width, int height, bool mayDerive) {
 	Result result;
 	result.pixels = &none;
 	if (!validRequest(busId, width, height)) {
@@ -854,7 +861,7 @@ RenderService::Result RenderService::frameThreaded(const void* owner, int busId,
 	const double t = now();
 	{
 		std::lock_guard<std::mutex> lock(pubMutex);
-		ThreadReg& reg = registerThreaded(owner, busId, width, height, t);
+		ThreadReg& reg = registerThreaded(owner, busId, width, height, t, mayDerive);
 		const auto it = pubs.find(PubKey(sizeKey(width, height), busId));
 		if (it == pubs.end() || it->second.stamp == 0) {
 			result.pending = true;
@@ -879,7 +886,7 @@ RenderService::Result RenderService::frameThreaded(const void* owner, int busId,
 	return result;
 }
 
-RenderService::Taken RenderService::touchThreaded(const void* owner, int busId, int width, int height) {
+RenderService::Taken RenderService::touchThreaded(const void* owner, int busId, int width, int height, bool mayDerive) {
 	Taken taken;
 	taken.pixels = &none;
 	if (!owner || !validRequest(busId, width, height)) {
@@ -888,7 +895,7 @@ RenderService::Taken RenderService::touchThreaded(const void* owner, int busId, 
 	const double t = now();
 	{
 		std::lock_guard<std::mutex> lock(pubMutex);
-		ThreadReg& reg = registerThreaded(owner, busId, width, height, t);
+		ThreadReg& reg = registerThreaded(owner, busId, width, height, t, mayDerive);
 		const auto it = pubs.find(PubKey(sizeKey(width, height), busId));
 		if (it != pubs.end() && it->second.stamp != 0 && it->second.stamp != reg.taken) {
 			const Pub& pub = it->second;
@@ -1012,14 +1019,35 @@ void RenderService::runTick(double t) {
 		threadRegs.erase(std::remove_if(threadRegs.begin(), threadRegs.end(), [t](const ThreadReg& r) { return t - r.lastSeen > kRegistrationSeconds; }), threadRegs.end());
 		for (const ThreadReg& r : threadRegs) {
 			bool seen = false;
-			for (const Job& j : jobs) {
+			for (Job& j : jobs) {
 				if (j.busId == r.busId && j.width == r.width && j.height == r.height) {
+					j.mayDerive = j.mayDerive && r.mayDerive;
 					seen = true;
 					break;
 				}
 			}
 			if (!seen) {
-				jobs.push_back(Job {r.busId, r.width, r.height});
+				jobs.push_back(Job {r.busId, r.width, r.height, r.mayDerive, 0, 0});
+			}
+		}
+		// A picture every one of whose consumers said mayDerive (Video Probe) is not rendered while the same bus is being
+		// rendered larger, in the same shape, for a consumer that did not say so: it is that picture averaged down. The
+		// largest such picture is the one used.
+		for (Job& j : jobs) {
+			if (!j.mayDerive) {
+				continue;
+			}
+			int64_t bestArea = 0;
+			for (const Job& k : jobs) {
+				if (k.mayDerive || k.busId != j.busId || k.width < j.width || k.height < j.height || (k.width == j.width && k.height == j.height)) {
+					continue;
+				}
+				const int64_t area = static_cast<int64_t>(k.width) * k.height;
+				if (area > bestArea && frame_downsample::sameShape(k.width, k.height, j.width, j.height)) {
+					bestArea = area;
+					j.fromWidth = k.width;
+					j.fromHeight = k.height;
+				}
 			}
 		}
 		// A picture nobody is registered for any more is dropped.
@@ -1064,8 +1092,8 @@ void RenderService::runTick(double t) {
 		SizeState* state = nullptr;
 		bool begun = false;
 		for (const Job& j : jobs) {
-			if (sizeKey(j.width, j.height) != key) {
-				continue;
+			if (sizeKey(j.width, j.height) != key || j.fromWidth != 0) {
+				continue;  // another size, or a picture taken from a larger one below
 			}
 			if (!state) {
 				state = &stateFor(j.width, j.height, false);
@@ -1095,6 +1123,47 @@ void RenderService::runTick(double t) {
 			}
 			pubCv.notify_all();
 		}
+	}
+
+	// The pictures that are a larger one averaged down. Their source was rendered above, in this tick. The small size
+	// keeps its state (its buffers come from its own pool, and it is not aged out while it is used this way), but its
+	// renderer does not run, so its stateful nodes stand still until the bus is drawn at this size again.
+	for (const Job& j : jobs) {
+		if (j.fromWidth == 0) {
+			continue;
+		}
+		const auto from = sizes.find(sizeKey(j.fromWidth, j.fromHeight));
+		const Entry* source = from != sizes.end() ? &from->second->entries[static_cast<size_t>(j.busId)] : nullptr;
+		const size_t sourceBytes = static_cast<size_t>(j.fromWidth) * static_cast<size_t>(j.fromHeight) * 4u;
+		const bool have = source && source->signal && source->good && source->good->size() == sourceBytes;
+		SizeState& state = stateFor(j.width, j.height, false);
+		state.lastUsed = serial;
+		state.useSeq = ++useCounter;
+		Entry& entry = state.entries[static_cast<size_t>(j.busId)];
+		if (have) {
+			std::shared_ptr<Frame> buffer = acquireBuffer(state, false);
+			buffer->beginU8(static_cast<size_t>(j.width) * static_cast<size_t>(j.height) * 4u);
+			buffer->precise.clear();
+			frame_downsample::box(source->good->data(), j.fromWidth, j.fromHeight, buffer->data(), j.width, j.height);
+			entry.good = std::move(buffer);
+			entry.goodWidth = j.width;
+			entry.goodHeight = j.height;
+			++derivedCounter;
+		}
+		entry.signal = have;
+		entry.ok = have && source->ok;
+		entry.cycle = source && source->cycle;
+		{
+			std::lock_guard<std::mutex> pubLock(pubMutex);
+			Pub& pub = pubs[PubKey(sizeKey(j.width, j.height), j.busId)];
+			pub.frame = entry.signal ? entry.good : nullptr;
+			pub.signal = entry.signal;
+			pub.cycle = entry.cycle;
+			pub.ok = entry.ok;
+			pub.stamp = ++pubCounter;
+			pub.tick = serial;
+		}
+		pubCv.notify_all();
 	}
 }
 

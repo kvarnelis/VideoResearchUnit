@@ -68,3 +68,17 @@ struct RotatorState {
 		}
 	}
 };
+
+// CV for the controls that got jacks later (PIVOT X, PIVOT Y, EDGE, FOLDS, STEP, GLIDE): the knob plus volts times a
+// scale, kept inside the knob's own range. An open jack reads 0 V and leaves the knob exactly as it is. Scales: the
+// pivots move a whole frame in 10 V (0.1 a volt, as X and Y do); 10 V sweeps EDGE (0.3), FOLDS (1.1), STEP (0.4) and
+// GLIDE (0.2 s a volt) across their whole ranges.
+inline float rotatorCv(float knob, float volts, float perVolt, float lo, float hi) {
+	const float v = std::isfinite(volts) ? (volts < -20.f ? -20.f : (volts > 20.f ? 20.f : volts)) : 0.f;
+	const float sum = knob + v * perVolt;
+	return sum < lo ? lo : (sum > hi ? hi : sum);
+}
+// The same for a stepped knob: the sum rounded to a whole position.
+inline int rotatorSteppedCv(float knob, float volts, float perVolt, int lo, int hi) {
+	return static_cast<int>(std::lround(rotatorCv(knob, volts, perVolt, static_cast<float>(lo), static_cast<float>(hi))));
+}

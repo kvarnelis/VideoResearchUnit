@@ -13,6 +13,7 @@ struct RingSlot {
 	int head = 0;
 	int count = 0;
 	int clearCounter = 0;
+	bool served = false;  // frameRingReadDelayed has given a picture since the last clear
 	std::atomic<bool> byteFallback {false};
 };
 std::array<RingSlot, kFrameRingSlotCount> slots;
@@ -34,6 +35,7 @@ void frameRingReleaseSlot(int slotId) {
 		std::lock_guard<std::mutex> lock(slot.mutex);
 		slot.entries = std::vector<FrameRingFrame>(1);
 		slot.head = slot.count = slot.clearCounter = 0;
+		slot.served = false;
 		slot.byteFallback.store(false, std::memory_order_relaxed);
 	}
 	slotIds.release(slotId);
@@ -147,6 +149,31 @@ bool frameRingReadAtLeastAge(int slotId, int frameCounter, int minAge, FrameRing
 	return false;
 }
 
+bool frameRingReadDelayed(int slotId, int frameCounter, int minAge, FrameRingFrame& out) {
+	if (!validSlotId(slotId) || minAge < 0) return false;
+	constexpr int wrap = 1 << 30;
+	RingSlot& slot = slots[static_cast<size_t>(slotId - 1)];
+	std::lock_guard<std::mutex> lock(slot.mutex);
+	const int capacity = static_cast<int>(slot.entries.size());
+	const FrameRingFrame* oldest = nullptr;
+	for (int age = 0; age < slot.count; ++age) {
+		const FrameRingFrame& entry = slot.entries[static_cast<size_t>((slot.head - age + capacity) % capacity)];
+		const int ticks = ((frameCounter - entry.frameCounter) % wrap + wrap) % wrap;
+		if (ticks >= wrap / 2) continue;
+		if (ticks >= minAge) {
+			out = entry;
+			slot.served = true;
+			return true;
+		}
+		oldest = &entry;  // entries are visited newest first, so the last one seen is the oldest
+	}
+	if (slot.served && oldest) {
+		out = *oldest;
+		return true;
+	}
+	return false;
+}
+
 void frameRingClear(int slotId, int clearCounter) {
 	if (!validSlotId(slotId)) return;
 	RingSlot& slot = slots[static_cast<size_t>(slotId - 1)];
@@ -159,5 +186,6 @@ void frameRingClear(int slotId, int clearCounter) {
 	}
 	slot.count = 0;
 	slot.head = 0;
+	slot.served = false;
 	slot.clearCounter = clearCounter;
 }

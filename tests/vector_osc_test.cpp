@@ -209,6 +209,46 @@ int main() {
 		check(v::fineFactor(1.f) > 1.05f && v::fineFactor(1.f) < 1.06f, "FINE at the top is one semitone up");
 	}
 
+	// CV jacks and their attenuverters. At amount 1 each one is the sum the module used before the attenuverters
+	// existed, value for value; at 0 the jack does nothing; at -1 it works the other way.
+	{
+		bool same = true, off = true, mirror = true, limits = true;
+		for (int i = -24; i <= 24; ++i) {
+			const float cv = i * .93f;
+			for (float k = 0.f; k <= 1.f; k += .125f) {
+				same &= v::phaseWithCv(k, cv, 1.f) == k + v::sane(cv, -20.f, 20.f) * .1f;
+				same &= v::detuneWithCv(k, cv, 1.f) == v::sane(k + v::sane(cv, -20.f, 20.f) * .1f, 0.f, 1.f);
+				same &= v::waveWithCv(k, cv, 1.f) == v::sane(k + v::sane(cv, -20.f, 20.f) * .1f, 0.f, 1.f);
+				same &= v::ratioStepWithCv(k * 18.f, cv, 1.f) == v::ratioIndex(k * 18.f + std::round(v::sane(cv, -20.f, 20.f)));
+				off &= v::phaseWithCv(k, cv, 0.f) == k && v::detuneWithCv(k, cv, 0.f) == k && v::waveWithCv(k, cv, 0.f) == k;
+				off &= v::levelWithCv(k, cv, 0.f) == k && v::fineWithCv(k, cv, 0.f) == k && v::waveYWithCv(k, cv, 0.f) == k;
+				off &= v::ratioStepWithCv(7.f, cv, 0.f) == 7 && v::voicesWithCv(5.f, cv, 0.f) == 5;
+				mirror &= v::phaseWithCv(k, cv, -1.f) == v::phaseWithCv(k, -cv, 1.f) && v::levelWithCv(k, cv, -1.f) == v::levelWithCv(k, -cv, 1.f);
+				const int n = v::voicesWithCv(1.f + k * 7.f, cv, 1.f);
+				limits &= n >= 1 && n <= v::kMaxVoices;
+				limits &= v::levelWithCv(k, cv, 1.f) >= 0.f && v::levelWithCv(k, cv, 1.f) <= 1.f;
+				limits &= std::abs(v::fineWithCv(k, cv, 1.f)) <= 1.f && std::abs(v::waveYWithCv(k, cv, 1.f)) <= 1.f;
+			}
+		}
+		check(same, "at amount 1 the PHASE, DETUNE, WAVE and RATIO jacks do exactly what they did before");
+		check(off, "at amount 0 a jack leaves its knob alone");
+		check(mirror, "at amount -1 a jack works the other way");
+		check(limits, "VOICES, LEVEL, FINE and Y WAVE stay in range under any CV");
+		// An open jack (0 V) leaves every knob value exactly as it is, at any amount.
+		bool open = true;
+		for (float a = -1.f; a <= 1.f; a += .25f)
+			open &= v::fineWithCv(-.37f, 0.f, a) == -.37f && v::levelWithCv(.81f, 0.f, a) == .81f && v::waveYWithCv(.2f, 0.f, a) == .2f
+				&& v::voicesWithCv(6.f, 0.f, a) == 6 && v::waveWithCv(1.2f, 0.f, a) == 1.2f;
+		check(open, "an open jack changes nothing");
+		check(v::voicesWithCv(1.f, 10.f, 1.f) == 8 && v::voicesWithCv(1.f, 5.f, 1.f) == 5 && v::voicesWithCv(8.f, -10.f, 1.f) == 1, "10 V sweeps VOICES from 1 to 8");
+		check(v::levelWithCv(0.f, 10.f, 1.f) == 1.f && v::levelWithCv(0.f, 5.f, .5f) == .25f, "LEVEL: 10 V is full, and the amount scales it");
+		check(v::fineWithCv(0.f, 5.f, 1.f) == 1.f && v::waveYWithCv(0.f, -5.f, 1.f) == -1.f, "FINE and Y WAVE: 5 V is the whole way");
+		check(v::waveWithCv(.5f, 10.f, 1.f) == 1.f && v::waveWithCv(1.1f, 10.f, 1.f) == v::kWaveMax, "WAVE CV reaches the letters only when the knob is past 1");
+		check(v::ratioStepWithCv(5.f, 2.f, .5f) == 6 && v::ratioStepWithCv(5.f, 2.f, -1.f) == 3, "RATIO steps scale with the amount");
+		const float nan = std::nanf("");
+		check(v::levelWithCv(.5f, nan, 1.f) == .5f && v::voicesWithCv(3.f, nan, nan) == 3 && v::ratioStepWithCv(5.f, nan, 1.f) == 5, "a broken CV is read as 0 V");
+	}
+
 	std::printf("vector_osc_test: %d checks, %d failures\n", checks, failures);
 	return failures ? 1 : 0;
 }

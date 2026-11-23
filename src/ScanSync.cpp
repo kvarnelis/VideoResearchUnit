@@ -71,6 +71,7 @@ struct ScanSyncWidget : ModuleWidget {
 		setPanel(createPanel(asset::plugin(pluginInstance, "res/ScanSync.svg")));
 		addPanelHeader(this, W, "28", "SCAN SYNC");
 		PANEL_PLACE_ALL(SCAN_SYNC_LAYOUT)
+		quickenSlowKnob(this, ScanSync::SLOW_PARAM);
 	}
 };
 

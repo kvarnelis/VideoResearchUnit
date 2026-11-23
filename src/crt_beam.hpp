@@ -132,11 +132,25 @@ void depositPath(EnergyField& field, const BeamSpot& spot, float x0, float y0, f
 // between cell centres, so the glow shows no 4-pixel grid. amount 0 gives a zero field.
 class Glow {
 public:
+	// Averages the energy into the cells and blurs them. The glow itself is worked out a row at a time by whoever
+	// reads it (toneMap, toneMapF), so no picture-sized field is written and read back.
 	void compute(const EnergyField& energy, float amount);
-	// width * height * 3 floats, valid after compute(). Zero until the first compute().
-	const float* data() const {
-		return field_.empty() ? nullptr : field_.data();
+	// False after compute() with amount 0 or an empty field: there is no glow to add.
+	bool active() const {
+		return active_;
 	}
+	// Row y of the glow, width * 3 floats, into `out`. `cellRow` is the caller's scratch of cellRowFloats() floats.
+	// Any thread may call it after compute(): it only reads.
+	void row(int y, float* out, float* cellRow) const;
+	size_t rowFloats() const {
+		return static_cast<size_t>(width_) * 3u;
+	}
+	size_t cellRowFloats() const {
+		return static_cast<size_t>(sw_) * 3u;
+	}
+	// The whole glow, width * height * 3 floats, or nullptr when there is none. Built from the rows the first time
+	// it is asked for after a compute(); the renderer never asks, the tests do.
+	const float* data() const;
 
 private:
 	// A pixel's place on the downsampled grid: the cells either side of it, and the weight of hi.
@@ -145,18 +159,26 @@ private:
 		int hi;
 		float t;
 	};
+	static CellTap tapFor(int p, int cells);
 
 	std::vector<float> small_;
 	std::vector<float> temp_;
-	std::vector<float> field_;
 	std::vector<CellTap> columns_;
+	int width_ = 0;
+	int height_ = 0;
+	int sw_ = 0;
+	int sh_ = 0;
+	float gain_ = 0.f;
+	bool active_ = false;
+	mutable std::vector<float> field_;  // data() only
+	mutable bool fieldBuilt_ = false;
 };
 
-// Tone-maps energy plus an optional glow field into RGBA8 (alpha 255): out = 1 - exp(-k (E + G)).
-// glow may be nullptr. out must hold width * height * 4 bytes.
-void toneMap(const EnergyField& energy, const float* glow, float k, unsigned char* rgba);
+// Tone-maps energy plus an optional glow into RGBA8 (alpha 255): out = 1 - exp(-k (E + G)).
+// glow may be nullptr or inactive. out must hold width * height * 4 bytes.
+void toneMap(const EnergyField& energy, const Glow* glow, float k, unsigned char* rgba);
 // The same into float RGBA in 0..255 units (full precision): the curve is evaluated, nothing is rounded.
-void toneMapF(const EnergyField& energy, const float* glow, float k, float* rgba);
+void toneMapF(const EnergyField& energy, const Glow* glow, float k, float* rgba);
 
 // One-pole lowpass for one deflection channel: the yoke's inductance. High tones deflect less.
 class CoilFilter {

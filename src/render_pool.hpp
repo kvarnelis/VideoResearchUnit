@@ -127,9 +127,20 @@ private:
 	bool quit = false;
 };
 
-// One pool for the process: hardware threads, at most 8, counting the caller.
+// How many threads a picture is spread over, counting the caller: the hardware threads, at most 8. A machine with 16
+// or more gets 12: measured on an 18-core machine, 12 threads drew a heavy 1440 x 1080 patch about a fifth faster
+// than 8, and 16 no faster than 12. The pictures do not depend on the number (each piece writes its own memory).
+inline int threadBudget() {
+	static const int budget = [] {
+		const int hardware = static_cast<int>(std::thread::hardware_concurrency());
+		return hardware >= 16 ? 12 : std::clamp(hardware, 1, 8);
+	}();
+	return budget;
+}
+
+// One pool for the process: threadBudget() threads, counting the caller.
 inline Pool& shared() {
-	static Pool pool(std::clamp(static_cast<int>(std::thread::hardware_concurrency()), 1, 8) - 1);
+	static Pool pool(threadBudget() - 1);
 	return pool;
 }
 

@@ -68,6 +68,7 @@ const VideoGraphRenderer::Frame& VideoGraphRenderer::renderBus(int busId, int wi
 	beginPass();
 	deepest = 0;
 	const Status status = renderNode(busId, width, height, 0, work);
+	readContended = status == Status::Contended;
 	if (delayJobCount > 0) {
 		// A Frame Delay was met. Its source may be this very picture (a loop), so keep the root as a finished tap
 		// for drawDelaySources() to reuse instead of drawing it again.
@@ -76,9 +77,7 @@ const VideoGraphRenderer::Frame& VideoGraphRenderer::renderBus(int busId, int wi
 			memoPass[static_cast<size_t>(busId)] = passId;
 			memoHeight[static_cast<size_t>(busId)] = deepest;
 		}
-		const bool contendedBefore = readContended;
 		drawDelaySources(width, height);
-		readContended = contendedBefore;
 	}
 	if (status == Status::Ok) {
 		// A picture leaves the graph as 8 bits (a float one is rounded here, half up). Swap instead of copy: work
@@ -93,7 +92,7 @@ const VideoGraphRenderer::Frame& VideoGraphRenderer::renderBus(int busId, int wi
 	}
 
 	// A read the writer kept interrupting says nothing about the bus: hold the last picture for this frame.
-	if (status == Status::Cycle || (status == Status::Empty && readContended)) {
+	if (status == Status::Cycle || status == Status::Contended) {
 		cycle = status == Status::Cycle;
 		if (busId == lastGoodBus && width == lastGoodWidth && height == lastGoodHeight && !lastGood.empty()) {
 			signal = true;
@@ -121,11 +120,10 @@ VideoGraphRenderer::Status VideoGraphRenderer::renderBusInPass(int busId, int wi
 	deepest = 0;
 	memoizeRoots = true;
 	const Status status = renderNode(busId, width, height, 0, work);
+	readContended = status == Status::Contended;
 	memoizeRoots = false;
 	if (delayJobNext < delayJobCount) {
-		const bool contendedBefore = readContended;
 		drawDelaySources(width, height);
-		readContended = contendedBefore;
 	}
 	if (status == Status::Ok) {
 		// Same swap renderBus() makes with lastGood: `out` takes the picture, work becomes scratch. A float picture
@@ -176,10 +174,7 @@ VideoGraphRenderer::Status VideoGraphRenderer::renderNode(int busId, int width, 
 	VideoBusNode node;
 	bool contended = false;
 	if (!videoBusReadNode(busId, node, &contended)) {
-		if (contended) {
-			readContended = true;
-		}
-		return Status::Empty;
+		return contended ? Status::Contended : Status::Empty;
 	}
 
 	if (onStack[static_cast<size_t>(busId)]) {
@@ -211,8 +206,7 @@ VideoGraphRenderer::Status VideoGraphRenderer::renderNode(int busId, int width, 
 // (Rec. 709 weights as the Keyer's, read from a byte or a float picture; a float picture is not rounded).
 //
 // `luma` is left null, and the caller runs its own code unchanged, when there is no modulation: no bus, the node's
-// own bus, an amount of zero, a bus that has no picture, or a picture of the wrong size. Only a loop is an error
-// (Status::Cycle); the caller returns it. The buffer is shared by every node: it is filled after the nested draw is
+// own bus, an amount of zero, a bus that has no picture, or a picture of the wrong size. Cycles and contended reads propagate to the root. The buffer is shared by every node: it is filled after the nested draw is
 // finished and used before the caller returns, so no other node writes it in between.
 VideoGraphRenderer::Status VideoGraphRenderer::renderModulation(int ownBusId, int modBusId, float amount, int width, int height, int depth, int slot, const float*& luma) {
 	luma = nullptr;
@@ -221,8 +215,8 @@ VideoGraphRenderer::Status VideoGraphRenderer::renderModulation(int ownBusId, in
 	}
 	Frame& picture = scratch(depth, slot);
 	const Status status = renderNode(modBusId, width, height, depth + 1, picture);
-	if (status == Status::Cycle) {
-		return Status::Cycle;
+	if (status == Status::Cycle || status == Status::Contended) {
+		return status;
 	}
 	const size_t pixels = static_cast<size_t>(width) * static_cast<size_t>(height);
 	if (status != Status::Ok || picture.count() != pixels * 4u) {
@@ -252,8 +246,9 @@ VideoGraphRenderer::Status VideoGraphRenderer::renderNodeBody(int busId, const V
 		if (generatorPass[index] != passId) {
 			// FM IN (Video Oscillator): a picture whose brightness bends oscillator A. Drawn first, through the normal walk.
 			const float* fmLuma = nullptr;
-			if (renderModulation(busId, node.generator.fmBusId, node.generator.fmAmount, width, height, depth, 0, fmLuma) == Status::Cycle) {
-				return Status::Cycle;
+			const Status modulation = renderModulation(busId, node.generator.fmBusId, node.generator.fmAmount, width, height, depth, 0, fmLuma);
+			if (modulation != Status::Ok) {
+				return modulation;
 			}
 			engine.render(width, height, node.generator, passFloat, fmLuma);
 		}
@@ -271,10 +266,11 @@ VideoGraphRenderer::Status VideoGraphRenderer::renderNodeBody(int busId, const V
 	case VideoBusNodeType::Ramps: {
 		// MOD IN: a picture whose brightness offsets layer A's phase.
 		const float* modLuma = nullptr;
-		if (renderModulation(busId, node.ramps.modBusId, node.ramps.modAmount, width, height, depth, 0, modLuma) == Status::Cycle) {
-			return Status::Cycle;
+		const Status modulation = renderModulation(busId, node.ramps.modBusId, node.ramps.modAmount, width, height, depth, 0, modLuma);
+		if (modulation != Status::Ok) {
+			return modulation;
 		}
-		renderRamps(out, width, height, node.ramps, passFloat, modLuma);
+		renderRamps(out, width, height, node.ramps, passFloat, modLuma, &rampsGeometry);
 		return Status::Ok;
 	}
 
@@ -349,8 +345,9 @@ VideoGraphRenderer::Status VideoGraphRenderer::renderNodeBody(int busId, const V
 		const float* modLuma = nullptr;
 		if (node.type == VideoBusNodeType::ColorLab || node.type == VideoBusNodeType::Keyer) {
 			const bool lab = node.type == VideoBusNodeType::ColorLab;
-			if (renderModulation(busId, lab ? node.colorLab.modBusId : node.keyer.modBusId, lab ? node.colorLab.modAmount : node.keyer.modAmount, width, height, depth, 1, modLuma) == Status::Cycle) {
-				return Status::Cycle;
+			const Status modulation = renderModulation(busId, lab ? node.colorLab.modBusId : node.keyer.modBusId, lab ? node.colorLab.modAmount : node.keyer.modAmount, width, height, depth, 1, modLuma);
+			if (modulation != Status::Ok) {
+				return modulation;
 			}
 		}
 		switch (node.type) {
@@ -384,8 +381,8 @@ VideoGraphRenderer::Status VideoGraphRenderer::renderNodeBody(int busId, const V
 		if (node.scanProcessor.liftBusId > 0) {
 			Frame& l = scratch(depth, 1);
 			const Status liftStatus = renderNode(node.scanProcessor.liftBusId, width, height, depth + 1, l);
-			if (liftStatus == Status::Cycle) {
-				return Status::Cycle;
+			if (liftStatus == Status::Cycle || liftStatus == Status::Contended) {
+				return liftStatus;
 			}
 			if (liftStatus == Status::Ok) {
 				if (!passFloat) {
@@ -409,8 +406,8 @@ VideoGraphRenderer::Status VideoGraphRenderer::renderNodeBody(int busId, const V
 		// B absent (unpatched, empty or 0): the output is A alone.
 		Frame& b = scratch(depth, 1);
 		const Status bStatus = mixer.busB > 0 ? renderNode(mixer.busB, width, height, depth + 1, b) : Status::Empty;
-		if (bStatus == Status::Cycle) {
-			return Status::Cycle;
+		if (bStatus == Status::Cycle || bStatus == Status::Contended) {
+			return bStatus;
 		}
 		if (bStatus != Status::Ok) {
 			out.swap(a);
@@ -422,8 +419,8 @@ VideoGraphRenderer::Status VideoGraphRenderer::renderNodeBody(int busId, const V
 		if (needMatte) {
 			Frame& m = scratch(depth, 2);
 			const Status mStatus = renderNode(mixer.matteBus, width, height, depth + 1, m);
-			if (mStatus == Status::Cycle) {
-				return Status::Cycle;
+			if (mStatus == Status::Cycle || mStatus == Status::Contended) {
+				return mStatus;
 			}
 			if (mStatus == Status::Ok) {
 				matte = &m;
@@ -461,7 +458,8 @@ void VideoGraphRenderer::renderFrameDelayLeaf(const FrameDelayParams& p, Frame& 
 	const int frames = std::clamp(p.frames, 1, kFrameDelayMaxFrames);
 	// The newest `frames` ticks plus the one being stored now.
 	frameRingSetCapacity(p.ringSlotId, frames + 1);
-	if (frameRingReadAtLeastAge(p.ringSlotId, p.frameCounter, frames, delayPrev)) {
+	// A picture FRAMES ticks old, or, when FRAMES has just been made longer than the history kept, the oldest one.
+	if (frameRingReadDelayed(p.ringSlotId, p.frameCounter, frames, delayPrev)) {
 		const bool stored32 = !delayPrev.rgbaF.empty() && delayPrev.rgba.empty();
 		if (stored32 && passFloat) {
 			// A picture stored as floats comes back as floats: the delay passes it on with nothing rounded.
@@ -479,7 +477,7 @@ void VideoGraphRenderer::renderFrameDelayLeaf(const FrameDelayParams& p, Frame& 
 		else resampleInto(delayPrev.rgba, delayPrev.width, delayPrev.height, out, width, height);
 		return;
 	}
-	// Nothing that old is stored yet (start, a clear, or a source that has only just appeared): black.
+	// Nothing is stored that has ever been old enough (start, a clear, or a source that has only just appeared): black.
 	out.assign(static_cast<size_t>(width) * static_cast<size_t>(height) * 4u, 0);
 	for (size_t i = 3; i < out.size(); i += 4u) {
 		out[i] = 255;
@@ -563,11 +561,11 @@ void VideoGraphRenderer::resampleIntoF(const std::vector<float>& src, int srcWid
 void VideoGraphRenderer::toneMapOutput(const crt::EnergyField& energy, float k, Frame& out, int width, int height) {
 	if (passFloat) {
 		out.beginF32(static_cast<size_t>(width) * static_cast<size_t>(height) * 4u);
-		crt::toneMapF(energy, glow.data(), k, out.f.data());
+		crt::toneMapF(energy, &glow, k, out.f.data());
 		return;
 	}
 	prepare(out, width, height);
-	crt::toneMap(energy, glow.data(), k, out.data());
+	crt::toneMap(energy, &glow, k, out.data());
 }
 
 // Starts the picture a converted node produces: a float frame while the pass is in full precision, else bytes.
@@ -675,6 +673,54 @@ void VideoGraphRenderer::renderKeyerFrame(Frame& source, Frame& out, int width, 
 	});
 }
 
+namespace {
+// Bus Mixer and Wave Shaper look a byte picture up in a table when every output byte depends only on its input
+// bytes. The table is used from this size up; below it, working the table out would cost more than the picture.
+constexpr size_t kBusMixerTableMinBytes = 4u * 65536u;  // 65536 pixels
+constexpr size_t kWaveShaperTableMinBytes = 4u * 1024u;  // 1024 pixels
+
+// Two small byte pictures that between them hold every pair of byte values once: value n = pixel x 3 + channel has
+// a = n / 256 in the first picture and b = n % 256 in the second (the last pixel's spare channels are 0, alpha is 255).
+struct BytePairPictures {
+	std::vector<unsigned char> a;
+	std::vector<unsigned char> b;
+};
+const BytePairPictures& bytePairPictures() {
+	static const BytePairPictures pictures = [] {
+		BytePairPictures p;
+		const size_t pixels = (65536u + 2u) / 3u;
+		p.a.assign(pixels * 4u, 0);
+		p.b.assign(pixels * 4u, 0);
+		for (size_t n = 0; n < 65536u; ++n) {
+			p.a[(n / 3u) * 4u + n % 3u] = static_cast<unsigned char>(n >> 8);
+			p.b[(n / 3u) * 4u + n % 3u] = static_cast<unsigned char>(n & 255u);
+		}
+		for (size_t px = 0; px < pixels; ++px) {
+			p.a[px * 4u + 3u] = 255;
+			p.b[px * 4u + 3u] = 255;
+		}
+		return p;
+	}();
+	return pictures;
+}
+
+// One small byte picture that holds every byte value once: value n is channel n % 3 of pixel n / 3.
+constexpr size_t kByteRampBytes = ((256u + 2u) / 3u) * 4u;
+const std::array<unsigned char, kByteRampBytes>& byteRampPicture() {
+	static const std::array<unsigned char, kByteRampBytes> picture = [] {
+		std::array<unsigned char, kByteRampBytes> p{};
+		for (size_t n = 0; n < 256u; ++n) {
+			p[(n / 3u) * 4u + n % 3u] = static_cast<unsigned char>(n);
+		}
+		for (size_t px = 0; px < kByteRampBytes / 4u; ++px) {
+			p[px * 4u + 3u] = 255;
+		}
+		return p;
+	}();
+	return picture;
+}
+}  // namespace
+
 void VideoGraphRenderer::renderBusMixerFrame(const Frame& a, const Frame& b, const Frame* matte, Frame& out, int width, int height, const BusMixerParams& params) {
 	const size_t byteCount = static_cast<size_t>(width) * static_cast<size_t>(height) * 4u;
 	beginOutput(out, byteCount);
@@ -682,40 +728,78 @@ void VideoGraphRenderer::renderBusMixerFrame(const Frame& a, const Frame& b, con
 	const float matteAmount = clamp01(params.matteAmount);
 	const int mode = std::clamp(params.mode, 0, 6);
 	const bool hasMatte = matte != nullptr && matte->count() == byteCount;
+	// The pixel loop, over the bytes [spanBegin, spanEnd) of whatever pictures it is given.
+	auto mixSpan = [&](auto srcA, auto srcB, auto srcM, auto dst, size_t spanBegin, size_t spanEnd) {
+		for (size_t i = spanBegin; i < spanEnd; i += 4u) {
+			// Factor is how much of B shows through. Matte mode (6) keys on the MAT BUS luma.
+			// Without a MAT BUS, Matte mode falls back to the MIX knob.
+			float factor = baseMix;
+			if (hasMatte) {
+				float m = (srcM[i + 0] * 0.2126f + srcM[i + 1] * 0.7152f + srcM[i + 2] * 0.0722f) / 255.f;
+				if (params.invertMatte) m = 1.f - m;
+				if (mode == 6) {
+					factor = clamp01(m);
+				}
+				else if (matteAmount > 0.0001f) {
+					factor = clamp01(baseMix * (1.f - matteAmount) + m * matteAmount);
+				}
+			}
+			for (int c = 0; c < 3; ++c) {
+				const float av = srcA[i + c] / 255.f;
+				const float bv = srcB[i + c] / 255.f;
+				float v = bv;
+				if (mode == 1) v = clamp01(av + bv);
+				else if (mode == 2) v = av * bv;
+				else if (mode == 3) v = 1.f - (1.f - av) * (1.f - bv);
+				else if (mode == 4) v = std::abs(av - bv);
+				else if (mode == 5) v = std::max(av, bv);
+				dst.put(i + c, (av * (1.f - factor) + v * factor) * 255.f);
+			}
+			dst.put(i + 3, 255.f);
+		}
+	};
 	auto run = [&](auto srcA, auto srcB, auto srcM) {
 		withDest<StoreRule::Truncate>(out, [&](auto dst) {
 			render_pool::parallelSpan(byteCount, 4u * 16384u, [&](size_t spanBegin, size_t spanEnd) {
-			for (size_t i = spanBegin; i < spanEnd; i += 4u) {
-				// Factor is how much of B shows through. Matte mode (6) keys on the MAT BUS luma.
-				// Without a MAT BUS, Matte mode falls back to the MIX knob.
-				float factor = baseMix;
-				if (hasMatte) {
-					float m = (srcM[i + 0] * 0.2126f + srcM[i + 1] * 0.7152f + srcM[i + 2] * 0.0722f) / 255.f;
-					if (params.invertMatte) m = 1.f - m;
-					if (mode == 6) {
-						factor = clamp01(m);
-					}
-					else if (matteAmount > 0.0001f) {
-						factor = clamp01(baseMix * (1.f - matteAmount) + m * matteAmount);
-					}
-				}
-				for (int c = 0; c < 3; ++c) {
-					const float av = srcA[i + c] / 255.f;
-					const float bv = srcB[i + c] / 255.f;
-					float v = bv;
-					if (mode == 1) v = clamp01(av + bv);
-					else if (mode == 2) v = av * bv;
-					else if (mode == 3) v = 1.f - (1.f - av) * (1.f - bv);
-					else if (mode == 4) v = std::abs(av - bv);
-					else if (mode == 5) v = std::max(av, bv);
-					dst.put(i + c, (av * (1.f - factor) + v * factor) * 255.f);
-				}
-				dst.put(i + 3, 255.f);
-			}
+				mixSpan(srcA, srcB, srcM, dst, spanBegin, spanEnd);
 			});
 		});
 	};
-	if (!a.isFloat() && !b.isFloat() && (!hasMatte || !matte->isFloat())) {
+	const bool allBytes = !a.isFloat() && !b.isFloat() && (!hasMatte || !matte->isFloat());
+	if (allBytes && !hasMatte && !out.isFloat() && byteCount >= kBusMixerTableMinBytes) {
+		// Byte pictures and no matte: the factor is the same everywhere, so an output byte depends on its two input
+		// bytes and nothing else. The answers for all 65536 pairs are made by the pixel loop itself, run over two small
+		// pictures that hold every pair once (a table worked out by other code could differ in the last bit), and the
+		// picture is then looked up. The table is kept while MODE and the mix stay as they were.
+		if (!busMixerTableValid || busMixerTableMode != mode || busMixerTableMix != baseMix) {
+			const BytePairPictures& pairs = bytePairPictures();
+			busMixerTableWork.resize(pairs.a.size());
+			const ByteDest<StoreRule::Truncate> work{busMixerTableWork.data()};
+			render_pool::parallelSpan(pairs.a.size(), 4u * 2048u, [&](size_t spanBegin, size_t spanEnd) {
+				mixSpan(ByteSource{pairs.a.data()}, ByteSource{pairs.b.data()}, ByteSource{nullptr}, work, spanBegin, spanEnd);
+			});
+			busMixerTable.resize(65536u);
+			for (size_t n = 0; n < 65536u; ++n) {
+				busMixerTable[n] = busMixerTableWork[(n / 3u) * 4u + n % 3u];
+			}
+			busMixerTableMode = mode;
+			busMixerTableMix = baseMix;
+			busMixerTableValid = true;
+		}
+		const unsigned char* pa = a.data();
+		const unsigned char* pb = b.data();
+		unsigned char* po = out.data();
+		const unsigned char* table = busMixerTable.data();
+		render_pool::parallelSpan(byteCount, 4u * 16384u, [=](size_t spanBegin, size_t spanEnd) {
+			for (size_t i = spanBegin; i < spanEnd; i += 4u) {
+				po[i + 0] = table[(static_cast<size_t>(pa[i + 0]) << 8) | pb[i + 0]];
+				po[i + 1] = table[(static_cast<size_t>(pa[i + 1]) << 8) | pb[i + 1]];
+				po[i + 2] = table[(static_cast<size_t>(pa[i + 2]) << 8) | pb[i + 2]];
+				po[i + 3] = 255;
+			}
+		});
+	}
+	else if (allBytes) {
 		run(ByteSource{a.data()}, ByteSource{b.data()}, ByteSource{hasMatte ? matte->data() : nullptr});
 	}
 	else {
@@ -742,22 +826,50 @@ void VideoGraphRenderer::renderWaveShaperFrame(Frame& source, Frame& out, int wi
 		if (quantize > 0.0001f) v = std::round(v * static_cast<float>(steps - 1)) / static_cast<float>(steps - 1);
 		return clamp01(v);
 	};
+	// The pixel loop, over the bytes [spanBegin, spanEnd) of whatever picture it is given.
+	auto shapeSpan = [&](auto src, auto dst, size_t spanBegin, size_t spanEnd) {
+		for (size_t i = spanBegin; i < spanEnd; i += 4u) {
+			if (params.mode == 1) {
+				const float l = shape((src[i + 0] * 0.2126f + src[i + 1] * 0.7152f + src[i + 2] * 0.0722f) / 255.f);
+				for (int c = 0; c < 3; ++c) dst.put(i + c, src[i + c] * (1.f - mix) + l * 255.f * mix);
+			}
+			else {
+				for (int c = 0; c < 3; ++c) {
+					const float v = shape(src[i + c] / 255.f);
+					dst.put(i + c, src[i + c] * (1.f - mix) + v * 255.f * mix);
+				}
+			}
+			dst.put(i + 3, 255.f);
+		}
+	};
+	if (!source.isFloat() && !out.isFloat() && params.mode != 1 && byteCount >= kWaveShaperTableMinBytes) {
+		// RGB mode on a byte picture: an output byte depends on its input byte and nothing else. The 256 answers are
+		// made by the pixel loop itself, run over a small picture that holds every byte value once, and the picture is
+		// then looked up.
+		const std::array<unsigned char, kByteRampBytes>& ramp = byteRampPicture();
+		std::array<unsigned char, kByteRampBytes> shaped;
+		shapeSpan(ByteSource{ramp.data()}, ByteDest<StoreRule::Truncate>{shaped.data()}, 0u, kByteRampBytes);
+		std::array<unsigned char, 256> table;
+		for (size_t n = 0; n < 256u; ++n) {
+			table[n] = shaped[(n / 3u) * 4u + n % 3u];
+		}
+		const unsigned char* ps = source.data();
+		unsigned char* po = out.data();
+		const unsigned char* t = table.data();
+		render_pool::parallelSpan(byteCount, 4u * 16384u, [=](size_t spanBegin, size_t spanEnd) {
+			for (size_t i = spanBegin; i < spanEnd; i += 4u) {
+				po[i + 0] = t[ps[i + 0]];
+				po[i + 1] = t[ps[i + 1]];
+				po[i + 2] = t[ps[i + 2]];
+				po[i + 3] = 255;
+			}
+		});
+		return;
+	}
 	withSource(source, [&](auto src) {
 		withDest<StoreRule::Truncate>(out, [&](auto dst) {
 			render_pool::parallelSpan(byteCount, 4u * 16384u, [&](size_t spanBegin, size_t spanEnd) {
-			for (size_t i = spanBegin; i < spanEnd; i += 4u) {
-				if (params.mode == 1) {
-					const float l = shape((src[i + 0] * 0.2126f + src[i + 1] * 0.7152f + src[i + 2] * 0.0722f) / 255.f);
-					for (int c = 0; c < 3; ++c) dst.put(i + c, src[i + c] * (1.f - mix) + l * 255.f * mix);
-				}
-				else {
-					for (int c = 0; c < 3; ++c) {
-						const float v = shape(src[i + c] / 255.f);
-						dst.put(i + c, src[i + c] * (1.f - mix) + v * 255.f * mix);
-					}
-				}
-				dst.put(i + 3, 255.f);
-			}
+				shapeSpan(src, dst, spanBegin, spanEnd);
 			});
 		});
 	});
@@ -878,7 +990,7 @@ bool VideoGraphRenderer::renderScopeTraceFrame(int busId, int width, int height,
 	drawLine(out, width, height, 0.f, static_cast<float>(height - 1) * 0.5f, static_cast<float>(width - 1), static_cast<float>(height - 1) * 0.5f, 42, 62, 48, 0.24f, 1);
 	drawLine(out, width, height, static_cast<float>(width - 1) * 0.5f, 0.f, static_cast<float>(width - 1) * 0.5f, static_cast<float>(height - 1), 42, 62, 48, 0.24f, 1);
 
-	bs.display = out;
+	bs.display.copyFrom(out);  // the picture only; a large one is copied by the pool
 	return true;
 }
 
@@ -1172,7 +1284,7 @@ void VideoGraphRenderer::renderDeflectionYokeFrame(int busId, Frame& source, Fra
 	const bool wrap = edge == static_cast<int>(DeflectionYokeEdge::Wrap);
 	const bool twisted = twist * depth != 0.f;
 	const bool curled = lineCurl * depth != 0.f;
-	const int threads = std::clamp(static_cast<int>(std::thread::hardware_concurrency()), 1, 8);
+	const int threads = render_pool::threadBudget();
 
 	// Deflection and zoom over one field window. Table entry i is window sample i; the field begins
 	// `startFraction` of a sample after entry 0, on the video clock (src/video_clock.hpp), and a line is
@@ -1541,7 +1653,7 @@ void VideoGraphRenderer::renderDeflectionYokeFrame(int busId, Frame& source, Fra
 	bs.hasBeam = true;
 	glow.compute(energy, std::clamp(finiteOr(params.glow, 0.f), 0.f, 2.f));
 	toneMapOutput(energy, kWobbleToneK, out, width, height);
-	bs.display = out;
+	bs.display.copyFrom(out);  // the picture only; a large one is copied by the pool
 }
 
 namespace {
@@ -1603,7 +1715,7 @@ void VideoGraphRenderer::renderScanProcessorFrame(int busId, Frame& source, Fram
 	const float hWidth = params.hWidth;
 	const float vPos = params.vPos;
 	const float vHeight = params.vHeight;
-	const int threads = std::clamp(static_cast<int>(std::thread::hardware_concurrency()), 1, 8);
+	const int threads = render_pool::threadBudget();
 
 	const int S = SW;      // one segment per scan column
 	const int P = S + 1;   // points per line
@@ -1768,28 +1880,35 @@ void VideoGraphRenderer::renderScanProcessorFrame(int busId, Frame& source, Fram
 	// Add the scan into the node's energy. A rotated scan is transposed: scan row = output column.
 	float* dst = bs.energy.data();
 	const float* scan = scanField.data();
+	// Every float of the energy gets exactly one add, so the pieces can go to the pool in any order.
 	if (!rotate) {
 		const size_t count = static_cast<size_t>(width) * static_cast<size_t>(height) * 3u;
-		for (size_t i = 0; i < count; ++i) {
-			dst[i] += scan[i];
-		}
+		render_pool::parallelSpan(count, 3u * 32768u, [dst, scan](size_t begin, size_t end) {
+			for (size_t i = begin; i < end; ++i) {
+				dst[i] += scan[i];
+			}
+		});
 	}
 	else {
-		for (int Y = 0; Y < height; ++Y) {
+		// Bands of output rows. Inside a band the columns are the outer loop: a scan row is then read as one short
+		// run (the band's rows are neighbours in it) instead of one float triple from each of `width` scan rows.
+		render_pool::parallelSpan(static_cast<size_t>(height), 16u, [&](size_t rowBegin, size_t rowEnd) {
 			for (int X = 0; X < width; ++X) {
-				const size_t d = (static_cast<size_t>(Y) * static_cast<size_t>(width) + static_cast<size_t>(X)) * 3u;
-				const size_t s = (static_cast<size_t>(X) * static_cast<size_t>(SW) + static_cast<size_t>(Y)) * 3u;
-				dst[d + 0] += scan[s + 0];
-				dst[d + 1] += scan[s + 1];
-				dst[d + 2] += scan[s + 2];
+				for (size_t Y = rowBegin; Y < rowEnd; ++Y) {
+					const size_t d = (Y * static_cast<size_t>(width) + static_cast<size_t>(X)) * 3u;
+					const size_t s = (static_cast<size_t>(X) * static_cast<size_t>(SW) + Y) * 3u;
+					dst[d + 0] += scan[s + 0];
+					dst[d + 1] += scan[s + 1];
+					dst[d + 2] += scan[s + 2];
+				}
 			}
-		}
+		});
 	}
 
 	bs.hasBeam = true;
 	glow.compute(bs.energy, std::clamp(params.glow, 0.f, 2.f));
 	toneMapOutput(bs.energy, kScanProcessorToneK, out, width, height);
-	bs.display = out;
+	bs.display.copyFrom(out);  // the picture only; a large one is copied by the pool
 }
 
 void VideoGraphRenderer::renderLineFieldFrame(Frame& source, Frame& out, int width, int height, const LineFieldParams& params) {
@@ -2144,12 +2263,12 @@ void VideoGraphRenderer::renderColorizerFrame(Frame& source, Frame& out, int wid
 	// A float picture is coloured by the gradient at the exact luma (the two nearest entries blended) so the output
 	// has no steps; with BANDS the gradient is steps by design and stays a lookup of the nearest entry.
 	const bool smooth = params.bands < 2;
-	const int threads = height >= 480 ? 4 : 1;
 	withSource(source, [&](auto src) {
 		withDest<StoreRule::Truncate>(out, [&](auto dst) {
 			constexpr bool toFloat = std::is_same<decltype(dst), FloatDest>::value;
-			parallelRanges(height, threads, [&](int begin, int end) {
-				for (int y = begin; y < end; ++y) {
+			// Rows are independent, so bands of rows go to the pool; every pixel is computed exactly as before.
+			render_pool::parallelSpan(static_cast<size_t>(height), 8u, [&](size_t rowBegin, size_t rowEnd) {
+				for (int y = static_cast<int>(rowBegin); y < static_cast<int>(rowEnd); ++y) {
 					for (int x = 0; x < width; ++x) {
 						const size_t i = (static_cast<size_t>(y) * width + x) * 4u;
 						const float lumaValue = src[i] * 0.2126f + src[i + 1] * 0.7152f + src[i + 2] * 0.0722f;
@@ -2282,7 +2401,7 @@ void VideoGraphRenderer::renderFeedbackFrame(Frame& src, Frame& out, int width, 
 	else prepare(out, width, height);
 	const float* srcF = passFloat ? src.f.data() : nullptr;
 	float* outF = passFloat ? out.f.data() : nullptr;
-	const int threads = std::clamp(static_cast<int>(std::thread::hardware_concurrency()), 1, 8);
+	const int threads = render_pool::threadBudget();
 	// The pixel loop is compiled twice, so the byte loop has no float tests in it (full precision is `kF`).
 	auto pixels = [&](auto tag) {
 	constexpr bool kF = decltype(tag)::value;
@@ -2549,7 +2668,7 @@ void VideoGraphRenderer::renderRotatorFrame(Frame& src, Frame& out, int width, i
 	const float foldX = map.centreX + map.offsetX;
 	const float foldY = map.centreY + map.offsetY;
 	const float wedge = 2.f * kPi / static_cast<float>(folds);
-	const int threads = std::clamp(static_cast<int>(std::thread::hardware_concurrency()), 1, 8);
+	const int threads = render_pool::threadBudget();
 	if (useFloat) {
 		out.beginF32(static_cast<size_t>(width) * static_cast<size_t>(height) * 4u);
 		float* dst = out.f.data();
@@ -2640,8 +2759,8 @@ VideoGraphRenderer::Status VideoGraphRenderer::renderVideoMixerNode(const VideoM
 			}
 			Frame& slot = scratch(depth, i);
 			const Status status = renderNode(p.inputBus[i], width, height, depth + 1, slot);
-			if (status == Status::Cycle) {
-				return Status::Cycle;
+			if (status == Status::Cycle || status == Status::Contended) {
+				return status;
 			}
 			if (status == Status::Ok && slot.count() == byteCount) {
 				picture[i] = &slot;
@@ -2652,8 +2771,8 @@ VideoGraphRenderer::Status VideoGraphRenderer::renderVideoMixerNode(const VideoM
 		if (p.keyOn && p.keyBus > 0) {
 			Frame& slot = scratch(depth, 4);
 			const Status status = renderNode(p.keyBus, width, height, depth + 1, slot);
-			if (status == Status::Cycle) {
-				return Status::Cycle;
+			if (status == Status::Cycle || status == Status::Contended) {
+				return status;
 			}
 			if (status == Status::Ok && slot.count() == byteCount) {
 				keyFrame = &slot;
@@ -2662,8 +2781,8 @@ VideoGraphRenderer::Status VideoGraphRenderer::renderVideoMixerNode(const VideoM
 		if (p.keyOn && p.matteBus > 0) {
 			Frame& slot = scratch(depth, 5);
 			const Status status = renderNode(p.matteBus, width, height, depth + 1, slot);
-			if (status == Status::Cycle) {
-				return Status::Cycle;
+			if (status == Status::Cycle || status == Status::Contended) {
+				return status;
 			}
 			if (status == Status::Ok && slot.count() == byteCount) {
 				matteFrame = &slot;
@@ -2699,8 +2818,8 @@ VideoGraphRenderer::Status VideoGraphRenderer::renderVideoMixerNode(const VideoM
 		}
 		Frame& slot = scratch(depth, role);
 		const Status status = renderNode(bus[role], width, height, depth + 1, slot);
-		if (status == Status::Cycle) {
-			return Status::Cycle;
+		if (status == Status::Cycle || status == Status::Contended) {
+			return status;
 		}
 		// An absent or empty picture reads as black (and an empty matte as "nothing in MATTE").
 		if (status == Status::Ok && slot.count() == byteCount) {
@@ -2831,7 +2950,7 @@ void VideoGraphRenderer::renderVideoMixerFrame(const Frame* onAir, const Frame* 
 		};
 
 		withDest<StoreRule::RoundHalfUp>(out, [&](auto dst) {
-			const int threads = std::clamp(static_cast<int>(std::thread::hardware_concurrency()), 1, 8);
+			const int threads = render_pool::threadBudget();
 			parallelRanges(height, threads, [&](int begin, int end) {
 				for (int y = begin; y < end; ++y) {
 					for (int x = 0; x < width; ++x) {
@@ -2939,7 +3058,7 @@ void VideoGraphRenderer::renderVideoMixerFrame(const Frame* onAir, const Frame* 
 				}
 			};
 
-			const int threads = std::clamp(static_cast<int>(std::thread::hardware_concurrency()), 1, 8);
+			const int threads = render_pool::threadBudget();
 			parallelRanges(height, threads, [&](int begin, int end) {
 				for (int y = begin; y < end; ++y) {
 					for (int x = 0; x < width; ++x) {

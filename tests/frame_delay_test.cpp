@@ -318,6 +318,50 @@ void testDelayLength() {
 	clearBuses();
 }
 
+// FRAMES made longer while the delay runs (CV on FRAMES does this). The ring keeps only as many pictures as the
+// delay needed, so none is old enough for a while. The delay then holds its oldest picture; it used to go black.
+void testLongerDelayHolds() {
+	std::printf("frame delay: made longer, it holds its oldest picture, not black\n");
+	clearBuses();
+	const int slot = frameRingAllocateSlot();
+	publishShapes(kShape);
+	VideoGraphRenderer r;
+	VideoGraphRenderer ref;
+	std::vector<Frame> sourceAt(1 + 40);
+	std::vector<Frame> outAt(1 + 40);
+	const uint64_t black = hashFrame(blackFrame());
+	auto lengthAt = [](int n) { return n <= 10 ? 3 : (n <= 24 ? 9 : 2); };   // longer at tick 11, shorter at 25
+	for (int n = 1; n <= 30; ++n) {
+		publishLoopRotator(7, kShape, 0.004f * static_cast<float>(n));
+		sourceAt[static_cast<size_t>(n)] = ref.renderBus(7, kW, kH);
+		videoBusPublishFrameDelay(kDelayBus, 7, delayParams(slot, n, lengthAt(n)));
+		outAt[static_cast<size_t>(n)] = r.renderBus(kDelayBus, kW, kH);
+	}
+	auto same = [&](int outTick, int sourceTick) { return hashFrame(outAt[static_cast<size_t>(outTick)]) == hashFrame(sourceAt[static_cast<size_t>(sourceTick)]); };
+	bool blackFirst = true, before = true, held = true, after = true, shorter = true, neverBlack = true;
+	for (int n = 1; n <= 3; ++n) blackFirst = blackFirst && hashFrame(outAt[static_cast<size_t>(n)]) == black;
+	for (int n = 4; n <= 10; ++n) before = before && same(n, n - 3);
+	// At tick 10 the ring holds ticks 7 to 10. The picture of tick 7 is the oldest, and is 9 ticks old at tick 16.
+	for (int n = 11; n <= 16; ++n) held = held && same(n, 7);
+	for (int n = 17; n <= 24; ++n) after = after && same(n, n - 9);
+	for (int n = 25; n <= 30; ++n) shorter = shorter && same(n, n - 2);
+	for (int n = 4; n <= 30; ++n) neverBlack = neverBlack && hashFrame(outAt[static_cast<size_t>(n)]) != black;
+	check(blackFirst, "at the start it is still black until a picture that old exists");
+	check(before, "FRAMES 3 gives the source as it was 3 ticks ago");
+	check(held, "made longer (3 to 9), it shows its oldest picture until that picture is 9 ticks old");
+	check(after, "then it gives the source as it was 9 ticks ago");
+	check(shorter, "made shorter (9 to 2), it gives the source as it was 2 ticks ago at once");
+	check(neverBlack, "after its first picture it never goes black");
+
+	// A reset still gives black: the hold is only for a delay that has shown a picture since its last clear.
+	videoBusPublishFrameDelay(kDelayBus, 7, delayParams(slot, 31, 5, 1));
+	check(hashFrame(r.renderBus(kDelayBus, kW, kH)) == black, "after a reset it is black again");
+	videoBusPublishFrameDelay(kDelayBus, 7, delayParams(slot, 32, 5, 1));
+	check(hashFrame(r.renderBus(kDelayBus, kW, kH)) == black, "and stays black until a picture that old exists");
+	frameRingReleaseSlot(slot);
+	clearBuses();
+}
+
 // A tick the delay is read at twice, a counter that jumps (a slow screen) and one that goes round the wrap.
 void testDelayCounters() {
 	std::printf("frame delay: repeated, skipped and wrapped counts\n");
@@ -595,6 +639,7 @@ void testRingAge() {
 int main() {
 	testPinnedDirectLoop();
 	testPinnedDepth();
+	testLongerDelayHolds();
 	testRingAge();
 	testLoopThroughDelay();
 	testLoopWithoutDelayIsStillACycle();

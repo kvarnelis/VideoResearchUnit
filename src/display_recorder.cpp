@@ -293,8 +293,6 @@ void runSession(SessionShared& s, std::string& chosenPath) {
 				s.changed.wait_until(lock, tickTime(tick), [&] { return s.stopRequested; });
 			}
 			stop = s.stopRequested;
-			if (!stop)
-				takeNewest();
 		}
 		if (stop)
 			break;
@@ -325,9 +323,17 @@ void runSession(SessionShared& s, std::string& chosenPath) {
 		if (!sink->readyForFrame()) {
 			stats.dropped++;
 		}
-		else if (!writeFrame(tick)) {
-			abandon();
-			return;
+		else {
+			// Audio pumping and encoder readiness can take time. Pick the picture at
+			// the write deadline so a frame arriving during either step is eligible.
+			{
+				std::lock_guard<std::mutex> lock(s.mutex);
+				takeNewest();
+			}
+			if (!writeFrame(tick)) {
+				abandon();
+				return;
+			}
 		}
 		tick++;
 		publishStats(s, stats);
@@ -466,12 +472,16 @@ void Session::submit(const unsigned char* rgba, int width, int height) {
 	if (!rgba || width <= 0 || height <= 0)
 		return;
 	const Clock::time_point now = Clock::now();
-	if (now - lastSubmit < kMinSubmitGap)
-		return;
-	if (!active())
-		return;
-	lastSubmit = now;
 	SessionShared& s = *shared;
+	{
+		std::lock_guard<std::mutex> lock(s.mutex);
+		if (s.stopRequested || (s.state != SessionState::Starting && s.state != SessionState::Recording))
+			return;
+		// Limit redundant copies only while a new picture is already waiting.
+		if (s.midFresh && now - lastSubmit < kMinSubmitGap)
+			return;
+	}
+	lastSubmit = now;
 	const int index = s.uiIndex;
 	const std::size_t bytes = static_cast<std::size_t>(width) * static_cast<std::size_t>(height) * 4;
 	s.slots[index].assign(rgba, rgba + bytes);

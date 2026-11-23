@@ -1,6 +1,6 @@
 // Headless Display "Picture size" check against Rack's real Module/JSON code. No GUI or running Rack.
 // A new Display is 720 lines; its choice survives a save and load; a patch saved before the choice existed
-// (no key) loads as 1080 lines, so old patches keep their exact picture; the pixel sizes follow the 4:3 rule.
+// (no key) uses the last menu choice; the pixel sizes follow the 4:3 rule.
 #include "../src/Display.cpp"
 #include <cstdio>
 
@@ -45,6 +45,9 @@ int main() {
 	Display fresh;
 	check(fresh.pictureLines == 720, "a new Display is 720 lines");
 
+	displayPreferredLines.store(540);
+	Display inherited;
+	check(inherited.pictureLines == 540, "a new Display inherits the last menu choice");
 	// Each choice survives a save and load.
 	for (int lines : {1080, 720, 540}) {
 		Display a;
@@ -59,15 +62,15 @@ int main() {
 		json_decref(saved);
 	}
 
-	// A patch saved without the key (an old patch) loads as 1080, whatever the module held before.
+	// Opening explicit patch sizes above did not change the remembered choice.
 	{
 		json_t* old = json_object();
 		json_object_set_new(old, "panelHp", json_integer(24));
 		json_object_set_new(old, "selectedInput", json_integer(1));
 		Display d;
-		check(d.pictureLines == 720, "starts at 720 before the load");
+		check(d.pictureLines == 540, "patch loads leave the remembered choice alone");
 		d.dataFromJson(old);
-		check(d.pictureLines == 1080, "a patch without the key loads as 1080 lines");
+		check(d.pictureLines == 540, "a patch without the key loads as the remembered size");
 		json_decref(old);
 	}
 
@@ -77,7 +80,7 @@ int main() {
 		json_object_set_new(j, "pictureLines", json_integer(bad));
 		Display d;
 		d.dataFromJson(j);
-		check(d.pictureLines == 1080, "an unlisted value loads as 1080 lines");
+		check(d.pictureLines == 540, "an unlisted value loads as the remembered size");
 		json_decref(j);
 	}
 	{
@@ -85,14 +88,14 @@ int main() {
 		json_object_set_new(j, "pictureLines", json_string("720"));
 		Display d;
 		d.dataFromJson(j);
-		check(d.pictureLines == 1080, "a value of the wrong kind loads as 1080 lines");
+		check(d.pictureLines == 540, "a value of the wrong kind loads as the remembered size");
 		json_decref(j);
 	}
 
 	// The sizes the menu shows and the picture uses (4:3).
 	int w = 0, h = 0;
 	displayChoiceSize(1080, w, h);
-	check(w == 1440 && h == 1080, "1080 lines is 1440x1080");
+	check(w == 1440 && h == 1080, "the remembered size is 1440x1080");
 	displayChoiceSize(720, w, h);
 	check(w == 960 && h == 720, "720 lines is 960x720");
 	displayChoiceSize(540, w, h);

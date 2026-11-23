@@ -1,5 +1,7 @@
 #include "plugin.hpp"
+#include "shapes_gpu.hpp"
 #include "display_capture.hpp"
+#include "display_picture_size.hpp"
 #include "render_service.hpp"
 #include <cstring>
 
@@ -87,10 +89,12 @@ void init(Plugin* p) {
 // "keepRunningHidden" is the Display menu item "Keep video running when hidden" (true when missing).
 extern "C" json_t* settingsToJson() {
 	json_t* rootJ = json_object();
+	json_object_set_new(rootJ, "preferredPictureLines", json_integer(displayPreferredLines.load()));
 	json_object_set_new(rootJ, "captureFolder", json_string(display_capture::lastPickedFolder().c_str()));
 	json_object_set_new(rootJ, "keepRunningHidden", json_boolean(renderService().hiddenRendering()));
 	json_object_set_new(rootJ, "renderOnOwnThread", json_boolean(renderService().threadMode()));
 	json_object_set_new(rootJ, "fullPrecision", json_boolean(renderService().fullPrecision()));
+	json_object_set_new(rootJ, "shapesOnGraphicsCard", json_boolean(shapes_gpu::enabled()));
 	return rootJ;
 }
 
@@ -98,6 +102,7 @@ extern "C" void settingsFromJson(json_t* rootJ) {
 	if (!rootJ) {
 		return;
 	}
+	displayPreferredLines.store(displayClampLines(json_integer_value(json_object_get(rootJ, "preferredPictureLines")), kDisplayDefaultLines));
 	json_t* keepJ = json_object_get(rootJ, "keepRunningHidden");
 	if (json_is_boolean(keepJ)) {
 		renderService().setHiddenRendering(json_is_true(keepJ));
@@ -112,6 +117,8 @@ extern "C" void settingsFromJson(json_t* rootJ) {
 	if (json_is_boolean(precisionJ)) {
 		renderService().setFullPrecision(json_is_true(precisionJ));
 	}
+	json_t* gpu = json_object_get(rootJ, "shapesOnGraphicsCard");
+	if (json_is_boolean(gpu)) shapes_gpu::setEnabled(json_is_true(gpu));
 	json_t* folderJ = json_object_get(rootJ, "captureFolder");
 	if (json_is_string(folderJ)) {
 		display_capture::setLastPickedFolder(json_string_value(folderJ));

@@ -329,6 +329,10 @@ std::string msgYouTubeDownloadFailed(const std::string& detail) {
 	return message;
 }
 
+bool youtubeFailureMayPass(const std::string& reason) {
+	return reason.find("HTTP Error 403") != std::string::npos;
+}
+
 std::string msgYouTubeNoMp4() {
 	return "YouTube has no single-file MP4 (H.264) version of this video, so it cannot be played here. "
 		   "Try another video.";

@@ -164,6 +164,14 @@ build/shapes_test: $(SHAPES_TEST_SOURCES) $(wildcard src/*.hpp)
 	mkdir -p build
 	$(CXX) -std=c++17 -O2 -Wall -Wextra -Wno-unused-parameter -Isrc $(SHAPES_TEST_SOURCES) -pthread -o $@
 
+# Trial: Shapes drawn on the graphics card (GLSL 1.20, as in Rack's OpenGL 2 context) timed against the CPU renderer.
+# macOS only, because it makes its own offscreen context with CGL. Not part of `make test`.
+SHAPES_GPU_BENCH_SOURCES = tests/shapes_gpu_bench.cpp src/video_bus.cpp src/video_graph_renderer.cpp src/video_engine.cpp src/freeze_frame_store.cpp src/frame_ring.cpp src/video_external_frame.cpp src/signal_ring.cpp src/crt_beam.cpp
+
+build/shapes_gpu_bench: $(SHAPES_GPU_BENCH_SOURCES) $(wildcard src/*.hpp)
+	mkdir -p build
+	$(CXX) -std=c++17 -O2 -Wall -Wextra -Wno-unused-parameter -Isrc $(SHAPES_GPU_BENCH_SOURCES) -pthread -framework OpenGL -o $@
+
 # Offline checks for the video clock (VRU-28 Scan Sync's time base): the round trip, a tone locked to the field rate
 # standing still for 600 fields at three sample rates, the same picture at every rate, and the field rule. No Rack SDK.
 VIDEO_CLOCK_TEST_SOURCES = tests/video_clock_test.cpp src/video_bus.cpp src/video_graph_renderer.cpp src/video_engine.cpp src/freeze_frame_store.cpp src/frame_ring.cpp src/video_external_frame.cpp src/signal_ring.cpp src/crt_beam.cpp
@@ -230,6 +238,22 @@ build/precision_test: $(PRECISION_TEST_SOURCES) $(wildcard src/*.hpp)
 	mkdir -p build
 	$(CXX) -std=c++17 -O2 -ffp-contract=off -Wall -Wextra -Wno-unused-parameter -Isrc $(PRECISION_TEST_SOURCES) -pthread -o $@
 
+# Bus Mixer and Wave Shaper look large byte pictures up in a table. This checks the table against the pixel loop for
+# every pair of input bytes (every byte value), every blend mode and a set of mixes and settings.
+POINTWISE_TABLE_TEST_SOURCES = tests/pointwise_table_test.cpp src/video_bus.cpp src/video_graph_renderer.cpp src/video_engine.cpp src/freeze_frame_store.cpp src/frame_ring.cpp src/video_external_frame.cpp src/signal_ring.cpp src/crt_beam.cpp src/render_service.cpp
+
+build/pointwise_table_test: $(POINTWISE_TABLE_TEST_SOURCES) $(wildcard src/*.hpp)
+	mkdir -p build
+	$(CXX) -std=c++17 -O2 -Wall -Wextra -Wno-unused-parameter -Isrc $(POINTWISE_TABLE_TEST_SOURCES) -pthread -o $@
+
+# A consumer that says mayDerive (Video Probe) gets a larger picture of the same bus averaged down instead of a second
+# render, in thread mode (src/render_service.hpp, touch(); src/frame_downsample.hpp).
+RENDER_DERIVE_TEST_SOURCES = tests/render_derive_test.cpp src/video_bus.cpp src/video_graph_renderer.cpp src/video_engine.cpp src/freeze_frame_store.cpp src/frame_ring.cpp src/video_external_frame.cpp src/signal_ring.cpp src/crt_beam.cpp src/render_service.cpp
+
+build/render_derive_test: $(RENDER_DERIVE_TEST_SOURCES) $(wildcard src/*.hpp)
+	mkdir -p build
+	$(CXX) -std=c++17 -O2 -Wall -Wextra -Wno-unused-parameter -Isrc $(RENDER_DERIVE_TEST_SOURCES) -pthread -o $@
+
 # Timing of a ten node chain with the setting off and on (median ms per picture).
 PRECISION_BENCH_SOURCES = tests/precision_bench.cpp src/video_bus.cpp src/video_graph_renderer.cpp src/video_engine.cpp src/freeze_frame_store.cpp src/frame_ring.cpp src/video_external_frame.cpp src/signal_ring.cpp src/crt_beam.cpp
 
@@ -275,12 +299,12 @@ $(DISPLAY_SMOKE): $(DISPLAY_SMOKE_SOURCES) $(wildcard src/*.hpp)
 		-o $@
 # The Display module's "Picture size" choice (its JSON, defaults and sizes), against Rack's real Module code.
 DISPLAY_SIZE_TEST = build/display_picture_size_test
-DISPLAY_SIZE_TEST_SOURCES = src/video_bus.cpp src/video_graph_renderer.cpp src/video_engine.cpp src/freeze_frame_store.cpp src/frame_ring.cpp src/video_external_frame.cpp src/signal_ring.cpp src/crt_beam.cpp src/render_service.cpp src/display_capture.cpp src/display_png.cpp src/display_recorder.cpp src/display_recorder_mac.mm src/display_wake_mac.mm
+DISPLAY_SIZE_TEST_SOURCES = src/video_bus.cpp src/video_graph_renderer.cpp src/video_engine.cpp src/freeze_frame_store.cpp src/frame_ring.cpp src/video_external_frame.cpp src/signal_ring.cpp src/crt_beam.cpp src/render_service.cpp src/display_capture.cpp src/display_png.cpp src/display_recorder.cpp src/display_recorder_mac.mm src/display_wake_mac.mm src/shapes_gpu.cpp
 $(DISPLAY_SIZE_TEST): tests/display_picture_size_test.cpp src/Display.cpp $(DISPLAY_SIZE_TEST_SOURCES) $(wildcard src/*.hpp)
 	mkdir -p build
 	$(CXX) -std=c++17 -O2 -mmacosx-version-min=12.0 -I$(RACK_DIR)/include -I$(RACK_DIR)/dep/include -Isrc tests/display_picture_size_test.cpp $(DISPLAY_SIZE_TEST_SOURCES) \
 		-framework Cocoa -framework AVFoundation -framework CoreMedia -framework CoreVideo -framework CoreGraphics -framework ImageIO -framework Foundation \
-		-L$(RACK_DIR) -lRack -o $@
+		-framework OpenGL -L$(RACK_DIR) -lRack -o $@
 TEST_DISPLAY_DEP = $(DISPLAY_SMOKE) $(DISPLAY_SIZE_TEST)
 TEST_DISPLAY_RUN = ./$(DISPLAY_SMOKE) && DYLD_LIBRARY_PATH="$(abspath $(RACK_DIR))" ./$(DISPLAY_SIZE_TEST)
 else
@@ -353,7 +377,7 @@ endif
 # input with the Display's own renderer. Not part of the plugin. See AGENTS.md, "Seeing a patch without Rack".
 ifeq ($(shell uname -s),Darwin)
 RENDER_MODULE_SOURCES = $(filter-out src/Display.cpp src/VideoPlayer.cpp src/SyphonIn.cpp src/SyphonOut.cpp,$(wildcard src/[A-Z]*.cpp))
-RENDER_CORE_SOURCES = src/video_bus.cpp src/video_graph_renderer.cpp src/video_engine.cpp src/freeze_frame_store.cpp src/frame_ring.cpp src/video_external_frame.cpp src/signal_ring.cpp src/crt_beam.cpp src/render_service.cpp src/display_png.cpp
+RENDER_CORE_SOURCES = src/video_bus.cpp src/video_graph_renderer.cpp src/video_engine.cpp src/freeze_frame_store.cpp src/frame_ring.cpp src/video_external_frame.cpp src/signal_ring.cpp src/crt_beam.cpp src/render_service.cpp src/display_png.cpp src/shapes_gpu.cpp
 RENDER_OBJ_DIR = build/render-obj
 RENDER_OBJECTS = $(patsubst src/%.cpp,$(RENDER_OBJ_DIR)/%.o,$(RENDER_MODULE_SOURCES) $(RENDER_CORE_SOURCES)) $(RENDER_OBJ_DIR)/vru_render_patch.o
 RENDER_CXXFLAGS = -std=c++17 -O2 -I$(RACK_DIR)/include -I$(RACK_DIR)/dep/include -Isrc
@@ -367,7 +391,7 @@ $(RENDER_OBJ_DIR)/vru_render_patch.o: tools/vru_render_patch.cpp $(wildcard src/
 	$(CXX) $(RENDER_CXXFLAGS) -c $< -o $@
 
 build/vru-render-patch: $(RENDER_OBJECTS)
-	$(CXX) $(RENDER_OBJECTS) -L$(RACK_DIR) -lRack -pthread -o $@
+	$(CXX) $(RENDER_OBJECTS) -L$(RACK_DIR) -lRack -pthread $(if $(filter Darwin,$(shell uname -s)),-framework OpenGL,) -o $@
 
 render-patch: build/vru-render-patch
 TEST_RENDER_DEP = build/vru-render-patch
@@ -443,7 +467,7 @@ TEST_V2_CLIENT_DEP =
 TEST_V2_CLIENT_RUN = @echo "vru_bus_client_test skipped: needs the macOS Rack SDK."
 endif
 
-test: $(TEST_SYNC_MODULE_DEP) $(TEST_VIDEOOSC_MODULE_DEP) $(TEST_OCT_MODULE_DEP) $(TEST_SCOPE_MODULE_DEP) $(TEST_FEEDBACK_MODULE_DEP) build/octoscillator_test build/vector_osc_test build/video_probe_test build/raster_scan_test build/bus_test build/shapes_test build/video_clock_test build/focus_test build/frame_delay_test build/picture_mod_test build/feedback_fade_test build/precision_test build/demo_patch_render_test build/video_player_test build/video_player_engine_test build/vru_bus_api_test build/vru_bus_api_golden_test build/vru_bus_api_service_test build/render_pool_stress_test build/vru_bus_api_v2_test build/vru_bus_api_precision_test build/vru_bus_v1_header_test $(TEST_V2_CLIENT_DEP) build/vru_bus_dylib_test $(API_TEST_DYLIB) $(TEST_SYPHON_DEP) $(TEST_DISPLAY_DEP) $(TEST_RENDER_DEP)
+test: $(TEST_SYNC_MODULE_DEP) $(TEST_VIDEOOSC_MODULE_DEP) $(TEST_OCT_MODULE_DEP) $(TEST_SCOPE_MODULE_DEP) $(TEST_FEEDBACK_MODULE_DEP) build/octoscillator_test build/vector_osc_test build/video_probe_test build/raster_scan_test build/bus_test build/shapes_test build/video_clock_test build/focus_test build/frame_delay_test build/picture_mod_test build/feedback_fade_test build/precision_test build/pointwise_table_test build/render_derive_test build/demo_patch_render_test build/video_player_test build/video_player_engine_test build/vru_bus_api_test build/vru_bus_api_golden_test build/vru_bus_api_service_test build/render_pool_stress_test build/vru_bus_api_v2_test build/vru_bus_api_precision_test build/vru_bus_v1_header_test $(TEST_V2_CLIENT_DEP) build/vru_bus_dylib_test $(API_TEST_DYLIB) $(TEST_SYPHON_DEP) $(TEST_DISPLAY_DEP) $(TEST_RENDER_DEP)
 	./build/octoscillator_test
 	./build/vector_osc_test
 	./build/video_probe_test
@@ -452,6 +476,8 @@ test: $(TEST_SYNC_MODULE_DEP) $(TEST_VIDEOOSC_MODULE_DEP) $(TEST_OCT_MODULE_DEP)
 	python3 scripts/check-video-osc-panel.py
 	python3 scripts/check-panel.py --header src/scan_sync_layout.hpp --width kScanSyncPanelWidth --macro SCAN_SYNC_LAYOUT --title "SCAN SYNC"
 	python3 scripts/check-panel.py --header src/raster_layout.hpp --width kRasterPanelWidth --macro RASTER_LAYOUT --title RASTER
+	python3 scripts/check-panel.py --header src/rotator_layout.hpp --width kRotatorPanelWidth --macro ROTATOR_LAYOUT --title ROTATOR
+	python3 scripts/check-panel.py --header src/vector_osc_layout.hpp --width kVectorOscPanelWidth --macro VECTOR_OSC_LAYOUT --title "VECTOR OSC"
 	python3 scripts/check-panel.py --header src/video_probe_layout.hpp --width kVideoProbePanelWidth --macro VIDEO_PROBE_LAYOUT --title "VIDEO PROBE" --preview kVideoProbePreview
 	$(TEST_OCT_MODULE_RUN)
 	$(TEST_SYNC_MODULE_RUN)
@@ -465,6 +491,8 @@ test: $(TEST_SYNC_MODULE_DEP) $(TEST_VIDEOOSC_MODULE_DEP) $(TEST_OCT_MODULE_DEP)
 	./build/picture_mod_test
 	./build/feedback_fade_test
 	./build/precision_test
+	./build/pointwise_table_test
+	./build/render_derive_test
 	./build/demo_patch_render_test
 	./build/video_player_test
 	./build/video_player_engine_test

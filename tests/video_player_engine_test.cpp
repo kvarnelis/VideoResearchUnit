@@ -377,6 +377,8 @@ struct Setup {
 	std::vector<std::string> ytDlpDirs;
 	int lookahead = 8;
 	bool useSlot = true;
+	// The pause before yt-dlp is run again after a 403. Short, so the tests stay quick.
+	double retryWait = 0.05;
 };
 
 class Rig {
@@ -391,6 +393,7 @@ public:
 		options.cacheDir = setup.cacheDir;
 		options.useCustomYtDlpDirs = true;
 		options.ytDlpDirs = setup.ytDlpDirs;
+		options.youtubeRetryWaitSeconds = setup.retryWait;
 		options.lookaheadFrames = setup.lookahead;
 		Probe* p = &probe;
 		options.factory = [p]() { return std::unique_ptr<FrameSource>(new FakeSource(p)); };
@@ -482,6 +485,21 @@ const char* const kBodyNoFormat =
 	"echo 'ERROR: [youtube] VRUtest0000: Requested format is not available. Use --list-formats for a list of available formats' >&2\n"
 	"exit 1\n";
 const char* const kBodyNoFile = "exit 0\n";
+// YouTube refuses the video data. yt-dlp gives up on a 403 at once and leaves half a file.
+const char* const kBodyRefused =
+	"printf 'partial' > \"$out\"\n"
+	"echo 'ERROR: unable to download video data: HTTP Error 403: Forbidden' >&2\n"
+	"exit 1\n";
+// Refused on the first run, fine from the second. The log has one line per run so far.
+const char* const kBodyRefusedOnce =
+	"runs=$(($(wc -l < \"$FAKE_YTDLP_LOG\")))\n"
+	"if [ \"$runs\" -le 1 ]; then\n"
+	"  printf 'partial' > \"$out\"\n"
+	"  echo 'ERROR: unable to download video data: HTTP Error 403: Forbidden' >&2\n"
+	"  exit 1\n"
+	"fi\n"
+	"printf 'fake video bytes' > \"$out\"\n"
+	"exit 0\n";
 const char* const kBodyHang = "echo $$ > \"$FAKE_YTDLP_PID\"\nexec sleep 30\n";
 const char* const kBodySlowOk = "sleep 0.6\nprintf 'fake video bytes' > \"$out\"\nexit 0\n";
 
@@ -1363,6 +1381,90 @@ void testYtDlpFailures() {
 		Rig rig(setup);
 		rig.engine->loadLink(kWatchUrl);
 		CHECK(waitState(*rig.engine, TransportState::Ready, 10.0));
+		CHECK(readLines(logPath()).size() == 1);
+	}
+}
+
+void testYtDlpRefusedDownload() {
+	currentTest = "yt-dlp refused by YouTube (403)";
+	std::error_code ec;
+	fs::remove_all(gRoot + "/cache-refused", ec);
+	Setup setup;
+	setup.cacheDir = gRoot + "/cache-refused";
+	const std::string cachePath = cachePathForId(setup.cacheDir, kId);
+
+	// Refused once: yt-dlp is run again and the video loads. No error is left on the panel.
+	setup.ytDlpDirs = {makeYtDlpDir("ytdlp-refused-once", "once", kBodyRefusedOnce)};
+	resetFakeLog();
+	{
+		Rig rig(setup);
+		rig.engine->loadLink(kWatchUrl);
+		CHECK(waitState(*rig.engine, TransportState::Ready, 10.0));
+		CHECK(readLines(logPath()).size() == 2);
+		CHECK(fileHasContent(cachePath));
+		const Snapshot s = rig.engine->snapshot();
+		CHECK(!s.messageIsError);
+		CHECK_TEXT(s.message, "");
+		CHECK(rig.probe.openedCopy().size() == 1);
+	}
+
+	// Refused every time: three runs, then the reason is shown and no half file is kept.
+	std::remove(cachePath.c_str());
+	setup.ytDlpDirs = {makeYtDlpDir("ytdlp-refused", "refused", kBodyRefused)};
+	resetFakeLog();
+	{
+		Rig rig(setup);
+		rig.engine->loadLink(kWatchUrl);
+		CHECK(waitState(*rig.engine, TransportState::Error, 10.0));
+		CHECK(readLines(logPath()).size() == 3);
+		const Snapshot s = rig.engine->snapshot();
+		CHECK(s.messageIsError);
+		CHECK_CONTAINS(s.message, "YouTube download failed.");
+		CHECK_CONTAINS(s.message, "HTTP Error 403");
+		CHECK(!fileExists(cachePath));
+		CHECK(rig.probe.openedCopy().empty());
+	}
+
+	// A failure that is not a refusal is final: one run. (kBodyFail says "Video unavailable".)
+	setup.ytDlpDirs = {makeYtDlpDir("ytdlp-refused-final", "final", kBodyFail)};
+	resetFakeLog();
+	{
+		Rig rig(setup);
+		rig.engine->loadLink(kWatchUrl);
+		CHECK(waitState(*rig.engine, TransportState::Error, 10.0));
+		CHECK(readLines(logPath()).size() == 1);
+	}
+
+	// Loading something else during the pause before the next run ends the pause: yt-dlp is not
+	// run again and the other source loads.
+	setup.ytDlpDirs = {makeYtDlpDir("ytdlp-refused-wait", "wait", kBodyRefused)};
+	setup.retryWait = 30.0;
+	resetFakeLog();
+	{
+		Rig rig(setup);
+		rig.engine->loadLink(kWatchUrl);
+		CHECK(waitFor([&] { return readLines(logPath()).size() == 1; }));
+		sleepMs(300);  // the first run has failed by now and the engine is in the pause
+		CHECK(rig.engine->snapshot().state == TransportState::Loading);
+		CHECK(!rig.engine->snapshot().messageIsError);
+		const Clock::time_point started = Clock::now();
+		rig.engine->loadFile(makeMedia("after-refusal.mp4"));
+		CHECK(waitState(*rig.engine, TransportState::Ready, 5.0));
+		CHECK(secondsSince(started) < 3.0);
+		CHECK(readLines(logPath()).size() == 1);
+		CHECK(rig.engine->settings().source == SourceKind::File);
+	}
+
+	// Removing the module during the pause does not wait the pause out.
+	resetFakeLog();
+	{
+		std::unique_ptr<Rig> rig(new Rig(setup));
+		rig->engine->loadLink(kWatchUrl);
+		CHECK(waitFor([&] { return readLines(logPath()).size() == 1; }));
+		sleepMs(300);
+		const Clock::time_point started = Clock::now();
+		rig.reset();
+		CHECK(secondsSince(started) < 3.0);
 		CHECK(readLines(logPath()).size() == 1);
 	}
 }
@@ -2277,6 +2379,7 @@ int main() {
 	testYtDlpDownloadAndCache();
 	testYtDlpSearchOrder();
 	testYtDlpFailures();
+	testYtDlpRefusedDownload();
 	testYtDlpProgressAndButtons();
 	testYtDlpStopsWithEngine();
 	testSaveAndRestore();

@@ -140,11 +140,20 @@ public:
 				f.assign(other.f.begin(), other.f.end());
 			}
 		}
+		else if (size() == other.size() && size() >= kParallelCopyBytes) {
+			// The same for a byte picture of 2 MiB or more (960 x 720 and up); a smaller one is quicker copied in one go.
+			unsigned char* dst = data();
+			const unsigned char* src = other.data();
+			render_pool::parallelSpan(size(), kParallelCopyBytes / 4, [dst, src](size_t begin, size_t end) {
+				std::memcpy(dst + begin, src + begin, end - begin);
+			});
+		}
 		else {
 			Bytes::assign(other.begin(), other.end());
 		}
 	}
 	static constexpr size_t kParallelCopyFloats = 1u << 20;
+	static constexpr size_t kParallelCopyBytes = 1u << 21;
 
 	// To a byte frame, in place, round half up. A byte frame is left alone.
 	void ensureU8() {

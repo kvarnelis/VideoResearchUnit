@@ -69,6 +69,10 @@ std::string msgYouTubeDownloading(int seconds);
 std::string msgYouTubeDownloadFailed(const std::string& detail);
 // Shown when yt-dlp reports that the video has no single-file H.264 MP4 version to download.
 std::string msgYouTubeNoMp4();
+// True when yt-dlp's last line says YouTube refused the request ("HTTP Error 403"). YouTube does
+// this now and then to a download that works a moment later, and yt-dlp gives up on it at once,
+// so the engine runs yt-dlp again. Every other reason is taken as final.
+bool youtubeFailureMayPass(const std::string& reason);
 
 enum class SourceKind { None, File, YouTube };
 

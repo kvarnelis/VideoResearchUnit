@@ -38,7 +38,7 @@ public:
 
 	VideoGraphRenderer();
 
-	enum class Status { Ok, Empty, Cycle };
+	enum class Status { Ok, Empty, Cycle, Contended };
 
 	// One picture of one root bus. It is beginPass() followed by renderBusInPass(), and the returned frame stays
 	// valid until the next call. It is empty when nothing renders.
@@ -174,6 +174,14 @@ private:
 
 	std::vector<Frame> pool;
 	std::vector<float> modLuma;  // brightness of the modulation picture, one value per pixel (renderModulation)
+	RampsGeometry rampsGeometry;  // Ramps' ANGLE coordinates at this renderer's picture size (renderRamps)
+	// Bus Mixer's table for byte pictures with no matte (renderBusMixerFrame): the output byte for every pair of input
+	// bytes, kept while MODE and the mix are unchanged. busMixerTableWork is the small picture it is read out of.
+	std::vector<unsigned char> busMixerTable;
+	std::vector<unsigned char> busMixerTableWork;
+	int busMixerTableMode = 0;
+	float busMixerTableMix = 0.f;
+	bool busMixerTableValid = false;
 	Frame work;
 	Frame none;
 	Frame lastGood;

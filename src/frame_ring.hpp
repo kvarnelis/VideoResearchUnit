@@ -59,5 +59,11 @@ int frameRingCount(int slotId);
 // Age is frameCounter minus the stored counter, taken modulo the counter's wrap (2^30), so it survives the wrap;
 // a stored counter that would be in the future (age beyond half the wrap) is ignored. False when none qualifies.
 bool frameRingReadAtLeastAge(int slotId, int frameCounter, int minAge, FrameRingFrame& out);
+// The Frame Delay's read. As frameRingReadAtLeastAge, with one difference: once the slot has given a picture this way
+// since its last clear, a read that finds none old enough gives the oldest stored picture instead of failing. So a
+// delay that is made longer shows its oldest picture (a short freeze) until one is old enough, where it used to go
+// black for as many ticks as it was lengthened by. Before the first picture (the start, a clear, a new slot) it
+// fails exactly as frameRingReadAtLeastAge does.
+bool frameRingReadDelayed(int slotId, int frameCounter, int minAge, FrameRingFrame& out);
 // Each clear counter is handled once; a new push can follow the clear immediately.
 void frameRingClear(int slotId, int clearCounter);

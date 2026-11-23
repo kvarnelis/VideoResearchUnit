@@ -1,8 +1,10 @@
 #include "plugin.hpp"
 #include "panel_style.hpp"
+#include "panel_items.hpp"
 #include "rotator_math.hpp"
 #include "video_bus.hpp"
 
+#include <atomic>
 #include <cmath>
 
 // ZOOM is stored as octaves (-1..1) and shown as a factor: 1/8 (a postage stamp) to 8x (a close-up).
@@ -22,13 +24,18 @@ struct RotatorSpinQuantity : ParamQuantity {
 struct Rotator : Module {
 	enum ParamId { ANGLE_PARAM, SPIN_PARAM, ZOOM_PARAM, X_PARAM, Y_PARAM, PIVOT_X_PARAM, PIVOT_Y_PARAM,
 		EDGE_PARAM, FOLDS_PARAM, STEP_PARAM, GLIDE_PARAM, PARAMS_LEN };
-	enum InputId { VIDEO_BUS_INPUT, ANGLE_INPUT, SPIN_INPUT, ZOOM_INPUT, X_INPUT, Y_INPUT, NOTCH_INPUT, RESET_INPUT, INPUTS_LEN };
+	// Input ids are append-only: the jacks added after RESET_INPUT are the CV for the controls that had none.
+	enum InputId { VIDEO_BUS_INPUT, ANGLE_INPUT, SPIN_INPUT, ZOOM_INPUT, X_INPUT, Y_INPUT, NOTCH_INPUT, RESET_INPUT,
+		PIVOT_X_INPUT, PIVOT_Y_INPUT, EDGE_INPUT, FOLDS_INPUT, STEP_INPUT, GLIDE_INPUT, INPUTS_LEN };
 	enum OutputId { VIDEO_BUS_OUTPUT, OUTPUTS_LEN };
 	enum LightId { SIGNAL_LIGHT, LIGHTS_LEN };
 	VideoBusOwner videoBus;
 	RotatorState state;
 	dsp::SchmittTrigger notchTrigger;
 	dsp::SchmittTrigger resetTrigger;
+	// What EDGE, FOLDS, STEP and GLIDE come to with their CV added, for the readouts under the knobs.
+	std::atomic<int> shownEdge{0}, shownFolds{1}, shownStep{2};
+	std::atomic<float> shownGlide{0.f};
 
 	Rotator() {
 		config(PARAMS_LEN, INPUTS_LEN, OUTPUTS_LEN, LIGHTS_LEN);
@@ -51,6 +58,12 @@ struct Rotator : Module {
 		configInput(Y_INPUT, "Y CV");
 		configInput(NOTCH_INPUT, "Notch trigger");
 		configInput(RESET_INPUT, "Reset trigger");
+		configInput(PIVOT_X_INPUT, "Pivot X CV (10 V moves a picture width)");
+		configInput(PIVOT_Y_INPUT, "Pivot Y CV (10 V moves a picture height)");
+		configInput(EDGE_INPUT, "Edge CV (10 V sweeps Black to Mirror)");
+		configInput(FOLDS_INPUT, "Folds CV (10 V sweeps Off to 12)");
+		configInput(STEP_INPUT, "Notch step CV (10 V sweeps 1/16 to 1/4 turn)");
+		configInput(GLIDE_INPUT, "Glide CV (10 V is 2 s)");
 		configOutput(VIDEO_BUS_OUTPUT, "Video bus token");
 	}
 
@@ -62,10 +75,11 @@ struct Rotator : Module {
 		};
 		const bool notch = notchTrigger.process(inputs[NOTCH_INPUT].getVoltage(), 0.1f, 2.f);
 		const bool reset = resetTrigger.process(inputs[RESET_INPUT].getVoltage(), 0.1f, 2.f);
-		const int stepIndex = static_cast<int>(std::round(params[STEP_PARAM].getValue()));
+		const int stepIndex = rotatorSteppedCv(params[STEP_PARAM].getValue(), inputs[STEP_INPUT].getVoltage(), 0.4f, 0, 4);
+		const float glide = rotatorCv(params[GLIDE_PARAM].getValue(), inputs[GLIDE_INPUT].getVoltage(), 0.2f, 0.f, 2.f);
 		// SPIN CV: 5 V is full scale, so a bipolar LFO swings it both ways.
 		const float spinKnob = clamp(params[SPIN_PARAM].getValue() + inputs[SPIN_INPUT].getVoltage() * 0.2f, -1.f, 1.f);
-		state.advance(args.sampleTime, spinKnob, rotatorStepTurns(stepIndex), params[GLIDE_PARAM].getValue(), notch, reset);
+		state.advance(args.sampleTime, spinKnob, rotatorStepTurns(stepIndex), glide, notch, reset);
 
 		const int inBus = inputs[VIDEO_BUS_INPUT].isConnected() ? videoBusIdFromVoltage(inputs[VIDEO_BUS_INPUT].getVoltage()) : 1;
 		const int outBus = videoBus.id();
@@ -75,10 +89,14 @@ struct Rotator : Module {
 		p.zoom = std::exp2(3.f * cv(ZOOM_PARAM, ZOOM_INPUT, -1.f, 1.f));
 		p.offsetX = cv(X_PARAM, X_INPUT, -0.5f, 0.5f);
 		p.offsetY = cv(Y_PARAM, Y_INPUT, -0.5f, 0.5f);
-		p.pivotX = params[PIVOT_X_PARAM].getValue();
-		p.pivotY = params[PIVOT_Y_PARAM].getValue();
-		p.edge = static_cast<int>(clamp(std::round(params[EDGE_PARAM].getValue()), 0.f, 3.f));
-		p.folds = static_cast<int>(clamp(std::round(params[FOLDS_PARAM].getValue()), 1.f, 12.f));
+		p.pivotX = rotatorCv(params[PIVOT_X_PARAM].getValue(), inputs[PIVOT_X_INPUT].getVoltage(), 0.1f, -0.5f, 0.5f);
+		p.pivotY = rotatorCv(params[PIVOT_Y_PARAM].getValue(), inputs[PIVOT_Y_INPUT].getVoltage(), 0.1f, -0.5f, 0.5f);
+		p.edge = rotatorSteppedCv(params[EDGE_PARAM].getValue(), inputs[EDGE_INPUT].getVoltage(), 0.3f, 0, 3);
+		p.folds = rotatorSteppedCv(params[FOLDS_PARAM].getValue(), inputs[FOLDS_INPUT].getVoltage(), 1.1f, 1, 12);
+		shownEdge.store(p.edge, std::memory_order_relaxed);
+		shownFolds.store(p.folds, std::memory_order_relaxed);
+		shownStep.store(stepIndex, std::memory_order_relaxed);
+		shownGlide.store(glide, std::memory_order_relaxed);
 		if (active) videoBusPublishRotator(outBus, inBus, p);
 		else videoBusClear(outBus);
 		outputs[VIDEO_BUS_OUTPUT].setVoltage(videoBus.voltage());
@@ -98,7 +116,16 @@ struct RotatorReadout : TransparentWidget {
 	int paramId = 0;
 
 	std::string text() const {
-		const float v = module ? module->params[paramId].getValue() : (paramId == Rotator::STEP_PARAM ? 2.f : paramId == Rotator::FOLDS_PARAM ? 1.f : 0.f);
+		// With a module, the value after its CV is added, so the word follows what a cable is doing.
+		float v = paramId == Rotator::STEP_PARAM ? 2.f : paramId == Rotator::FOLDS_PARAM ? 1.f : 0.f;
+		if (module) {
+			switch (paramId) {
+			case Rotator::EDGE_PARAM: v = static_cast<float>(module->shownEdge.load(std::memory_order_relaxed)); break;
+			case Rotator::FOLDS_PARAM: v = static_cast<float>(module->shownFolds.load(std::memory_order_relaxed)); break;
+			case Rotator::STEP_PARAM: v = static_cast<float>(module->shownStep.load(std::memory_order_relaxed)); break;
+			default: v = module->shownGlide.load(std::memory_order_relaxed); break;
+			}
+		}
 		const int i = static_cast<int>(std::round(v));
 		switch (paramId) {
 		case Rotator::EDGE_PARAM: {
@@ -126,6 +153,8 @@ struct RotatorReadout : TransparentWidget {
 	}
 };
 
+#include "rotator_layout.hpp"
+
 struct RotatorWidget : ModuleWidget {
 	void addReadout(Rotator* module, Vec centreMm, int paramId) {
 		auto* r = new RotatorReadout;
@@ -139,66 +168,18 @@ struct RotatorWidget : ModuleWidget {
 
 	RotatorWidget(Rotator* module) {
 		using namespace rasterlab_panel;
-		const float W = 71.12f;
-		const float P = 13.f;
 		setModule(module);
 		setPanel(createPanel(asset::plugin(pluginInstance, "res/Rotator.svg")));
-		addPanelHeader(this, W, "20", "ROTATOR");
-
-		// Row 1: where the picture is. Each knob has its CV jack straight below it.
-		const char* knobs[] = {"ANGLE", "SPIN", "ZOOM", "X", "Y"};
-		const int knobIds[] = {Rotator::ANGLE_PARAM, Rotator::SPIN_PARAM, Rotator::ZOOM_PARAM, Rotator::X_PARAM, Rotator::Y_PARAM};
-		const int jackIds[] = {Rotator::ANGLE_INPUT, Rotator::SPIN_INPUT, Rotator::ZOOM_INPUT, Rotator::X_INPUT, Rotator::Y_INPUT};
-		for (int i = 0; i < 5; ++i) {
-			const Vec knob(rowX(W, 5, i, P), 30.f);
-			addKnobLabel(this, knob, knobs[i]);
-			addParam(createParamCentered<RoundBlackKnob>(mm2px(knob), module, knobIds[i]));
-			const Vec jack(rowX(W, 5, i, P), 46.f);
-			addJackLabel(this, jack, "CV");
-			addInput(createInputCentered<PJ301MPort>(mm2px(jack), module, jackIds[i]));
+		addPanelHeader(this, kRotatorPanelWidth, "20", "ROTATOR");
+		PANEL_PLACE_ALL(ROTATOR_LAYOUT)
+		// The setting of each second-row knob, written under it.
+		for (int id : {Rotator::EDGE_PARAM, Rotator::FOLDS_PARAM, Rotator::STEP_PARAM, Rotator::GLIDE_PARAM}) {
+			if (ParamWidget* knob = getParam(id)) {
+				const Vec centre = knob->box.getCenter();
+				const float perMm = mm2px(1.f);
+				addReadout(module, Vec(centre.x / perMm, centre.y / perMm + R_KNOB + 3.6f), id);
+			}
 		}
-		addChild(createPanelRule(4.f, W - 4.f, 55.f));
-
-		// Row 2: the pivot, then what shows past the border and the wedges.
-		const char* pivots[] = {"PIVOT X", "PIVOT Y"};
-		for (int i = 0; i < 2; ++i) {
-			const Vec pos(rowX(W, 4, i, 16.f), 69.f);
-			addKnobLabel(this, pos, pivots[i]);
-			addParam(createParamCentered<RoundBlackKnob>(mm2px(pos), module, Rotator::PIVOT_X_PARAM + i));
-		}
-		const Vec edge(rowX(W, 4, 2, 16.f), 69.f);
-		addKnobLabel(this, edge, "EDGE");
-		addParam(createParamCentered<RoundBlackSnapKnob>(mm2px(edge), module, Rotator::EDGE_PARAM));
-		addReadout(module, Vec(edge.x, edge.y + R_KNOB + 3.6f), Rotator::EDGE_PARAM);
-		const Vec folds(rowX(W, 4, 3, 16.f), 69.f);
-		addKnobLabel(this, folds, "FOLDS");
-		addParam(createParamCentered<RoundBlackSnapKnob>(mm2px(folds), module, Rotator::FOLDS_PARAM));
-		addReadout(module, Vec(folds.x, folds.y + R_KNOB + 3.6f), Rotator::FOLDS_PARAM);
-		addChild(createPanelRule(4.f, W - 4.f, 82.f));
-
-		// Row 3: the indexing table. A clock into NOTCH clicks the picture round by STEP, taking GLIDE.
-		const Vec step(rowX(W, 4, 0, 16.f), 97.f);
-		addKnobLabel(this, step, "STEP");
-		addParam(createParamCentered<RoundBlackSnapKnob>(mm2px(step), module, Rotator::STEP_PARAM));
-		addReadout(module, Vec(step.x, step.y + R_KNOB + 3.6f), Rotator::STEP_PARAM);
-		const Vec glide(rowX(W, 4, 1, 16.f), 97.f);
-		addKnobLabel(this, glide, "GLIDE");
-		addParam(createParamCentered<RoundBlackKnob>(mm2px(glide), module, Rotator::GLIDE_PARAM));
-		addReadout(module, Vec(glide.x, glide.y + R_KNOB + 3.6f), Rotator::GLIDE_PARAM);
-		const Vec notch(rowX(W, 4, 2, 16.f), 97.f);
-		addJackLabel(this, notch, "NOTCH");
-		addInput(createInputCentered<PJ301MPort>(mm2px(notch), module, Rotator::NOTCH_INPUT));
-		const Vec reset(rowX(W, 4, 3, 16.f), 97.f);
-		addJackLabel(this, reset, "RESET");
-		addInput(createInputCentered<PJ301MPort>(mm2px(reset), module, Rotator::RESET_INPUT));
-
-		const Vec busIn(rowX(W, 5, 0, P), 118.f);
-		addJackLabel(this, busIn, "BUS IN");
-		addInput(createInputCentered<PJ301MPort>(mm2px(busIn), module, Rotator::VIDEO_BUS_INPUT));
-		const Vec sig(rowX(W, 5, 2, P), 118.f);
-		addJackLabel(this, sig, "SIG");
-		addChild(createLightCentered<MediumLight<GreenLight>>(mm2px(sig), module, Rotator::SIGNAL_LIGHT));
-		addPlatedOutput<PJ301MPort>(this, Vec(rowX(W, 5, 4, P), 118.f), "BUS", module, Rotator::VIDEO_BUS_OUTPUT);
 	}
 };
 

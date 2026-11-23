@@ -40,6 +40,10 @@ struct EngineOptions {
 	// /usr/local/bin, then PATH. Tests turn this on to point at a fake yt-dlp.
 	bool useCustomYtDlpDirs = false;
 	std::vector<std::string> ytDlpDirs;
+	// How many times yt-dlp is run for one link when YouTube refuses the download (HTTP 403), and
+	// the pause before each new run. Any other failure is shown after the first run.
+	int youtubeAttempts = 3;
+	double youtubeRetryWaitSeconds = 2.0;
 	// Empty: the AVFoundation decoder on macOS (and a decoder that always fails elsewhere).
 	FrameSourceFactory factory;
 	// The soundtrack follows the picture clock. When the sound drifts further than this from it
@@ -175,8 +179,13 @@ private:
 	void beginLoad(bool youtube, const std::string& text);
 	void loadSource(bool youtube, const std::string& text);
 	bool openPath(const std::string& path, std::string& error);
+	// One run of yt-dlp. `started` is when the first run for this link began, so the seconds on the
+	// panel keep counting across runs. `mayPass` comes back true when another run could succeed.
 	Download download(const std::string& exe, const std::string& videoId, const std::string& cachePath,
-		std::string& error);
+		Clock::time_point started, std::string& error, bool& mayPass);
+	// The pause between two runs. False when a new request or shutdown ended it early.
+	bool waitBeforeRetry(Clock::time_point started);
+	void showDownloadSeconds(Clock::time_point started, int& shownSeconds);
 	void fail(const std::string& message);
 	void unloadSource();
 	void enterError(const std::string& message);

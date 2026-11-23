@@ -29,3 +29,20 @@ inline void configSlow(Module* m, int id) {
 	q->snapEnabled = true;
 	q->description = kSlowDescription;
 }
+
+// Call in the widget's constructor after the SLOW knob has been placed. Rack spreads a knob's whole range over the same
+// length of drag however few steps it has (in its linear mode: pixels x 0.001 x speed x range x 2 pi / the knob's angle
+// range), and a snapped knob moves only when a whole step has built up. With 8 steps that is about 110 pixels of drag
+// for one step, so a normal short drag did nothing and the knob seemed stuck. This sets the knob's speed so one step
+// takes kSlowPixelsPerStep pixels at Rack's default sensitivity; Ctrl and Shift still slow it down and speed it up.
+constexpr float kSlowPixelsPerStep = 25.f;
+
+inline void quickenSlowKnob(ModuleWidget* widget, int id) {
+	auto* knob = dynamic_cast<app::Knob*>(widget->getParam(id));
+	if (!knob || !(knob->maxAngle > knob->minAngle)) {
+		return;
+	}
+	const float range = static_cast<float>(vclock::kSlowSteps - 1);
+	const float rangeRatio = range * 2.f * static_cast<float>(M_PI) / (knob->maxAngle - knob->minAngle);
+	knob->speed = 1.f / (0.001f * kSlowPixelsPerStep * rangeRatio);
+}

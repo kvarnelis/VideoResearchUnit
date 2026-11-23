@@ -692,27 +692,54 @@ void PreviewVideoEngine::hsvToRgb(float h, float s, float v, float& r, float& g,
 
 namespace {
 // Ramps: the pixel loop, written once over a destination that is either bytes or floats.
+//
+// `angle`, when given, holds the ANGLE axis coordinate of every pixel (RampsGeometry): it depends only on the size
+// of the picture, and its arctangent is most of what a pixel costs. A layer blends two neighbouring wave shapes, so
+// only those two are worked out; which two is decided once per picture.
 template <class Dest>
-void rampsInto(Dest dst, int width, int height, const RampsParams& params, const float* modLuma = nullptr) {
+void rampsInto(Dest dst, int width, int height, const RampsParams& params, const float* modLuma = nullptr, const float* angle = nullptr) {
 	const RampsParams p = params;
 	const float cx = (width - 1) * 0.5f;
 	const float cy = (height - 1) * 0.5f;
 	const float radius = std::min(width, height) * 0.5f;
 	auto fract = [](float v) { return v - std::floor(v); };
-	auto layer = [&](int axis, float freq, float phase, float wave, int x, int y) {
+	// Which two shapes a layer blends, and how far between them: the same for every pixel.
+	struct Morph {
+		int segment;
+		float t;
+	};
+	auto morphOf = [](float wave) {
+		const float morph = clamp01(wave) * 3.f;
+		const int segment = std::min(2, static_cast<int>(morph));
+		return Morph {segment, morph - segment};
+	};
+	const Morph morphA = morphOf(p.waveA);
+	const Morph morphB = morphOf(p.waveB);
+	auto layer = [&](int axis, float freq, float phase, const Morph& m, int x, int y) {
 		const float dx = x - cx;
 		const float dy = y - cy;
 		float u = static_cast<float>(x) / width;
 		if (axis == 1) u = static_cast<float>(y) / height;
 		else if (axis == 2) u = std::sqrt(dx * dx + dy * dy) / radius;
-		else if (axis == 3) u = fract(std::atan2(dy, dx) / (2.f * kPi));
+		else if (axis == 3) u = angle != nullptr ? angle[static_cast<size_t>(y) * static_cast<size_t>(width) + static_cast<size_t>(x)] : fract(std::atan2(dy, dx) / (2.f * kPi));
 		const float pos = fract(u * freq + phase);
 		const float tri = 1.f - std::abs(2.f * pos - 1.f);
-		const float shapes[4] = {pos, tri, 0.5f - 0.5f * std::cos(2.f * kPi * pos), clamp01((tri - 0.5f) * 4.f + 0.5f)};
-		const float morph = clamp01(wave) * 3.f;
-		const int segment = std::min(2, static_cast<int>(morph));
-		const float t = morph - segment;
-		return shapes[segment] + (shapes[segment + 1] - shapes[segment]) * t;
+		// The four shapes are saw (pos), triangle, sine and a soft square; segment s blends shape s into shape s + 1.
+		float from;
+		float to;
+		if (m.segment == 0) {
+			from = pos;
+			to = tri;
+		}
+		else if (m.segment == 1) {
+			from = tri;
+			to = 0.5f - 0.5f * std::cos(2.f * kPi * pos);
+		}
+		else {
+			from = 0.5f - 0.5f * std::cos(2.f * kPi * pos);
+			to = clamp01((tri - 0.5f) * 4.f + 0.5f);
+		}
+		return from + (to - from) * m.t;
 	};
 	// Rows are independent, so bands of rows go to the pool; every pixel is computed exactly as before.
 	render_pool::parallelSpan(static_cast<size_t>(height), 8u, [&](size_t rowBegin, size_t rowEnd) {
@@ -720,8 +747,8 @@ void rampsInto(Dest dst, int width, int height, const RampsParams& params, const
 		for (int x = 0; x < width; ++x) {
 			// MOD IN: the picture offsets layer A's phase, up to one cycle either way at full amount.
 			const float phaseA = modLuma != nullptr ? p.phaseA + p.modAmount * 2.f * (modLuma[static_cast<size_t>(y) * static_cast<size_t>(width) + static_cast<size_t>(x)] - 0.5f) : p.phaseA;
-			const float a = layer(p.axisA, p.freqA, phaseA, p.waveA, x, y);
-			const float b = layer(p.axisB, p.freqB, p.phaseB, p.waveB, x, y);
+			const float a = layer(p.axisA, p.freqA, phaseA, morphA, x, y);
+			const float b = layer(p.axisB, p.freqB, p.phaseB, morphB, x, y);
 			float v = a;
 			if (p.mix == 1) v = 0.5f * (a + b);
 			else if (p.mix == 2) v = 0.5f + 0.5f * (a - b);
@@ -738,6 +765,30 @@ void rampsInto(Dest dst, int width, int height, const RampsParams& params, const
 }
 }
 
+const float* RampsGeometry::angleFor(int width, int height) {
+	const size_t pixels = static_cast<size_t>(width) * static_cast<size_t>(height);
+	if (width != angleWidth || height != angleHeight || angle.size() != pixels) {
+		angle.resize(pixels);
+		angleWidth = width;
+		angleHeight = height;
+		const float cx = (width - 1) * 0.5f;
+		const float cy = (height - 1) * 0.5f;
+		float* out = angle.data();
+		render_pool::parallelSpan(static_cast<size_t>(height), 8u, [=](size_t rowBegin, size_t rowEnd) {
+			for (int y = static_cast<int>(rowBegin); y < static_cast<int>(rowEnd); ++y) {
+				for (int x = 0; x < width; ++x) {
+					// The same expression the pixel loop uses when it has no table.
+					const float dx = x - cx;
+					const float dy = y - cy;
+					const float turn = std::atan2(dy, dx) / (2.f * kPi);
+					out[static_cast<size_t>(y) * static_cast<size_t>(width) + static_cast<size_t>(x)] = turn - std::floor(turn);
+				}
+			}
+		});
+	}
+	return angle.data();
+}
+
 void renderRamps(std::vector<unsigned char>& rgba, int width, int height, const RampsParams& params) {
 	if (width <= 0 || height <= 0) {
 		rgba.clear();
@@ -747,21 +798,23 @@ void renderRamps(std::vector<unsigned char>& rgba, int width, int height, const 
 	rampsInto(ByteDest<StoreRule::Lround>{rgba.data()}, width, height, params);
 }
 
-void renderRamps(VideoFrame& out, int width, int height, const RampsParams& params, bool floatOut, const float* modLuma) {
+void renderRamps(VideoFrame& out, int width, int height, const RampsParams& params, bool floatOut, const float* modLuma, RampsGeometry* geometry) {
 	if (width <= 0 || height <= 0) {
 		out.beginU8(0);
 		out.clear();
 		return;
 	}
 	const size_t count = static_cast<size_t>(width) * static_cast<size_t>(height) * 4u;
+	// The angle table is made (once per size) only when a layer is on the ANGLE axis.
+	const float* angle = geometry != nullptr && (params.axisA == 3 || params.axisB == 3) ? geometry->angleFor(width, height) : nullptr;
 	if (floatOut) {
 		out.beginF32(count);
-		rampsInto(FloatDest{out.f.data()}, width, height, params, modLuma);
+		rampsInto(FloatDest{out.f.data()}, width, height, params, modLuma, angle);
 	}
 	else {
 		out.format = FrameFormat::U8;
 		out.resize(count);
-		rampsInto(ByteDest<StoreRule::Lround>{out.data()}, width, height, params, modLuma);
+		rampsInto(ByteDest<StoreRule::Lround>{out.data()}, width, height, params, modLuma, angle);
 	}
 }
 
@@ -810,11 +863,24 @@ void renderShapes(std::vector<unsigned char>& rgba, int width, int height, const
 	shapesInto(ByteDest<StoreRule::Lround>{rgba.data()}, width, height, params);
 }
 
+namespace {
+std::atomic<ShapesAccelerator> shapesAccelerator{nullptr};
+}
+
+void setShapesAccelerator(ShapesAccelerator accelerator) {
+	shapesAccelerator.store(accelerator, std::memory_order_relaxed);
+}
+
 void renderShapes(VideoFrame& out, int width, int height, const ShapesParams& params, bool floatOut) {
 	if (width <= 0 || height <= 0) {
 		out.beginU8(0);
 		out.clear();
 		return;
+	}
+	if (const ShapesAccelerator accelerator = shapesAccelerator.load(std::memory_order_relaxed)) {
+		if (accelerator(out, width, height, params, floatOut)) {
+			return;
+		}
 	}
 	const size_t count = static_cast<size_t>(width) * static_cast<size_t>(height) * 4u;
 	if (floatOut) {
